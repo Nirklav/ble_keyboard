@@ -1,0 +1,56 @@
+[package]
+name = "keyboard"
+version = "0.1.0"
+authors = ["Nirklav <mrAnton911@gmail.com>"]
+edition = "2021"
+resolver = "2"
+rust-version = "1.82"
+
+[[bin]]
+name = "keyboard"
+harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors
+
+[profile.release]
+opt-level = "s"
+
+[profile.dev]
+debug = true    # Symbols are nice and they don't increase the size on Flash
+opt-level = "z"
+
+[features]
+default = ["std", "embassy", "esp-idf-svc/native"]
+
+pio = ["esp-idf-svc/pio"]
+std = ["alloc", "esp-idf-svc/binstart", "esp-idf-svc/std"]
+alloc = ["esp-idf-svc/alloc"]
+nightly = ["esp-idf-svc/nightly"]
+experimental = ["esp-idf-svc/experimental"]
+embassy = ["esp-idf-svc/embassy-sync", "esp-idf-svc/critical-section", "esp-idf-svc/embassy-time-driver"]
+
+[dependencies]
+log = { version = "0.4", default-features = false }
+esp-idf-svc = { version = "0.52.1", features = ["critical-section", "embassy-time-driver", "embassy-sync"] }
+esp-idf-sys = { version = "0.37.2", default-features = false }
+embedded-svc = "0.29"
+embedded-hal = "1.0.0"
+embassy-time = { version = "0.5", features = ["generic-queue-8"] }
+
+embedded-graphics = "0.8"
+display-interface = "0.5"
+ssd1306 = "0.8.1"
+anyhow = "1.0"
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+serde_repr = "0.1"
+chrono = "0.4.31"
+bitflags = "2.4.2"
+esp32-nimble = { version = "0.12" }
+zerocopy = "0.8"
+zerocopy-derive = "0.8"
+mcp23s17 = "0.2.0"
+
+[build-dependencies]
+embuild = "0.33.0"
+
+[package.metadata.esp-idf-sys]
+esp_idf_tools_install_dir = "custom:../.embuild/"
