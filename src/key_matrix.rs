@@ -40,11 +40,11 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
         H
     }
 
-    pub fn take_change(&mut self, x: usize, y: usize) -> Option<bool> {
+    pub fn take_change(&mut self, x: usize, y: usize) -> KeyChange {
         self.keys[x][y].take_change()
     }
 
-    pub fn scan(&mut self, last_delay_ms: u16) -> anyhow::Result<()> {
+    pub fn scan(&mut self, last_delay_ms: u32) -> anyhow::Result<()> {
         for column in self.column_pins {
             map_err!(self.ext.set_high(column));
         }
@@ -74,7 +74,7 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
 struct Key {
     pub state: bool,
     changed: bool,
-    debounce_left_ms: u16
+    debounce_left_ms: u32
 }
 
 impl Key {
@@ -86,7 +86,7 @@ impl Key {
         }
     }
 
-    pub fn set(&mut self, v: bool, ms: u16) {
+    pub fn set(&mut self, v: bool, ms: u32) {
         if self.debounce_left_ms > 0 {
             if self.debounce_left_ms < ms {
                 self.debounce_left_ms = 0;
@@ -108,12 +108,18 @@ impl Key {
         self.debounce_left_ms = 5;
     }
 
-    pub fn take_change(&mut self) -> Option<bool> {
-        if self.changed {
-            self.changed = false;
-            return Some(self.state);
-        }
-
-        None
+    pub fn take_change(&mut self) -> KeyChange {
+        let change = KeyChange { 
+            state: self.state, 
+            changed: self.changed
+        };
+        self.changed = false;
+        change
     }
+}
+
+#[derive(Clone, Copy)]
+pub struct KeyChange {
+    pub state: bool, 
+    pub changed: bool 
 }

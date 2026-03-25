@@ -1,17 +1,19 @@
 use std::{ffi::c_void, fmt::Display};
 
-use anyhow::bail;
 use bitflags::bitflags;
+use anyhow::bail;
 use esp32_nimble::{enums::{AuthReq, OwnAddrType, SecurityIOCap}, BLEDevice};
 use log::info;
 use zerocopy_derive::{Immutable, IntoBytes};
 
 pub mod ble_mouse_keyboard;
+mod conn_params;
 
 #[allow(unused)]
 #[repr(packed)]
+#[derive(IntoBytes, Immutable)]
 struct MouseReport {
-    buttons: MouseKey,
+    buttons: u8,
     x: i8,
     y: i8,
     wheel: i8,
@@ -20,7 +22,7 @@ struct MouseReport {
 
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct MouseKey: u8 {
+    pub struct MouseKey : u8 {
         const None = 0;
         const Left = 1;
         const Right = 2;
@@ -43,86 +45,53 @@ struct KeyReport {
 #[repr(packed)]
 #[derive(Clone, Copy, IntoBytes, Immutable)]
 struct MediaKeyReport {
-    first: u8,
-    second: u8
+    keys: u8
 }
 
 #[derive(Clone, Copy)]
 pub struct MediaKey {
     name: &'static str,
-    report: MediaKeyReport
+    keys: u8
 }
 
 #[allow(unused)]
 impl MediaKey {
     pub fn next_track() -> Self {
-        MediaKey::create("Next track", 1, 0)
+        MediaKey::create("Next track", 1)
     }
-    
+
     pub fn previous_track() -> Self {
-        MediaKey::create("Previous track", 2, 0)
+        MediaKey::create("Previous track", 2)
     }
 
     pub fn stop() -> Self {
-        MediaKey::create("Stop", 4, 0)
+        MediaKey::create("Stop", 4)
     }
 
     pub fn play_pause() -> Self {
-        MediaKey::create("Play/Pause", 8, 0)
+        MediaKey::create("Play/Pause", 8)
     }
 
     pub fn mute() -> Self {
-        MediaKey::create("Mute", 16, 0)
+        MediaKey::create("Mute", 16)
     }
 
     pub fn volume_up() -> Self {
-        MediaKey::create("Volume Up", 32, 0)
+        MediaKey::create("Volume Up", 32)
     }
 
     pub fn volume_down() -> Self {
-        MediaKey::create("Volume Down", 64, 0)
-    }
-
-    pub fn www_home() -> Self {
-        MediaKey::create("WWW Home", 128, 0)
-    }
-
-    pub fn local_machine_browser() -> Self {
-        MediaKey::create("Browser", 0, 1) // Opens "My Computer" on Windows
+        MediaKey::create("Volume Down", 64)
     }
 
     pub fn calculator() -> Self {
-        MediaKey::create("Calculator", 0, 2)
+        MediaKey::create("Calculator", 128)
     }
 
-    pub fn www_bookmarks() -> Self {
-        MediaKey::create("WWW Bookmarks", 0, 4)
-    }
-
-    pub fn www_search() -> Self {
-        MediaKey::create("WWW Search", 0, 8)
-    }
-
-    pub fn www_stop() -> Self {
-        MediaKey::create("WWW Stop", 0, 16)
-    }
-
-    pub fn www_back() -> Self {
-        MediaKey::create("WWW Back", 0, 32)
-    }
-
-    pub fn consumer_control_configuration() -> Self {
-        MediaKey::create("Consumer control config", 0, 64) // Media Selection
-    }
-
-    pub fn email_reader() -> Self {
-        MediaKey::create("Email", 0, 128)
-    }
-
-    fn create(name: &'static str, first: u8, second: u8) -> Self {
+    fn create(name: &'static str, keys: u8) -> Self {
         MediaKey {
             name,
-            report: MediaKeyReport { first, second }
+            keys
         }
     }
 }
@@ -133,151 +102,138 @@ impl Display for MediaKey {
     }
 }
 
-#[allow(unused)]
-pub const KEYBOARD_MOD_LEFT_CTRL : u8 = 0x01;
-#[allow(unused)]
-pub const KEYBOARD_MOD_LEFT_SHIFT : u8 = 0x02;
-#[allow(unused)]
-pub const KEYBOARD_MOD_LEFT_ALT : u8 = 0x04;
-#[allow(unused)]
-pub const KEYBOARD_MOD_LEFT_GUI : u8 = 0x08;
-#[allow(unused)]
-pub const KEYBOARD_MOD_RIGHT_CTRL : u8 = 0x10;
-#[allow(unused)]
-pub const KEYBOARD_MOD_RIGHT_SHIFT : u8 = 0x20;
-#[allow(unused)]
-pub const KEYBOARD_MOD_RIGHT_ALT : u8 = 0x40;
-#[allow(unused)]
-pub const KEYBOARD_MOD_RIGHT_GUI : u8 = 0x80;
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct KeyMod : u8 {
+        const LeftCtrl = 0x01;
+        const LeftShift = 0x02;
+        const LeftAlt = 0x04;
+        const LeftGui = 0x08;
+        const RightCtrl = 0x10;
+        const RightShift = 0x20;
+        const RightAlt = 0x40;
+        const RightGui = 0x80;
+    }
+}
 
-const KEYBOARD_KEY_SHIFT: u8 = 0x80;
-const KEYBOARD_ASCII_MAP: &[u8] = &[
-    0x00,                  // NUL
-    0x00,                  // SOH
-    0x00,                  // STX
-    0x00,                  // ETX
-    0x00,                  // EOT
-    0x00,                  // ENQ
-    0x00,                  // ACK
-    0x00,                  // BEL
-    0x2a,                  // BS	Backspace
-    0x2b,                  // TAB	Tab
-    0x28,                  // LF	Enter
-    0x00,                  // VT
-    0x00,                  // FF
-    0x00,                  // CR
-    0x00,                  // SO
-    0x00,                  // SI
-    0x00,                  // DEL
-    0x00,                  // DC1
-    0x00,                  // DC2
-    0x00,                  // DC3
-    0x00,                  // DC4
-    0x00,                  // NAK
-    0x00,                  // SYN
-    0x00,                  // ETB
-    0x00,                  // CAN
-    0x00,                  // EM
-    0x00,                  // SUB
-    0x00,                  // ESC
-    0x00,                  // FS
-    0x00,                  // GS
-    0x00,                  // RS
-    0x00,                  // US
-    0x2c,                  //  ' '
-    0x1e | KEYBOARD_KEY_SHIFT, // !
-    0x34 | KEYBOARD_KEY_SHIFT, // "
-    0x20 | KEYBOARD_KEY_SHIFT, // #
-    0x21 | KEYBOARD_KEY_SHIFT, // $
-    0x22 | KEYBOARD_KEY_SHIFT, // %
-    0x24 | KEYBOARD_KEY_SHIFT, // &
-    0x34,                  // '
-    0x26 | KEYBOARD_KEY_SHIFT, // (
-    0x27 | KEYBOARD_KEY_SHIFT, // )
-    0x25 | KEYBOARD_KEY_SHIFT, // *
-    0x2e | KEYBOARD_KEY_SHIFT, // +
-    0x36,                  // ,
-    0x2d,                  // -
-    0x37,                  // .
-    0x38,                  // /
-    0x27,                  // 0
-    0x1e,                  // 1
-    0x1f,                  // 2
-    0x20,                  // 3
-    0x21,                  // 4
-    0x22,                  // 5
-    0x23,                  // 6
-    0x24,                  // 7
-    0x25,                  // 8
-    0x26,                  // 9
-    0x33 | KEYBOARD_KEY_SHIFT, // :
-    0x33,                  // ;
-    0x36 | KEYBOARD_KEY_SHIFT, // <
-    0x2e,                  // =
-    0x37 | KEYBOARD_KEY_SHIFT, // >
-    0x38 | KEYBOARD_KEY_SHIFT, // ?
-    0x1f | KEYBOARD_KEY_SHIFT, // @
-    0x04 | KEYBOARD_KEY_SHIFT, // A
-    0x05 | KEYBOARD_KEY_SHIFT, // B
-    0x06 | KEYBOARD_KEY_SHIFT, // C
-    0x07 | KEYBOARD_KEY_SHIFT, // D
-    0x08 | KEYBOARD_KEY_SHIFT, // E
-    0x09 | KEYBOARD_KEY_SHIFT, // F
-    0x0a | KEYBOARD_KEY_SHIFT, // G
-    0x0b | KEYBOARD_KEY_SHIFT, // H
-    0x0c | KEYBOARD_KEY_SHIFT, // I
-    0x0d | KEYBOARD_KEY_SHIFT, // J
-    0x0e | KEYBOARD_KEY_SHIFT, // K
-    0x0f | KEYBOARD_KEY_SHIFT, // L
-    0x10 | KEYBOARD_KEY_SHIFT, // M
-    0x11 | KEYBOARD_KEY_SHIFT, // N
-    0x12 | KEYBOARD_KEY_SHIFT, // O
-    0x13 | KEYBOARD_KEY_SHIFT, // P
-    0x14 | KEYBOARD_KEY_SHIFT, // Q
-    0x15 | KEYBOARD_KEY_SHIFT, // R
-    0x16 | KEYBOARD_KEY_SHIFT, // S
-    0x17 | KEYBOARD_KEY_SHIFT, // T
-    0x18 | KEYBOARD_KEY_SHIFT, // U
-    0x19 | KEYBOARD_KEY_SHIFT, // V
-    0x1a | KEYBOARD_KEY_SHIFT, // W
-    0x1b | KEYBOARD_KEY_SHIFT, // X
-    0x1c | KEYBOARD_KEY_SHIFT, // Y
-    0x1d | KEYBOARD_KEY_SHIFT, // Z
-    0x2f,                  // [
-    0x31,                  // bslash
-    0x30,                  // ]
-    0x23 | KEYBOARD_KEY_SHIFT, // ^
-    0x2d | KEYBOARD_KEY_SHIFT, // _
-    0x35,                  // `
-    0x04,                  // a
-    0x05,                  // b
-    0x06,                  // c
-    0x07,                  // d
-    0x08,                  // e
-    0x09,                  // f
-    0x0a,                  // g
-    0x0b,                  // h
-    0x0c,                  // i
-    0x0d,                  // j
-    0x0e,                  // k
-    0x0f,                  // l
-    0x10,                  // m
-    0x11,                  // n
-    0x12,                  // o
-    0x13,                  // p
-    0x14,                  // q
-    0x15,                  // r
-    0x16,                  // s
-    0x17,                  // t
-    0x18,                  // u
-    0x19,                  // v
-    0x1a,                  // w
-    0x1b,                  // x
-    0x1c,                  // y
-    0x1d,                  // z
-    0x2f | KEYBOARD_KEY_SHIFT, // {
-    0x31 | KEYBOARD_KEY_SHIFT, // |
-    0x30 | KEYBOARD_KEY_SHIFT, // }
-    0x35 | KEYBOARD_KEY_SHIFT, // ~
-    0,                     // DEL
-];
+#[allow(unused)]
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Key {
+    None = 0x00,
+    ErrorRollOver = 0x01,
+    PostFail = 0x02,
+    ErrorUndefined = 0x03,
+    A = 0x04,
+    B = 0x05,
+    C = 0x06,
+    D = 0x07,
+    E = 0x08,
+    F = 0x09,
+    G = 0x0A,
+    H = 0x0B,
+    I = 0x0C,
+    J = 0x0D,
+    K = 0x0E,
+    L = 0x0F,
+    M = 0x10,
+    N = 0x11,
+    O = 0x12,
+    P = 0x13,
+    Q = 0x14,
+    R = 0x15,
+    S = 0x16,
+    T = 0x17,
+    U = 0x18,
+    V = 0x19,
+    W = 0x1A,
+    X = 0x1B,
+    Y = 0x1C,
+    Z = 0x1D,
+    Num1 = 0x1E,
+    Num2 = 0x1F,
+    Num3 = 0x20,
+    Num4 = 0x21,
+    Num5 = 0x22,
+    Num6 = 0x23,
+    Num7 = 0x24,
+    Num8 = 0x25,
+    Num9 = 0x26,
+    Num0 = 0x27,
+    Enter = 0x28,
+    Escape = 0x29,
+    Backspace = 0x2A,
+    Tab = 0x2B,
+    Space = 0x2C,
+    Minus = 0x2D,
+    Equal = 0x2E,
+    LeftBracket = 0x2F,
+    RightBracket = 0x30,
+    Backslash = 0x31,
+    NonUsHash = 0x32,
+    Semicolon = 0x33,
+    Apostrophe = 0x34,
+    Grave = 0x35,
+    Comma = 0x36,
+    Dot = 0x37,
+    Slash = 0x38,
+    CapsLock = 0x39,
+    F1 = 0x3A,
+    F2 = 0x3B,
+    F3 = 0x3C,
+    F4 = 0x3D,
+    F5 = 0x3E,
+    F6 = 0x3F,
+    F7 = 0x40,
+    F8 = 0x41,
+    F9 = 0x42,
+    F10 = 0x43,
+    F11 = 0x44,
+    F12 = 0x45,
+    PrintScreen = 0x46,
+    ScrollLock = 0x47,
+    Pause = 0x48,
+    Insert = 0x49,
+    Home = 0x4A,
+    PageUp = 0x4B,
+    Delete = 0x4C,
+    End = 0x4D,
+    PageDown = 0x4E,
+    Right = 0x4F,
+    Left = 0x50,
+    Down = 0x51,
+    Up = 0x52,
+    NumLock = 0x53,
+    KpSlash = 0x54,
+    KpAsterisk = 0x55,
+    KpMinus = 0x56,
+    KpPlus = 0x57,
+    KpEnter = 0x58,
+    Kp1 = 0x59,
+    Kp2 = 0x5A,
+    Kp3 = 0x5B,
+    Kp4 = 0x5C,
+    Kp5 = 0x5D,
+    Kp6 = 0x5E,
+    Kp7 = 0x5F,
+    Kp8 = 0x60,
+    Kp9 = 0x61,
+    Kp0 = 0x62,
+    KpDot = 0x63,
+    NonUsBackslash = 0x64,
+    Application = 0x65,
+    Power = 0x66,
+    KpEqual = 0x67,
+    F13 = 0x68,
+    F14 = 0x69,
+    F15 = 0x6A,
+    F16 = 0x6B,
+    F17 = 0x6C,
+    F18 = 0x6D,
+    F19 = 0x6E,
+    F20 = 0x6F,
+    F21 = 0x70,
+    F22 = 0x71,
+    F23 = 0x72,
+    F24 = 0x73,
+}

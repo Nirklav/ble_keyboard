@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
-use esp32_nimble::{hid::*, BLEAdvertisementData, BLEHIDDevice};
+use esp32_nimble::{BLEAdvertisementData, BLEHIDDevice, hid::*};
 use esp32_nimble::{utilities::mutex::Mutex, BLECharacteristic, BLEServer};
 use zerocopy::IntoBytes;
+
+use crate::bt::conn_params::ConnnParams;
 
 use super::*;
 
@@ -13,9 +15,9 @@ const MEDIA_KEYS_ID: u8 = 0x02;
 const MOUSE_ID: u8 = 0x03;
 
 const HID_REPORT_DISCRIPTOR: &[u8] = hid!(
-    (USAGE_PAGE, 0x01), // USAGE_PAGE (Generic Desktop Ctrls)
-    (USAGE, 0x06),      // USAGE (Keyboard)
-    (COLLECTION, 0x01), // COLLECTION (Application)
+    (USAGE_PAGE, 0x01),         // USAGE_PAGE (Generic Desktop Ctrls)
+    (USAGE, 0x06),              // USAGE (Keyboard)
+    (COLLECTION, 0x01),         // COLLECTION (Application)
     // ------------------------------------------------- Keyboard
     (REPORT_ID, KEYBOARD_ID),   //   REPORT_ID (1)
     (USAGE_PAGE, 0x07),         //   USAGE_PAGE (Kbrd/Keypad)
@@ -56,7 +58,7 @@ const HID_REPORT_DISCRIPTOR: &[u8] = hid!(
     (LOGICAL_MINIMUM, 0x00),    //   LOGICAL_MINIMUM (0)
     (LOGICAL_MAXIMUM, 0x01),    //   LOGICAL_MAXIMUM (1)
     (REPORT_SIZE, 0x01),        //   REPORT_SIZE (1)
-    (REPORT_COUNT, 0x10),       //   REPORT_COUNT (16)
+    (REPORT_COUNT, 0x08),       //   REPORT_COUNT (8)
     (USAGE, 0xB5),              //   USAGE (Scan Next Track)     ; bit 0: 1
     (USAGE, 0xB6),              //   USAGE (Scan Previous Track) ; bit 1: 2
     (USAGE, 0xB7),              //   USAGE (Stop)                ; bit 2: 4
@@ -64,15 +66,7 @@ const HID_REPORT_DISCRIPTOR: &[u8] = hid!(
     (USAGE, 0xE2),              //   USAGE (Mute)                ; bit 4: 16
     (USAGE, 0xE9),              //   USAGE (Volume Increment)    ; bit 5: 32
     (USAGE, 0xEA),              //   USAGE (Volume Decrement)    ; bit 6: 64
-    (USAGE, 0x23, 0x02),        //   Usage (WWW Home)            ; bit 7: 128
-    (USAGE, 0x94, 0x01),        //   Usage (My Computer) ; bit 0: 1
-    (USAGE, 0x92, 0x01),        //   Usage (Calculator)  ; bit 1: 2
-    (USAGE, 0x2A, 0x02),        //   Usage (WWW fav)     ; bit 2: 4
-    (USAGE, 0x21, 0x02),        //   Usage (WWW search)  ; bit 3: 8
-    (USAGE, 0x26, 0x02),        //   Usage (WWW stop)    ; bit 4: 16
-    (USAGE, 0x24, 0x02),        //   Usage (WWW back)    ; bit 5: 32
-    (USAGE, 0x83, 0x01),        //   Usage (Media sel)   ; bit 6: 64
-    (USAGE, 0x8A, 0x01),        //   Usage (Mail)        ; bit 7: 128
+    (USAGE, 0x92, 0x01),        //   Usage (Calculator)          ; bit 7: 128
     (HIDINPUT, 0x02),           // INPUT (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position)
     (END_COLLECTION),           // END_COLLECTION
     // ------------------------------------------------- Mouse
@@ -127,6 +121,7 @@ pub struct BleMouseKeyboard {
     input_mouse: Arc<Mutex<BLECharacteristic>>,
 
     key_report: KeyReport,
+    media_key_report: MediaKeyReport,
     mouse_report: MouseReport,
 }
 
@@ -136,12 +131,12 @@ impl BleMouseKeyboard {
         unsafe {
             esp_idf_sys::ble_hs_cfg.store_gen_key_cb = Some(Self::gen_key_callback);
         }
-    
+
         BLEDevice::init();
     
         let device = BLEDevice::take();
     
-        if let Err(e) = BLEDevice::set_device_name("ESP32 MKey") {
+        if let Err(e) = BLEDevice::set_device_name("Nirklav Keyboard") {
             bail!("error on set device name [code: {:?}]", e);
         }
     
@@ -149,7 +144,7 @@ impl BleMouseKeyboard {
         device
             .security()
             .set_auth(AuthReq::all())
-            .set_passkey(123456)
+            .set_passkey(32549)
             .set_io_cap(SecurityIOCap::NoInputNoOutput)
             .resolve_rpa();
 
@@ -157,10 +152,11 @@ impl BleMouseKeyboard {
         server.advertise_on_disconnect(true);
         server.on_connect(|server, desc| { 
             info!("Client connected: {:?}", desc);
+            
+            ConnnParams::ACTIVE.set(server, desc.conn_handle()).unwrap();
 
-            server
-                .update_conn_params(desc.conn_handle(), 24, 48, 0, 60)
-                .unwrap();
+            let mut ble_advertising = device.get_advertising().lock();
+            ble_advertising.stop();
         });
         server.on_disconnect(|_desc, result| {
             info!("Client disconnected: {:?}", result);
@@ -182,7 +178,7 @@ impl BleMouseKeyboard {
 
         let mut ble_advertising_data = BLEAdvertisementData::new();
         ble_advertising_data
-            .name("ESP32 Mouse Keyboard")
+            .name("Nirklav Keyboard")
             .appearance(0x03C1)
             .add_service_uuid(hid.hid_service().lock().uuid());
 
@@ -208,8 +204,11 @@ impl BleMouseKeyboard {
                 reserved: 0,
                 keys: [0; 6],
             },
+            media_key_report: MediaKeyReport {
+                keys: 0
+            },
             mouse_report: MouseReport {
-                buttons: MouseKey::None,
+                buttons: 0,
                 x: 0,
                 y: 0,
                 wheel: 0,
@@ -246,72 +245,78 @@ impl BleMouseKeyboard {
         self.server.connected_count() > 0
     }
 
-    pub fn write(&mut self, str: &str) {
-        for char in str.as_bytes() {
-            self.press_key(*char);
-            self.release_key();
+    pub fn set_idle(&mut self) -> anyhow::Result<()> {
+        self.set_conn_params(ConnnParams::IDLE)
+    }
+
+    pub fn set_active(&mut self) -> anyhow::Result<()>  {
+        self.set_conn_params(ConnnParams::ACTIVE)
+    }
+
+    fn set_conn_params(&mut self, params: ConnnParams) -> anyhow::Result<()> {
+        let handle = if let Some(desc) = self.server.connections().next() {
+            desc.conn_handle()
+        } else {
+            return Ok(())
+        };
+
+        params.set(&mut self.server, handle)?;
+        Ok(())
+    }
+
+    pub fn press_key(&mut self, key: Key) {
+        let mut keys = self.key_report.keys;
+        for i in 0..keys.len() {
+            if keys[i] == 0 {
+                keys[i] = key as u8;
+            }
         }
     }
 
-    pub fn press_key_mod(&mut self, char: u8, modifier: u8) {
-        self.key_report.modifiers = modifier;
-        self.press_key(char);
-    }
-  
-    pub fn press_key(&mut self, char: u8) {
-        let mut key = KEYBOARD_ASCII_MAP[char as usize];
-        if (key & KEYBOARD_KEY_SHIFT) > 0 {
-            self.key_report.modifiers |= KEYBOARD_MOD_LEFT_SHIFT;
-            key &= !KEYBOARD_KEY_SHIFT;
-        }
-        self.key_report.keys[0] = key;
-        self.send_keyboard_report(&self.key_report);
+    pub fn press_key_mod(&mut self, modifier: KeyMod) {
+        self.key_report.modifiers |= modifier.bits();
     }
 
-    pub fn release_key(&mut self) {
+    pub fn clear_keys(&mut self) {
         self.key_report.modifiers = 0;
         self.key_report.keys.fill(0);
-        self.send_keyboard_report(&self.key_report);
     }
 
-    fn send_keyboard_report(&self, keys: &KeyReport) {
-        self.input_keyboard.lock().set_value(keys.as_bytes()).notify();
-        esp_idf_svc::hal::delay::Ets::delay_ms(7);
+    pub fn send_key_report(&self) {
+        self.input_keyboard.lock().set_value(self.key_report.as_bytes()).notify();
     }
 
     pub fn press_media_key(&mut self, key: MediaKey) {
-        self.send_media_key_report(&key.report);        
+        self.media_key_report.keys = key.keys;
     }
 
-    pub fn release_media_key(&mut self) {
-        let report = MediaKeyReport { first: 0, second: 0 };
-        self.send_media_key_report(&report);
+    pub fn clear_media_key(&mut self) {
+        self.media_key_report.keys = 0;
     }
   
-    fn send_media_key_report(&self, keys: &MediaKeyReport) {
-        self.input_media_keys.lock().set_value(keys.as_bytes()).notify();
-        esp_idf_svc::hal::delay::Ets::delay_ms(7);
+    pub fn send_media_key_report(&self) {
+        self.input_media_keys.lock().set_value(self.media_key_report.as_bytes()).notify();
     }
 
     pub fn click_mouse(&mut self, key: MouseKey) {
-        self.mouse_report.buttons = key;
-        self.send_mouse_report(&self.mouse_report);
+        self.mouse_report.buttons |= key.bits();
     }
 
-    pub fn release_mouse(&mut self) {
-        self.mouse_report.buttons = MouseKey::None;
-        self.send_mouse_report(&self.mouse_report);
+    pub fn clear_mouse(&mut self) {
+        self.mouse_report.buttons = 0;
+        self.mouse_report.x = 0;
+        self.mouse_report.y = 0;
+        self.mouse_report.wheel = 0;
+        self.mouse_report.h_wheel = 0;
     }
 
     pub fn travel(&mut self, x: i8, y: i8) {
         self.mouse_report.x = x;
         self.mouse_report.y = y;
-        self.send_mouse_report(&self.mouse_report);
     }
 
-    fn send_mouse_report(&self, report: &MouseReport) {
-        self.input_mouse.lock().set_from(report).notify();
-        esp_idf_svc::hal::delay::Ets::delay_ms(7);
+    fn send_mouse_report(&self) {
+        self.input_mouse.lock().set_value(self.mouse_report.as_bytes()).notify();
     }
 }
 
