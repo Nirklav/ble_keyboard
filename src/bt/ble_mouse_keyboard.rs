@@ -265,10 +265,11 @@ impl BleMouseKeyboard {
     }
 
     pub fn press_key(&mut self, key: Key) {
-        let mut keys = self.key_report.keys;
+        let mut keys = &mut self.key_report.keys;
         for i in 0..keys.len() {
             if keys[i] == 0 {
                 keys[i] = key as u8;
+                break;
             }
         }
     }
@@ -298,8 +299,17 @@ impl BleMouseKeyboard {
         self.input_media_keys.lock().set_value(self.media_key_report.as_bytes()).notify();
     }
 
-    pub fn click_mouse(&mut self, key: MouseKey) {
+    pub fn press_mouse(&mut self, key: MouseKey) {
         self.mouse_report.buttons |= key.bits();
+    }
+
+    pub fn travel_mouse_cursor(&mut self, x: i8, y: i8) {
+        self.mouse_report.x = x;
+        self.mouse_report.y = y;
+    }
+
+    pub fn travel_mouse_wheel(&mut self, v: i8) {
+        self.mouse_report.wheel = v;
     }
 
     pub fn clear_mouse(&mut self) {
@@ -310,12 +320,7 @@ impl BleMouseKeyboard {
         self.mouse_report.h_wheel = 0;
     }
 
-    pub fn travel(&mut self, x: i8, y: i8) {
-        self.mouse_report.x = x;
-        self.mouse_report.y = y;
-    }
-
-    fn send_mouse_report(&self) {
+    pub fn send_mouse_report(&self) {
         self.input_mouse.lock().set_value(self.mouse_report.as_bytes()).notify();
     }
 }

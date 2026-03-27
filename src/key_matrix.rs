@@ -3,6 +3,8 @@ use std::rc::Rc;
 use esp_idf_svc::hal::{delay::Delay, spi::{SpiDeviceDriver, SpiDriver}};
 use mcp23s17::Mcp23s17;
 
+use crate::layout::{LayoutKey, Layouts};
+
 pub struct KeyMatrix<const W: usize, const H: usize> {
     ext: Mcp23s17<SpiDeviceDriver<'static, Rc<SpiDriver<'static>>>>,
     delay: Delay,
@@ -10,6 +12,7 @@ pub struct KeyMatrix<const W: usize, const H: usize> {
     column_pins: [u8; W],
     row_pins: [u8; H],
     keys: [[Key; H]; W],
+    current_layout: usize,
 }
 
 impl<const W: usize, const H: usize> KeyMatrix<W, H> {
@@ -28,7 +31,8 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
             delay: Delay::new(5),
             column_pins,
             row_pins,
-            keys: [[Key::new(); H]; W]
+            keys: [[Key::new(); H]; W],
+            current_layout: 0
         })
     }
 
@@ -56,7 +60,6 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
 
             for (y, row) in self.row_pins.iter().enumerate() {
                 let pressed = !map_err!(self.ext.read(*row));
-
                 self.keys[x][y].set(pressed, last_delay_ms);
             }
 
@@ -68,11 +71,44 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
         }
         Ok(())
     }
+
+    pub fn register_changed<const C: usize>(&mut self, layouts: &'static Layouts<W, H, C>) {
+        let mut current_layout = layouts.get(self.current_layout);
+
+        if let Some((x, y)) = current_layout.fun() {
+            if self.keys[x][y].state {
+                if let LayoutKey::Fn { temporary_switch, .. } = &current_layout.get(x, y) {
+                    current_layout = layouts.get(*temporary_switch)
+                }
+            }
+        }
+
+        for x in 0..W {
+            for y in 0..H {
+                let key = &mut self.keys[x][y];
+                if key.state && key.changed {
+                    key.reg_as = Some(current_layout.get(x, y));
+                }
+            }
+        }
+    }
+
+    pub fn unregister_changed(&mut self) {
+        for x in 0..W {
+            for y in 0..H {
+                let key = &mut self.keys[x][y];
+                if !key.state {
+                    key.reg_as = None;
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
 struct Key {
     pub state: bool,
+    reg_as: Option<&'static LayoutKey>,
     changed: bool,
     debounce_left_ms: u32
 }
@@ -81,6 +117,7 @@ impl Key {
     pub fn new() -> Self {
         Key {
             state: false,
+            reg_as: None,
             changed: false,
             debounce_left_ms: 0,
         }
@@ -110,8 +147,9 @@ impl Key {
 
     pub fn take_change(&mut self) -> KeyChange {
         let change = KeyChange { 
-            state: self.state, 
-            changed: self.changed
+            state: self.state,
+            changed: self.changed,
+            reg_as: self.reg_as
         };
         self.changed = false;
         change
@@ -120,6 +158,7 @@ impl Key {
 
 #[derive(Clone, Copy)]
 pub struct KeyChange {
-    pub state: bool, 
-    pub changed: bool 
+    pub state: bool,
+    pub changed: bool,
+    pub reg_as: Option<&'static LayoutKey>
 }

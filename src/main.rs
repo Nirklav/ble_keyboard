@@ -27,7 +27,8 @@ use mcp23s17::Mcp23s17;
 use ssd1306::mode::BufferedGraphicsMode;
 use ssd1306::prelude::I2CInterface;
 use crate::bt::ble_mouse_keyboard::BleMouseKeyboard;
-use crate::key_matrix::KeyChange;
+use crate::layout::LayoutKey;
+use crate::layout::{TEST, DEFAULT};
 use ssd1306::I2CDisplayInterface;
 use ssd1306::Ssd1306;
 use ssd1306::mode::DisplayConfig;
@@ -82,6 +83,7 @@ fn main_body() -> anyhow::Result<()> {
     
     let mut clear = true;
     let mut active = true;
+    let layouts = &TEST;
  
     let delay = Delay::new(5);
     const DELAY_MS: u32 = 8;
@@ -102,19 +104,50 @@ fn main_body() -> anyhow::Result<()> {
         }
 
         key_matrix.scan(DELAY_MS)?;
+        key_matrix.register_changed(layouts);
 
         let mut all_up = true;
+        let mut send_key_report = false;
+        let mut send_mouse_report = false;
+        let mut send_media_key_report = false;
+
         for x in 0..key_matrix.width() {
             for y in 0..key_matrix.height() {
-                let kc = key_matrix.take_change(x, y);
-                match &kc {
-                    KeyChange { state: true, changed: true } => {
-                       info!("({}, {}) pressed", x, y); 
-                    },
-                    KeyChange { state: false, changed: true } => {
-                        info!("({}, {}) released", x, y);
+
+                let kc = key_matrix.take_change(x, y);                
+                if let Some(layout_key) = kc.reg_as {
+
+                    if kc.changed {
+                        match layout_key {
+                            LayoutKey::Key(_) | LayoutKey::KeyWithMod(_, _) | LayoutKey::Mod(_) => send_key_report = true,
+                            LayoutKey::Media(_) => send_media_key_report = true,
+                            LayoutKey::MouseKey(_) => send_mouse_report = true,
+                            _ => { }
+                        }
                     }
-                    _ => { }
+
+                    if kc.state {
+                        match layout_key {
+                            LayoutKey::Key(key) => ble_keyboard.press_key(*key),
+                            LayoutKey::KeyWithMod(key, key_mod) => {
+                                ble_keyboard.press_key_mod(*key_mod);
+                                ble_keyboard.press_key(*key);
+                            },
+                            LayoutKey::Mod(key_mod) => ble_keyboard.press_key_mod(*key_mod),
+                            LayoutKey::Media(media_key) => ble_keyboard.press_media_key(*media_key),
+                            LayoutKey::MouseKey(mouse_key) => ble_keyboard.press_mouse(*mouse_key),
+                            LayoutKey::MouseTravel { dx, dy } => {
+                                send_mouse_report = true;
+                                ble_keyboard.travel_mouse_cursor(*dx, *dy)
+                            },
+                            LayoutKey::MouseScroll { dy } => {
+                                send_mouse_report = true;
+                                ble_keyboard.travel_mouse_wheel(*dy)
+                            },
+                            LayoutKey::Fn { .. } => { },
+                            LayoutKey::None => { }
+                        }
+                    }
                 }
 
                 if kc.state {
@@ -123,8 +156,26 @@ fn main_body() -> anyhow::Result<()> {
             }
         }
 
+        key_matrix.unregister_changed();
+
+        if send_key_report {
+            ble_keyboard.send_key_report();
+        }
+
+        if send_mouse_report {
+            ble_keyboard.send_mouse_report();
+        }
+
+        if send_media_key_report {
+            ble_keyboard.send_media_key_report();
+        }
+
+        ble_keyboard.clear_keys();
+        ble_keyboard.clear_mouse();
+        ble_keyboard.clear_media_key();
+
         if all_up {
-            active = false;
+            //active = false;
         }
     }
 }
