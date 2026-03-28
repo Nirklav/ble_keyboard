@@ -48,7 +48,7 @@ struct MediaKeyReport {
     keys: u8
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct MediaKey {
     name: &'static str,
     keys: u8

@@ -36,6 +36,8 @@ use ssd1306::prelude::DisplayRotation;
 use ssd1306::size::DisplaySize128x32;
 use crate::key_matrix::KeyMatrix;
 
+const IDLE_DELAY_MS: u32 = 500;
+
 fn main() {
     esp_idf_sys::link_patches();
     EspLogger::initialize_default();
@@ -83,6 +85,8 @@ fn main_body() -> anyhow::Result<()> {
     
     let mut clear = true;
     let mut active = true;
+    let mut next_fn_swith = false;
+    let mut idle_timer: u32 = 0;
     let layouts = &TEST;
  
     let delay = Delay::new(5);
@@ -108,6 +112,7 @@ fn main_body() -> anyhow::Result<()> {
         key_matrix.register_changed(layouts);
 
         let mut all_up = true;
+        let mut only_fn_pressed = None;
         let mut send_key_report = false;
         let mut send_mouse_report = false;
         let mut send_media_key_report = false;
@@ -117,12 +122,6 @@ fn main_body() -> anyhow::Result<()> {
 
                 let kc = key_matrix.take_change(x, y);                
                 if let Some(layout_key) = kc.reg_as {
-
-                    if kc.changed && kc.reg_as.is_some_and(|x| x.is_fn()) {
-
-
-                    }
-
                     if kc.changed {
                         match layout_key {
                             LayoutKey::Key(_) | LayoutKey::KeyWithMod(_, _) | LayoutKey::Mod(_) => send_key_report = true,
@@ -133,6 +132,10 @@ fn main_body() -> anyhow::Result<()> {
                     }
 
                     if kc.state {
+                        if !layout_key.is_fn() {
+                            only_fn_pressed = Some(false);
+                        }   
+
                         match layout_key {
                             LayoutKey::Key(key) => ble_keyboard.press_key(*key),
                             LayoutKey::KeyWithMod(key, key_mod) => {
@@ -153,6 +156,10 @@ fn main_body() -> anyhow::Result<()> {
                             LayoutKey::Fn { .. } => { },
                             LayoutKey::None => { }
                         }
+                    }
+                    
+                    if !kc.state && kc.changed && layout_key.is_fn() && only_fn_pressed.is_none() {
+                        only_fn_pressed = Some(true);
                     }
                 }
 
@@ -182,8 +189,23 @@ fn main_body() -> anyhow::Result<()> {
         ble_keyboard.clear_mouse();
         ble_keyboard.clear_media_key();
 
+        if let Some(true) = only_fn_pressed {
+            if next_fn_swith {
+                key_matrix.switch_layout(layouts);
+                next_fn_swith = false;
+            } else {
+                next_fn_swith = true;
+            }
+        }
+
         if all_up {
-            active = false;
+            idle_timer += DELAY_MS;
+            if idle_timer >= IDLE_DELAY_MS {
+                active = false;
+                next_fn_swith = false;
+            }
+        } else {
+            idle_timer = 0;
         }
     }
 }

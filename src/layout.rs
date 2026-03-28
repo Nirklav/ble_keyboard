@@ -20,19 +20,19 @@ macro_rules! km {
 
 pub struct Layout<const W: usize, const H: usize> {
     map: [[LayoutKey; W]; H],
-    fun: Option<(usize, usize)>
+    fn_coord: Option<(usize, usize)>
 }
 
 impl<const W: usize, const H: usize> Layout<W, H> {
     const fn new(map: [[LayoutKey; W]; H]) -> Self {
-        let mut fun = None;
+        let mut fn_coord = None;
 
         let mut x = 0;
         'outer: while x < W {
             let mut y = 0;
             while y < H {
                 if let &LayoutKey::Fn { .. } =  &map[y][x] {
-                    fun = Some((x, y));
+                    fn_coord = Some((x, y));
                     break 'outer;
                 }
                 y += 1;
@@ -42,7 +42,7 @@ impl<const W: usize, const H: usize> Layout<W, H> {
 
         Self {
             map,
-            fun
+            fn_coord
         }
     }
 
@@ -50,11 +50,16 @@ impl<const W: usize, const H: usize> Layout<W, H> {
         &self.map[y][x]
     }
 
-    pub fn fun(&self) -> Option<(usize, usize)> {
-        self.fun
+    pub fn fn_layout_key(&self) -> Option<&LayoutKey> {
+        self.fn_coord.map_or(None, |fn_coord| Some(&self.map[fn_coord.1][fn_coord.0]))
+    }
+
+    pub fn fn_coords(&self) -> Option<(usize, usize)> {
+        self.fn_coord
     }
 }
 
+#[derive(Debug)]
 pub enum LayoutKey {
     Key(Key),
     KeyWithMod(Key, KeyMod),

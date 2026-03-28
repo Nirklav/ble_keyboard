@@ -1,6 +1,7 @@
 use std::rc::Rc;
 
 use esp_idf_svc::hal::{delay::Delay, spi::{SpiDeviceDriver, SpiDriver}};
+use log::info;
 use mcp23s17::{InterruptMode, Mcp23s17};
 
 use crate::layout::{LayoutKey, Layouts};
@@ -45,13 +46,13 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
         H
     }
 
-    pub fn switch_layout_to<const C: usize>(&mut self, layout: usize, _layouts: &'static Layouts<W, H, C>) -> anyhow::Result<()> {
-        if layout >= C {
-            return Err(anyhow::Error::msg("layout_id is bigger than layout size"));
+    pub fn switch_layout<const C: usize>(&mut self, layouts: &'static Layouts<W, H, C>) {
+        let layout = layouts.get(self.current_layout);
+        let layout_key = layout.fn_layout_key();
+        if let Some(LayoutKey::Fn { permanent_switch, .. }) = layout_key {
+            self.current_layout = *permanent_switch;
+            info!("Layout switched to: {}", self.current_layout);
         }
-
-        self.current_layout = layout;
-        Ok(())
     }
 
     pub fn take_change(&mut self, x: usize, y: usize) -> KeyChange {
@@ -83,9 +84,11 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
     }
 
     pub fn register_changed<const C: usize>(&mut self, layouts: &'static Layouts<W, H, C>) {
-        let mut current_layout = layouts.get(self.current_layout);
+        let original_layout = layouts.get(self.current_layout);
+        let mut current_layout = original_layout;
 
-        if let Some((x, y)) = current_layout.fun() {
+        let original_fn_coords = current_layout.fn_coords();
+        if let Some((x, y)) = original_fn_coords {
             if self.keys[x][y].state {
                 if let LayoutKey::Fn { temporary_switch, .. } = &current_layout.get(x, y) {
                     current_layout = layouts.get(*temporary_switch)
@@ -97,7 +100,12 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
             for y in 0..H {
                 let key = &mut self.keys[x][y];
                 if key.state && key.changed {
-                    key.reg_as = Some(current_layout.get(x, y));
+
+                    if original_fn_coords == Some((x, y)) {
+                        key.reg_as = Some(original_layout.get(x, y));
+                    } else {
+                        key.reg_as = Some(current_layout.get(x, y));
+                    }
                 }
             }
         }
@@ -115,7 +123,7 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct Key {
     pub state: bool,
     reg_as: Option<&'static LayoutKey>,
