@@ -4,7 +4,7 @@ use esp32_nimble::{BLEAdvertisementData, BLEHIDDevice, hid::*};
 use esp32_nimble::{utilities::mutex::Mutex, BLECharacteristic, BLEServer};
 use zerocopy::IntoBytes;
 
-use crate::bt::conn_params::ConnnParams;
+use crate::bt::conn_params::ConnParams;
 
 use super::*;
 
@@ -14,7 +14,7 @@ const KEYBOARD_ID: u8 = 0x01;
 const MEDIA_KEYS_ID: u8 = 0x02;
 const MOUSE_ID: u8 = 0x03;
 
-const HID_REPORT_DISCRIPTOR: &[u8] = hid!(
+const HID_REPORT_DESCRIPTOR: &[u8] = hid!(
     (USAGE_PAGE, 0x01),         // USAGE_PAGE (Generic Desktop Ctrls)
     (USAGE, 0x06),              // USAGE (Keyboard)
     (COLLECTION, 0x01),         // COLLECTION (Application)
@@ -153,7 +153,7 @@ impl BleMouseKeyboard {
         server.on_connect(|server, desc| { 
             info!("Client connected: {:?}", desc);
             
-            ConnnParams::ACTIVE.set(server, desc.conn_handle()).unwrap();
+            ConnParams::ACTIVE.set(server, desc.conn_handle()).unwrap();
 
             let mut ble_advertising = device.get_advertising().lock();
             ble_advertising.stop();
@@ -168,11 +168,11 @@ impl BleMouseKeyboard {
         let input_media_keys = hid.input_report(MEDIA_KEYS_ID);
         let input_mouse = hid.input_report(MOUSE_ID);
 
-        hid.manufacturer("Espressif");
-        hid.pnp(0x02, 0x05ac, 0x820a, 0x0210);
+        hid.manufacturer("Nirklav");
+        hid.pnp(0x02, 0x0000, 0x0000, 0x0100);
         hid.hid_info(0x00, 0x01);
 
-        hid.report_map(HID_REPORT_DISCRIPTOR);
+        hid.report_map(HID_REPORT_DESCRIPTOR);
 
         hid.set_battery_level(100);
 
@@ -218,26 +218,36 @@ impl BleMouseKeyboard {
     }
 
     unsafe extern "C" fn gen_key_callback(t: u8, key: *mut esp_idf_sys::ble_store_gen_key, _handle: u16) -> i32 {
-        if t as u32 == esp_idf_sys::BLE_STORE_GEN_KEY_IRK {
-            let mut buf = [0u8; 16];
-    
-            if !std::fs::exists(IRK_FILE).expect("NOT EXPECTED") {
-                esp_idf_sys::esp_fill_random(buf.as_mut_ptr() as *mut c_void, 16);
-                std::fs::write(IRK_FILE, &buf).expect("NOT EXPECTED");
-                info!("IRK generated: {:?}", &buf);
-            } else {
-                let irk = std::fs::read(IRK_FILE).expect("NOT EXPECTED");
-                buf.clone_from_slice(&irk);
+        if t as u32 != esp_idf_sys::BLE_STORE_GEN_KEY_IRK {
+            return 0;
+        }
+
+        let mut buf = [0u8; 16];
+
+        let read_existing = std::fs::read(IRK_FILE)
+            .ok()
+            .filter(|irk| irk.len() == 16);
+
+        match read_existing {
+            Some(irk) => {
+                buf.copy_from_slice(&irk);
                 info!("IRK read: {:?}", &buf);
             }
-    
-            for i in 0..16 {
-                (*key).__bindgen_anon_1.irk[i] = buf[i];
+            None => {
+                esp_idf_sys::esp_fill_random(buf.as_mut_ptr() as *mut c_void, 16);
+                if let Err(e) = std::fs::write(IRK_FILE, &buf) {
+                    log::error!("Failed to write IRK file: {}", e);
+                    return esp_idf_sys::BLE_HS_ESTORE_FAIL as i32;
+                }
+                info!("IRK generated: {:?}", &buf);
             }
-    
-            info!("IRK set: {:?}", &(*key).__bindgen_anon_1.irk);
         }
-    
+
+        for i in 0..16 {
+            (*key).__bindgen_anon_1.irk[i] = buf[i];
+        }
+
+        info!("IRK set: {:?}", &(*key).__bindgen_anon_1.irk);
         0
     }
 
@@ -246,21 +256,23 @@ impl BleMouseKeyboard {
     }
 
     pub fn set_idle(&mut self) -> anyhow::Result<()> {
-        self.set_conn_params(ConnnParams::IDLE)
+        self.set_conn_params(ConnParams::IDLE)
     }
 
     pub fn set_active(&mut self) -> anyhow::Result<()>  {
-        self.set_conn_params(ConnnParams::ACTIVE)
+        self.set_conn_params(ConnParams::ACTIVE)
     }
 
-    fn set_conn_params(&mut self, params: ConnnParams) -> anyhow::Result<()> {
+    fn set_conn_params(&mut self, params: ConnParams) -> anyhow::Result<()> {
         let handle = if let Some(desc) = self.server.connections().next() {
             desc.conn_handle()
         } else {
             return Ok(())
         };
 
-        params.set(&mut self.server, handle)?;
+        if let Err(e) = params.set(&mut self.server, handle) {
+            log::warn!("Failed to set connection params: {:?}", e);
+        }
         Ok(())
     }
 

@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use esp_idf_svc::hal::{delay::Delay, spi::{SpiDeviceDriver, SpiDriver}};
-use mcp23s17::Mcp23s17;
+use mcp23s17::{InterruptMode, Mcp23s17};
 
 use crate::layout::{LayoutKey, Layouts};
 
@@ -24,6 +24,7 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
 
         for row in row_pins {
             map_err!(ext.pin_mode(row, mcp23s17::PinMode::InputPullup));
+            map_err!(ext.set_interrupt_mode(row, InterruptMode::ActiveLow));
         }
 
         Ok(Self {
@@ -42,6 +43,15 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
 
     pub fn height(&self) -> usize {
         H
+    }
+
+    pub fn switch_layout_to<const C: usize>(&mut self, layout: usize, _layouts: &'static Layouts<W, H, C>) -> anyhow::Result<()> {
+        if layout >= C {
+            return Err(anyhow::Error::msg("layout_id is bigger than layout size"));
+        }
+
+        self.current_layout = layout;
+        Ok(())
     }
 
     pub fn take_change(&mut self, x: usize, y: usize) -> KeyChange {

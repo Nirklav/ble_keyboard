@@ -97,6 +97,7 @@ fn main_body() -> anyhow::Result<()> {
         if !active {
             info!("idle");
             ble_keyboard.set_idle()?;
+            ext_irq.enable_interrupt()?;
             notification.wait(esp_idf_svc::hal::delay::BLOCK);
             active = true;
             ble_keyboard.set_active()?;
@@ -116,6 +117,11 @@ fn main_body() -> anyhow::Result<()> {
 
                 let kc = key_matrix.take_change(x, y);                
                 if let Some(layout_key) = kc.reg_as {
+
+                    if kc.changed && kc.reg_as.is_some_and(|x| x.is_fn()) {
+
+
+                    }
 
                     if kc.changed {
                         match layout_key {
@@ -158,16 +164,18 @@ fn main_body() -> anyhow::Result<()> {
 
         key_matrix.unregister_changed();
 
-        if send_key_report {
-            ble_keyboard.send_key_report();
-        }
+        if ble_keyboard.connected() {
+            if send_key_report {
+                ble_keyboard.send_key_report();
+            }
 
-        if send_mouse_report {
-            ble_keyboard.send_mouse_report();
-        }
+            if send_mouse_report {
+                ble_keyboard.send_mouse_report();
+            }
 
-        if send_media_key_report {
-            ble_keyboard.send_media_key_report();
+            if send_media_key_report {
+                ble_keyboard.send_media_key_report();
+            }
         }
 
         ble_keyboard.clear_keys();
@@ -175,7 +183,7 @@ fn main_body() -> anyhow::Result<()> {
         ble_keyboard.clear_media_key();
 
         if all_up {
-            //active = false;
+            active = false;
         }
     }
 }
@@ -189,7 +197,6 @@ fn setup_interrupt(ext_irq: &mut PinDriver<'static, Input>, notification: Rc<Not
             notifier.notify_and_yield(NonZeroU32::new(1).unwrap());
         })?;
     }
-    ext_irq.enable_interrupt()?;
     Ok(())
 }
 

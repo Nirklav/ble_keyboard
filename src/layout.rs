@@ -82,6 +82,14 @@ impl LayoutKey {
             permanent_switch
         }
     }
+
+    pub fn is_fn(&self) -> bool {
+        if let LayoutKey::Fn { .. } = self {
+            true
+        } else {
+            false
+        }
+    }
 }
 
 pub struct Layouts<const W: usize, const H: usize, const C: usize> {
