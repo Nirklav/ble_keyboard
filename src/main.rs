@@ -42,11 +42,6 @@ fn main() {
     esp_idf_sys::link_patches();
     EspLogger::initialize_default();
     
-    unsafe {
-        esp_idf_sys::esp_wifi_stop();
-        esp_idf_sys::esp_wifi_deinit();
-    }
-
     main_body()
         .unwrap()
 }
@@ -85,11 +80,11 @@ fn main_body() -> anyhow::Result<()> {
     
     let mut clear = true;
     let mut active = true;
-    let mut next_fn_swith = false;
+    let mut next_fn_switch = false;
     let mut idle_timer: u32 = 0;
     let layouts = &TEST;
  
-    let delay = Delay::new(5);
+    let delay = Delay::new_default();
     const DELAY_MS: u32 = 8;
     loop {
         delay.delay_ms(DELAY_MS);
@@ -190,11 +185,11 @@ fn main_body() -> anyhow::Result<()> {
         ble_keyboard.clear_media_key();
 
         if let Some(true) = only_fn_pressed {
-            if next_fn_swith {
+            if next_fn_switch {
                 key_matrix.switch_layout(layouts);
-                next_fn_swith = false;
+                next_fn_switch = false;
             } else {
-                next_fn_swith = true;
+                next_fn_switch = true;
             }
         }
 
@@ -202,7 +197,7 @@ fn main_body() -> anyhow::Result<()> {
             idle_timer += DELAY_MS;
             if idle_timer >= IDLE_DELAY_MS {
                 active = false;
-                next_fn_swith = false;
+                next_fn_switch = false;
             }
         } else {
             idle_timer = 0;

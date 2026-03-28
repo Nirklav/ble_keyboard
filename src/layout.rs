@@ -1,3 +1,5 @@
+use log::error;
+
 use crate::bt::{Key, KeyMod, MediaKey, MouseKey};
 
 macro_rules! k {
@@ -109,6 +111,11 @@ impl<const W: usize, const H: usize, const C: usize> Layouts<W, H, C> {
     }
     
     pub(crate) fn get(&self, idx: usize) -> &Layout<W, H> {
+        if idx >= C {
+            error!("idx out of bounds, returning first layout.");
+            return &self.values[0];
+        }
+
         &self.values[idx]
     }
 }
