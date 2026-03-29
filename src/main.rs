@@ -1,4 +1,4 @@
-#[macro_use]
+ #[macro_use]
 mod map_no_std_error;
 mod storage;
 mod bt;
@@ -14,7 +14,6 @@ use esp_idf_svc::hal::gpio::*;
 use esp_idf_svc::hal::i2c::I2cConfig;
 use esp_idf_svc::hal::i2c::I2cDriver;
 use esp_idf_svc::hal::peripherals::Peripherals;
-use esp_idf_svc::hal::reset::ResetReason;
 use esp_idf_svc::hal::spi::config::Config;
 use esp_idf_svc::hal::spi::SpiDeviceDriver;
 use esp_idf_svc::hal::spi::SpiDriver;
@@ -37,6 +36,8 @@ use ssd1306::size::DisplaySize128x32;
 use crate::key_matrix::KeyMatrix;
 
 const IDLE_DELAY_MS: u32 = 500;
+const DEEP_SLEEP_DISCONNECTED_MS: u32 = 30_000;
+const DEEP_SLEEP_INACTIVE_MS: u32 = 10 * 60 * 1000;
 
 fn main() {
     esp_idf_sys::link_patches();
@@ -50,6 +51,8 @@ fn main_body() -> anyhow::Result<()> {
     storage::mount_vfs("/spiflash", "storage")?;
 
     let peripherals = Peripherals::take()?;
+
+    unsafe { esp_idf_sys::gpio_deep_sleep_hold_dis(); }
 
     let sclk = peripherals.pins.gpio6; // gpio6
     let miso = peripherals.pins.gpio4; // gpio2
@@ -71,17 +74,13 @@ fn main_body() -> anyhow::Result<()> {
 
     let mut ble_keyboard = BleMouseKeyboard::new()?;
 
-    let reset_reason = ResetReason::get();
-
     let spi_driver = Rc::new(SpiDriver::new(peripherals.spi2, sclk, mosi, Some(miso), &SpiDriverConfig::new())?);
 
     let ext = new_extension(spi_driver, ext_cs)?;
     let mut key_matrix = KeyMatrix::new(ext, [8, 9], [10, 11])?;
     
     let mut clear = true;
-    let mut active = true;
     let mut next_fn_switch = false;
-    let mut idle_timer: u32 = 0;
     let layouts = &TEST;
  
     let delay = Delay::new_default();
@@ -91,16 +90,6 @@ fn main_body() -> anyhow::Result<()> {
         
         if clear {
             //map_err!(display.clear(Rgb565::BLACK));
-        }
-
-        if !active {
-            info!("idle");
-            ble_keyboard.set_idle()?;
-            ext_irq.enable_interrupt()?;
-            notification.wait(esp_idf_svc::hal::delay::BLOCK);
-            active = true;
-            ble_keyboard.set_active()?;
-            info!("active");
         }
 
         key_matrix.scan(DELAY_MS)?;
@@ -194,14 +183,44 @@ fn main_body() -> anyhow::Result<()> {
         }
 
         if all_up {
-            idle_timer += DELAY_MS;
-            if idle_timer >= IDLE_DELAY_MS {
-                active = false;
+            ext_irq.enable_interrupt()?;
+
+            if notification.wait(IDLE_DELAY_MS).is_none() {
+                info!("idle");
                 next_fn_switch = false;
+                ble_keyboard.set_idle()?;
+
+                let deep_sleep_timeout = if ble_keyboard.connected() {
+                    DEEP_SLEEP_INACTIVE_MS
+                } else {
+                    DEEP_SLEEP_DISCONNECTED_MS
+                };
+
+                if notification.wait(deep_sleep_timeout).is_none() {
+                    info!("entering deep sleep");
+                    enter_deep_sleep(8);
+                }
+
+                ble_keyboard.set_active()?;
+                info!("active");
             }
-        } else {
-            idle_timer = 0;
         }
+    }
+}
+
+fn enter_deep_sleep(gpio_num: u32) {
+    unsafe {
+        // esp_idf_sys::gpio_sleep_set_pull_mode(
+        //     gpio_num as i32,
+        //     esp_idf_sys::gpio_pull_mode_t_GPIO_PULLUP_ONLY,
+        // );
+        esp_idf_sys::gpio_hold_en(gpio_num as i32);
+        esp_idf_sys::gpio_deep_sleep_hold_en();
+        esp_idf_sys::esp_deep_sleep_enable_gpio_wakeup(
+            1 << gpio_num,
+            esp_idf_sys::esp_deepsleep_gpio_wake_up_mode_t_ESP_GPIO_WAKEUP_GPIO_LOW,
+        );
+        esp_idf_sys::esp_deep_sleep_start();
     }
 }
 
