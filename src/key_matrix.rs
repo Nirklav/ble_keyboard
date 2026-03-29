@@ -38,14 +38,6 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
         })
     }
 
-    pub fn width(&self) -> usize {
-        W
-    }
-
-    pub fn height(&self) -> usize {
-        H
-    }
-
     pub fn switch_layout<const C: usize>(&mut self, layouts: &'static Layouts<W, H, C>) {
         let layout = layouts.get(self.current_layout);
         let layout_key = layout.fn_layout_key();
@@ -55,11 +47,46 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
         }
     }
 
-    pub fn take_change(&mut self, x: usize, y: usize) -> KeyChange {
-        self.keys[x][y].take_change()
+    pub fn register<const C: usize, F>(&mut self, last_delay_ms: u32, layouts: &'static Layouts<W, H, C>, mut key_process: F) -> anyhow::Result<()> 
+        where F: FnMut(KeyChange) {
+        
+        self.scan(last_delay_ms)?;
+
+        let original_layout = layouts.get(self.current_layout);
+        let mut current_layout = original_layout;
+
+        let original_fn_coords = current_layout.fn_coords();
+        if let Some((x, y)) = original_fn_coords {
+            if self.keys[x][y].state {
+                if let LayoutKey::Fn { temporary_switch, .. } = &current_layout.get(x, y) {
+                    current_layout = layouts.get(*temporary_switch)
+                }
+            }
+        }
+
+        for x in 0..W {
+            for y in 0..H {
+                let key = &mut self.keys[x][y];
+                if key.state && key.changed {
+                    if original_fn_coords == Some((x, y)) {
+                        key.reg_as = Some(original_layout.get(x, y));
+                    } else {
+                        key.reg_as = Some(current_layout.get(x, y));
+                    }
+                }
+
+                key_process(key.take_change());
+
+                if !key.state {
+                    key.reg_as = None;
+                }
+            }
+        }
+
+        Ok(())
     }
 
-    pub fn scan(&mut self, last_delay_ms: u32) -> anyhow::Result<()> {
+    fn scan(&mut self, last_delay_ms: u32) -> anyhow::Result<()> {
         for column in self.column_pins {
             map_err!(self.ext.set_high(column));
         }
@@ -81,45 +108,6 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
             map_err!(self.ext.set_low(column));
         }
         Ok(())
-    }
-
-    pub fn register_changed<const C: usize>(&mut self, layouts: &'static Layouts<W, H, C>) {
-        let original_layout = layouts.get(self.current_layout);
-        let mut current_layout = original_layout;
-
-        let original_fn_coords = current_layout.fn_coords();
-        if let Some((x, y)) = original_fn_coords {
-            if self.keys[x][y].state {
-                if let LayoutKey::Fn { temporary_switch, .. } = &current_layout.get(x, y) {
-                    current_layout = layouts.get(*temporary_switch)
-                }
-            }
-        }
-
-        for x in 0..W {
-            for y in 0..H {
-                let key = &mut self.keys[x][y];
-                if key.state && key.changed {
-
-                    if original_fn_coords == Some((x, y)) {
-                        key.reg_as = Some(original_layout.get(x, y));
-                    } else {
-                        key.reg_as = Some(current_layout.get(x, y));
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn unregister_changed(&mut self) {
-        for x in 0..W {
-            for y in 0..H {
-                let key = &mut self.keys[x][y];
-                if !key.state {
-                    key.reg_as = None;
-                }
-            }
-        }
     }
 }
 

@@ -92,68 +92,59 @@ fn main_body() -> anyhow::Result<()> {
             //map_err!(display.clear(Rgb565::BLACK));
         }
 
-        key_matrix.scan(DELAY_MS)?;
-        key_matrix.register_changed(layouts);
-
         let mut all_up = true;
         let mut only_fn_pressed = None;
         let mut send_key_report = false;
         let mut send_mouse_report = false;
         let mut send_media_key_report = false;
 
-        for x in 0..key_matrix.width() {
-            for y in 0..key_matrix.height() {
-
-                let kc = key_matrix.take_change(x, y);                
-                if let Some(layout_key) = kc.reg_as {
-                    if kc.changed {
-                        match layout_key {
-                            LayoutKey::Key(_) | LayoutKey::KeyWithMod(_, _) | LayoutKey::Mod(_) => send_key_report = true,
-                            LayoutKey::Media(_) => send_media_key_report = true,
-                            LayoutKey::MouseKey(_) => send_mouse_report = true,
-                            _ => { }
-                        }
-                    }
-
-                    if kc.state {
-                        if !layout_key.is_fn() {
-                            only_fn_pressed = Some(false);
-                        }   
-
-                        match layout_key {
-                            LayoutKey::Key(key) => ble_keyboard.press_key(*key),
-                            LayoutKey::KeyWithMod(key, key_mod) => {
-                                ble_keyboard.press_key_mod(*key_mod);
-                                ble_keyboard.press_key(*key);
-                            },
-                            LayoutKey::Mod(key_mod) => ble_keyboard.press_key_mod(*key_mod),
-                            LayoutKey::Media(media_key) => ble_keyboard.press_media_key(*media_key),
-                            LayoutKey::MouseKey(mouse_key) => ble_keyboard.press_mouse(*mouse_key),
-                            LayoutKey::MouseTravel { dx, dy } => {
-                                send_mouse_report = true;
-                                ble_keyboard.travel_mouse_cursor(*dx, *dy)
-                            },
-                            LayoutKey::MouseScroll { dy } => {
-                                send_mouse_report = true;
-                                ble_keyboard.travel_mouse_wheel(*dy)
-                            },
-                            LayoutKey::Fn { .. } => { },
-                            LayoutKey::None => { }
-                        }
-                    }
-                    
-                    if !kc.state && kc.changed && layout_key.is_fn() && only_fn_pressed.is_none() {
-                        only_fn_pressed = Some(true);
+        key_matrix.register(DELAY_MS, layouts, |kc| {
+            if let Some(layout_key) = kc.reg_as {
+                if kc.changed {
+                    match layout_key {
+                        LayoutKey::Key(_) | LayoutKey::KeyWithMod(_, _) | LayoutKey::Mod(_) => send_key_report = true,
+                        LayoutKey::Media(_) => send_media_key_report = true,
+                        LayoutKey::MouseKey(_) => send_mouse_report = true,
+                        _ => { }
                     }
                 }
 
                 if kc.state {
-                    all_up = false;
+                    if !layout_key.is_fn() {
+                        only_fn_pressed = Some(false);
+                    }   
+
+                    match layout_key {
+                        LayoutKey::Key(key) => ble_keyboard.press_key(*key),
+                        LayoutKey::KeyWithMod(key, key_mod) => {
+                            ble_keyboard.press_key_mod(*key_mod);
+                            ble_keyboard.press_key(*key);
+                        },
+                        LayoutKey::Mod(key_mod) => ble_keyboard.press_key_mod(*key_mod),
+                        LayoutKey::Media(media_key) => ble_keyboard.press_media_key(*media_key),
+                        LayoutKey::MouseKey(mouse_key) => ble_keyboard.press_mouse(*mouse_key),
+                        LayoutKey::MouseTravel { dx, dy } => {
+                            send_mouse_report = true;
+                            ble_keyboard.travel_mouse_cursor(*dx, *dy)
+                        },
+                        LayoutKey::MouseScroll { dy } => {
+                            send_mouse_report = true;
+                            ble_keyboard.travel_mouse_wheel(*dy)
+                        },
+                        LayoutKey::Fn { .. } => { },
+                        LayoutKey::None => { }
+                    }
+                }
+                
+                if !kc.state && kc.changed && layout_key.is_fn() && only_fn_pressed.is_none() {
+                    only_fn_pressed = Some(true);
                 }
             }
-        }
 
-        key_matrix.unregister_changed();
+            if kc.state {
+                all_up = false;
+            }
+        })?;
 
         if ble_keyboard.connected() {
             if send_key_report {
