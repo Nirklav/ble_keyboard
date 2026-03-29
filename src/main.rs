@@ -52,8 +52,6 @@ fn main_body() -> anyhow::Result<()> {
 
     let peripherals = Peripherals::take()?;
 
-    unsafe { esp_idf_sys::gpio_deep_sleep_hold_dis(); }
-
     let sclk = peripherals.pins.gpio6; // gpio6
     let miso = peripherals.pins.gpio4; // gpio2
     let mosi = peripherals.pins.gpio7; // gpio7
@@ -63,6 +61,8 @@ fn main_body() -> anyhow::Result<()> {
     let i2c = peripherals.i2c0;
     let sda = peripherals.pins.gpio2; // gpio9
     let scl = peripherals.pins.gpio3; // gpio10
+
+    prepare_deep_sleep(&ext_irq);
 
     let config = I2cConfig::new().baudrate(100.kHz().into());
     let i2c_driver = I2cDriver::new(i2c, sda, scl, &config)?;
@@ -198,7 +198,7 @@ fn main_body() -> anyhow::Result<()> {
 
                 if notification.wait(deep_sleep_timeout).is_none() {
                     info!("entering deep sleep");
-                    enter_deep_sleep(8);
+                    enter_deep_sleep(&ext_irq);
                 }
 
                 ble_keyboard.set_active()?;
@@ -208,16 +208,23 @@ fn main_body() -> anyhow::Result<()> {
     }
 }
 
-fn enter_deep_sleep(gpio_num: u32) {
+fn prepare_deep_sleep(irq_pin: &PinDriver<'static, Input>) {
+    unsafe { 
+        esp_idf_sys::gpio_hold_dis(irq_pin.pin() as i32);
+        esp_idf_sys::gpio_deep_sleep_hold_dis();
+    }
+}
+
+fn enter_deep_sleep(irq_pin: &PinDriver<'static, Input>) {
     unsafe {
         // esp_idf_sys::gpio_sleep_set_pull_mode(
         //     gpio_num as i32,
         //     esp_idf_sys::gpio_pull_mode_t_GPIO_PULLUP_ONLY,
         // );
-        esp_idf_sys::gpio_hold_en(gpio_num as i32);
+        esp_idf_sys::gpio_hold_en(irq_pin.pin() as i32);
         esp_idf_sys::gpio_deep_sleep_hold_en();
         esp_idf_sys::esp_deep_sleep_enable_gpio_wakeup(
-            1 << gpio_num,
+            1 << irq_pin.pin(),
             esp_idf_sys::esp_deepsleep_gpio_wake_up_mode_t_ESP_GPIO_WAKEUP_GPIO_LOW,
         );
         esp_idf_sys::esp_deep_sleep_start();
