@@ -131,8 +131,7 @@ fn main_body() -> anyhow::Result<()> {
                             send_mouse_report = true;
                             ble_keyboard.travel_mouse_wheel(*dy)
                         },
-                        LayoutKey::Fn { .. } => { },
-                        LayoutKey::None => { }
+                        _ => { }
                     }
                 }
                 
