@@ -4,9 +4,11 @@ mod storage;
 mod bt;
 mod key_matrix;
 mod layout;
+mod display;
 
 use std::num::NonZeroU32;
 use std::rc::Rc;
+use std::time::Duration;
 
 use embedded_hal::spi::MODE_0;
 use esp_idf_svc::hal::delay::Delay;
@@ -21,18 +23,13 @@ use esp_idf_svc::hal::spi::SpiDriverConfig;
 use esp_idf_svc::hal::task::notification::Notification;
 use esp_idf_svc::hal::units::*;
 use esp_idf_svc::log::EspLogger;
+use esp_idf_svc::timer::EspTaskTimerService;
 use log::info;
 use mcp23s17::Mcp23s17;
-use ssd1306::mode::BufferedGraphicsMode;
-use ssd1306::prelude::I2CInterface;
 use crate::bt::ble_mouse_keyboard::BleMouseKeyboard;
+use crate::display::Display;
 use crate::layout::LayoutKey;
 use crate::layout::{TEST, DEFAULT};
-use ssd1306::I2CDisplayInterface;
-use ssd1306::Ssd1306;
-use ssd1306::mode::DisplayConfig;
-use ssd1306::prelude::DisplayRotation;
-use ssd1306::size::DisplaySize128x32;
 use crate::key_matrix::KeyMatrix;
 
 const IDLE_DELAY_MS: u32 = 500;
@@ -67,7 +64,8 @@ fn main_body() -> anyhow::Result<()> {
     let config = I2cConfig::new().baudrate(100.kHz().into());
     let i2c_driver = I2cDriver::new(i2c, sda, scl, &config)?;
 
-    //let display = new_display(i2c_driver)?;
+    let display = Display::new(i2c_driver)?;
+    display.show_text_for("Welcome!", Duration::from_secs(30))?;
 
     let notification = Rc::new(Notification::new());
     setup_interrupt(&mut ext_irq, notification.clone())?;
@@ -79,7 +77,6 @@ fn main_body() -> anyhow::Result<()> {
     let ext = new_extension(spi_driver, ext_cs)?;
     let mut key_matrix = KeyMatrix::new(ext, [8, 9], [10, 11])?;
     
-    let mut clear = true;
     let mut next_fn_switch = false;
     let layouts = &TEST;
  
@@ -87,10 +84,6 @@ fn main_body() -> anyhow::Result<()> {
     const DELAY_MS: u32 = 8;
     loop {
         delay.delay_ms(DELAY_MS);
-        
-        if clear {
-            //map_err!(display.clear(Rgb565::BLACK));
-        }
 
         let mut all_up = true;
         let mut only_fn_pressed = None;
@@ -165,7 +158,8 @@ fn main_body() -> anyhow::Result<()> {
 
         if let Some(true) = only_fn_pressed {
             if next_fn_switch {
-                key_matrix.switch_layout(layouts);
+                let new_layout = key_matrix.switch_layout(layouts);
+                display.show_text_for(new_layout.name(), Duration::from_secs(30))?;
                 next_fn_switch = false;
             } else {
                 next_fn_switch = true;
@@ -231,16 +225,6 @@ fn setup_interrupt(ext_irq: &mut PinDriver<'static, Input>, notification: Rc<Not
         })?;
     }
     Ok(())
-}
-
-fn new_display(i2c_driver: I2cDriver<'static>) -> anyhow::Result<Ssd1306<I2CInterface<I2cDriver<'static>>, DisplaySize128x32, BufferedGraphicsMode<DisplaySize128x32>>> {
-    let i2c_display = I2CDisplayInterface::new(i2c_driver);
-
-    let mut display = Ssd1306::new(i2c_display, DisplaySize128x32, DisplayRotation::Rotate0)
-        .into_buffered_graphics_mode();
-    map_err!(display.init());
-
-    Ok(display)
 }
 
 fn new_extension(spi_driver: Rc<SpiDriver<'static>>, cs: impl OutputPin + 'static) -> anyhow::Result<Mcp23s17<SpiDeviceDriver<'static, Rc<SpiDriver<'static>>>>> {

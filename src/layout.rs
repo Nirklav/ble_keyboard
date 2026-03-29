@@ -21,12 +21,13 @@ macro_rules! km {
 }
 
 pub struct Layout<const W: usize, const H: usize> {
+    name: &'static str,
     map: [[LayoutKey; W]; H],
     fn_coord: Option<(usize, usize)>
 }
 
 impl<const W: usize, const H: usize> Layout<W, H> {
-    const fn new(map: [[LayoutKey; W]; H]) -> Self {
+    const fn new(name: &'static str, map: [[LayoutKey; W]; H]) -> Self {
         let mut fn_coord = None;
 
         let mut x = 0;
@@ -43,11 +44,16 @@ impl<const W: usize, const H: usize> Layout<W, H> {
         }
 
         Self {
+            name,
             map,
             fn_coord
         }
     }
 
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+ 
     pub fn get(&self, x: usize, y: usize) -> &LayoutKey {
         &self.map[y][x]
     }
@@ -121,42 +127,37 @@ impl<const W: usize, const H: usize, const C: usize> Layouts<W, H, C> {
 }
 
 pub const TEST: Layouts<2, 2, 3> = Layouts::new([
-    // MAIN
-    Layout::new([
+    Layout::new("MAIN", [
         [k!(Num1),                km!(Num1, LeftShift)],
         [LayoutKey::new_fn(1, 2), km!(Num2, LeftShift)],
     ]),
-    // FUNCTION
-    Layout::new([
+    // 
+    Layout::new("FUNCTION", [
         [k!(Q),           k!(W)],
         [LayoutKey::None, k!(S)],
     ]),
-    // GAME
-    Layout::new([
+    Layout::new("GAME", [
         [k!(R),                   k!(T)],
         [LayoutKey::new_fn(1, 0), k!(Y)],
     ])
 ]);
 
 pub const DEFAULT: Layouts<10, 5, 3> = Layouts::new([
-    // MAIN
-    Layout::new([
+    Layout::new("MAIN", [
         [k!(Escape),   km!(Num1, LeftShift), km!(Num2, LeftShift),    km!(Num3, LeftShift), km!(Num7, LeftShift), k!(KpAsterisk), k!(LeftBracket), k!(RightBracket), k!(Minus),     k!(Equal)],
         [k!(Q),        k!(W),                k!(E),                   k!(R),                k!(T),                k!(Y),          k!(U),           k!(I),            k!(O),         k!(P)],
         [k!(A),        k!(S),                k!(D),                   k!(F),                k!(G),                k!(H),          k!(J),           k!(K),            k!(L),         k!(Semicolon)],
         [k!(Z),        k!(X),                k!(C),                   k!(V),                k!(B),                k!(N),          k!(M),           k!(Comma),        k!(Dot),       k!(Slash)],
         [m!(LeftCtrl), m!(LeftShift),        LayoutKey::new_fn(1, 2), m!(LeftAlt),          k!(Backspace),        k!(Space),      k!(Enter),       k!(Apostrophe),   k!(Backslash), k!(Tab)],
     ]),
-    // FUNCTION
-    Layout::new([
+    Layout::new("FUNCTION", [
         [k!(Grave),       k!(F1),          k!(F2),          k!(F3),      k!(F4),     k!(F5),    k!(LeftBracket), k!(RightBracket), km!(Num9, LeftShift), km!(Num0, LeftShift)],
         [LayoutKey::None, k!(F6),          k!(F7),          k!(F8),      k!(F9),     k!(F10),   k!(Num7),        k!(Num8),         k!(Num9),             k!(KpAsterisk)],
         [k!(CapsLock),    k!(F11),         k!(F12),         k!(Up),      k!(Up),     k!(Up),    k!(Num4),        k!(Num5),         k!(Num6),             k!(KpPlus)],
         [LayoutKey::None, LayoutKey::None, LayoutKey::None, k!(Left),    k!(Down),   k!(Right), k!(Num1),        k!(Num2),         k!(Num3),             k!(KpDot)],
         [m!(LeftCtrl),    m!(LeftShift),   LayoutKey::None, m!(LeftAlt), k!(Delete), k!(Space), k!(Num0),        k!(Minus),        k!(Slash),            k!(KpEnter)],
     ]),
-    // GAME
-    Layout::new([
+    Layout::new("GAME", [
         [k!(Escape),   k!(Num1),      k!(Num2),                k!(Num3),    k!(Num4),      k!(Num5),  k!(Num6),  k!(RightBracket),                          k!(Minus),                                k!(Equal)],
         [k!(Q),        k!(W),         k!(E),                   k!(R),       k!(T),         k!(Y),     k!(U),     k!(I),                                     k!(O),                                    LayoutKey::MouseScroll { dy: 10 }],
         [k!(A),        k!(S),         k!(D),                   k!(F),       k!(G),         k!(H),     k!(J),     k!(K),                                     k!(L),                                    LayoutKey::MouseScroll { dy: -10 }],

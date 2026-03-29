@@ -4,7 +4,7 @@ use esp_idf_svc::hal::{delay::Delay, spi::{SpiDeviceDriver, SpiDriver}};
 use log::info;
 use mcp23s17::{InterruptMode, Mcp23s17};
 
-use crate::layout::{LayoutKey, Layouts};
+use crate::layout::{Layout, LayoutKey, Layouts};
 
 pub struct KeyMatrix<const W: usize, const H: usize> {
     ext: Mcp23s17<SpiDeviceDriver<'static, Rc<SpiDriver<'static>>>>,
@@ -38,13 +38,15 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
         })
     }
 
-    pub fn switch_layout<const C: usize>(&mut self, layouts: &'static Layouts<W, H, C>) {
+    pub fn switch_layout<const C: usize>(&mut self, layouts: &'static Layouts<W, H, C>) -> &'static Layout<W, H> {
         let layout = layouts.get(self.current_layout);
         let layout_key = layout.fn_layout_key();
         if let Some(LayoutKey::Fn { permanent_switch, .. }) = layout_key {
             self.current_layout = *permanent_switch;
             info!("Layout switched to: {}", self.current_layout);
         }
+
+        layouts.get(self.current_layout)
     }
 
     pub fn register<const C: usize, F>(&mut self, last_delay_ms: u32, layouts: &'static Layouts<W, H, C>, mut key_process: F) -> anyhow::Result<()> 
