@@ -33,7 +33,7 @@ use crate::key_matrix::KeyMatrix;
 
 const IDLE_DELAY_MS: u32 = 1000;
 const DEEP_SLEEP_DISCONNECTED_MS: u32 = 30_000;
-const DEEP_SLEEP_INACTIVE_MS: u32 = 10 * 60 * 1000;
+const DEEP_SLEEP_INACTIVE_MS: u32 = 5 * 60 * 1000;
 const SCREEN_TEXT_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn main() {
@@ -49,15 +49,15 @@ fn main_body() -> anyhow::Result<()> {
 
     let peripherals = Peripherals::take()?;
 
-    let sclk = peripherals.pins.gpio6; // gpio6
-    let miso = peripherals.pins.gpio2; // gpio2
-    let mosi = peripherals.pins.gpio7; // gpio7
-    let mut ext_irq = PinDriver::input(peripherals.pins.gpio1, Pull::Up)?; // gpio3
-    let ext_cs = peripherals.pins.gpio8; // gpio8
+    let sclk = peripherals.pins.gpio6;
+    let miso = peripherals.pins.gpio2;
+    let mosi = peripherals.pins.gpio7;
+    let mut ext_irq = PinDriver::input(peripherals.pins.gpio1, Pull::Up)?;
+    let ext_cs = peripherals.pins.gpio8;
 
     let i2c = peripherals.i2c0;
-    let sda = peripherals.pins.gpio9; // gpio9
-    let scl = peripherals.pins.gpio10; // gpio10
+    let sda = peripherals.pins.gpio9;
+    let scl = peripherals.pins.gpio10;
 
     prepare_deep_sleep(&ext_irq);
 
@@ -201,10 +201,6 @@ fn prepare_deep_sleep(irq_pin: &PinDriver<'static, Input>) {
 
 fn enter_deep_sleep(irq_pin: &PinDriver<'static, Input>) {
     unsafe {
-        // esp_idf_sys::gpio_sleep_set_pull_mode(
-        //     gpio_num as i32,
-        //     esp_idf_sys::gpio_pull_mode_t_GPIO_PULLUP_ONLY,
-        // );
         esp_idf_sys::gpio_hold_en(irq_pin.pin() as i32);
         esp_idf_sys::gpio_deep_sleep_hold_en();
         esp_idf_sys::esp_deep_sleep_enable_gpio_wakeup(
