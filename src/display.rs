@@ -69,9 +69,10 @@ impl Display {
             .baseline(Baseline::Middle)
             .build();
 
+        map_err!(display.set_display_on(true));
         map_err!(display.clear(BinaryColor::Off));
         map_err!(Text::with_text_style(text, Point::new(64, 16), self.text_style, text_style)
-                .draw(&mut *display));
+            .draw(&mut *display));
 
         map_err!(display.flush());
 
@@ -106,6 +107,7 @@ impl Inner {
         };
         map_err!(display.clear(BinaryColor::Off));
         map_err!(display.flush());
+        map_err!(display.set_display_on(false));
         Ok(())
     }
 }
