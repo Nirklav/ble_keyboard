@@ -23,18 +23,18 @@ use esp_idf_svc::hal::spi::SpiDriverConfig;
 use esp_idf_svc::hal::task::notification::Notification;
 use esp_idf_svc::hal::units::*;
 use esp_idf_svc::log::EspLogger;
-use esp_idf_svc::timer::EspTaskTimerService;
 use log::info;
 use mcp23s17::Mcp23s17;
 use crate::bt::ble_mouse_keyboard::BleMouseKeyboard;
 use crate::display::Display;
 use crate::layout::LayoutKey;
-use crate::layout::{TEST, DEFAULT};
+use crate::layout::DEFAULT;
 use crate::key_matrix::KeyMatrix;
 
-const IDLE_DELAY_MS: u32 = 500;
+const IDLE_DELAY_MS: u32 = 1000;
 const DEEP_SLEEP_DISCONNECTED_MS: u32 = 30_000;
 const DEEP_SLEEP_INACTIVE_MS: u32 = 10 * 60 * 1000;
+const SCREEN_TEXT_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn main() {
     esp_idf_sys::link_patches();
@@ -50,14 +50,14 @@ fn main_body() -> anyhow::Result<()> {
     let peripherals = Peripherals::take()?;
 
     let sclk = peripherals.pins.gpio6; // gpio6
-    let miso = peripherals.pins.gpio4; // gpio2
+    let miso = peripherals.pins.gpio2; // gpio2
     let mosi = peripherals.pins.gpio7; // gpio7
-    let mut ext_irq = PinDriver::input(peripherals.pins.gpio8, Pull::Up)?; // gpio3
-    let ext_cs = peripherals.pins.gpio9; // gpio8
+    let mut ext_irq = PinDriver::input(peripherals.pins.gpio1, Pull::Up)?; // gpio3
+    let ext_cs = peripherals.pins.gpio8; // gpio8
 
     let i2c = peripherals.i2c0;
-    let sda = peripherals.pins.gpio2; // gpio9
-    let scl = peripherals.pins.gpio3; // gpio10
+    let sda = peripherals.pins.gpio9; // gpio9
+    let scl = peripherals.pins.gpio10; // gpio10
 
     prepare_deep_sleep(&ext_irq);
 
@@ -65,7 +65,7 @@ fn main_body() -> anyhow::Result<()> {
     let i2c_driver = I2cDriver::new(i2c, sda, scl, &config)?;
 
     let display = Display::new(i2c_driver)?;
-    display.show_text_for("Welcome!", Duration::from_secs(30))?;
+    display.show_text_for("Welcome!", SCREEN_TEXT_TIMEOUT)?;
 
     let notification = Rc::new(Notification::new());
     setup_interrupt(&mut ext_irq, notification.clone())?;
@@ -75,10 +75,10 @@ fn main_body() -> anyhow::Result<()> {
     let spi_driver = Rc::new(SpiDriver::new(peripherals.spi2, sclk, mosi, Some(miso), &SpiDriverConfig::new())?);
 
     let ext = new_extension(spi_driver, ext_cs)?;
-    let mut key_matrix = KeyMatrix::new(ext, [8, 9], [10, 11])?;
+    let mut key_matrix = KeyMatrix::new(ext, [0, 1, 2, 3, 4, 5, 6, 7, 14, 15], [8, 9, 10, 11, 12])?;
     
     let mut next_fn_switch = false;
-    let layouts = &TEST;
+    let layouts = &DEFAULT;
  
     let delay = Delay::new_default();
     const DELAY_MS: u32 = 8;
@@ -159,7 +159,7 @@ fn main_body() -> anyhow::Result<()> {
         if let Some(true) = only_fn_pressed {
             if next_fn_switch {
                 let new_layout = key_matrix.switch_layout(layouts);
-                display.show_text_for(new_layout.name(), Duration::from_secs(30))?;
+                display.show_text_for(new_layout.name(), SCREEN_TEXT_TIMEOUT)?;
                 next_fn_switch = false;
             } else {
                 next_fn_switch = true;

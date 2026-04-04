@@ -70,7 +70,7 @@ impl Display {
             .build();
 
         map_err!(display.clear(BinaryColor::Off));
-        map_err!(Text::with_text_style(text, Point::zero(), self.text_style, text_style)
+        map_err!(Text::with_text_style(text, Point::new(64, 16), self.text_style, text_style)
                 .draw(&mut *display));
 
         map_err!(display.flush());
@@ -104,10 +104,8 @@ impl Inner {
             Ok(g) => g,
             Err(_) => return Err(anyhow::Error::msg("poison"))
         };
-        match display.clear(BinaryColor::Off) {
-            Ok(g) => g,
-            Err(_) => return Err(anyhow::Error::msg("clear error"))
-        };
+        map_err!(display.clear(BinaryColor::Off));
+        map_err!(display.flush());
         Ok(())
     }
 }
