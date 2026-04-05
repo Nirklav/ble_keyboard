@@ -12,10 +12,13 @@ use std::time::Duration;
 
 use embedded_hal::spi::MODE_0;
 use esp_idf_svc::hal::delay::Delay;
+use esp_idf_svc::hal::delay::TickType;
 use esp_idf_svc::hal::gpio::*;
+use esp_idf_svc::hal::i2c::I2C0;
 use esp_idf_svc::hal::i2c::I2cConfig;
 use esp_idf_svc::hal::i2c::I2cDriver;
 use esp_idf_svc::hal::peripherals::Peripherals;
+use esp_idf_svc::hal::spi::SPI2;
 use esp_idf_svc::hal::spi::config::Config;
 use esp_idf_svc::hal::spi::SpiDeviceDriver;
 use esp_idf_svc::hal::spi::SpiDriver;
@@ -24,16 +27,17 @@ use esp_idf_svc::hal::task::notification::Notification;
 use esp_idf_svc::hal::units::*;
 use esp_idf_svc::log::EspLogger;
 use log::info;
-use mcp23s17::Mcp23s17;
 use crate::bt::ble_mouse_keyboard::BleMouseKeyboard;
 use crate::display::Display;
 use crate::layout::LayoutKey;
 use crate::layout::DEFAULT;
 use crate::key_matrix::KeyMatrix;
 
-const IDLE_DELAY_MS: u32 = 1000;
-const DEEP_SLEEP_DISCONNECTED_MS: u32 = 30_000;
-const DEEP_SLEEP_INACTIVE_MS: u32 = 5 * 60 * 1000;
+type Mcp23s17 = mcp23s17::Mcp23s17<SpiDeviceDriver<'static, Rc<SpiDriver<'static>>>>;
+
+const IDLE_DELAY_TICKS: TickType = TickType::new_millis(1000);
+const DEEP_SLEEP_DISCONNECTED_TICKS: TickType = TickType::new_millis(30_000);
+const DEEP_SLEEP_INACTIVE_TICKS: TickType = TickType::new_millis(5 * 60 * 1000);
 const SCREEN_TEXT_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn main() {
@@ -47,44 +51,17 @@ fn main() {
 fn main_body() -> anyhow::Result<()> {
     storage::mount_vfs("/spiflash", "storage")?;
 
-    let peripherals = Peripherals::take()?;
-
-    let sclk = peripherals.pins.gpio6;
-    let miso = peripherals.pins.gpio2;
-    let mosi = peripherals.pins.gpio7;
-    let mut ext_irq = PinDriver::input(peripherals.pins.gpio1, Pull::Up)?;
-    let ext_cs = peripherals.pins.gpio8;
-
-    let i2c = peripherals.i2c0;
-    let sda = peripherals.pins.gpio9;
-    let scl = peripherals.pins.gpio10;
-
-    prepare_deep_sleep(&ext_irq);
-
-    let config = I2cConfig::new().baudrate(100.kHz().into());
-    let i2c_driver = I2cDriver::new(i2c, sda, scl, &config)?;
-
-    let display = Display::new(i2c_driver)?;
-    display.show_text_for("Welcome!", SCREEN_TEXT_TIMEOUT)?;
-
-    let notification = Rc::new(Notification::new());
-    setup_interrupt(&mut ext_irq, notification.clone())?;
-
-    let mut ble_keyboard = BleMouseKeyboard::new()?;
-
-    let spi_driver = Rc::new(SpiDriver::new(peripherals.spi2, sclk, mosi, Some(miso), &SpiDriverConfig::new())?);
-
-    let ext = new_extension(spi_driver, ext_cs)?;
-    let mut key_matrix = KeyMatrix::new(ext, [0, 1, 2, 3, 4, 5, 6, 7, 14, 15], [8, 9, 10, 11, 12])?;
+    let (display, mut key_matrix, notification, mut ext_irq) = peripherals()?;
     
-    let mut next_fn_switch = false;
-    let layouts = &DEFAULT;
- 
+    let mut ble_keyboard = BleMouseKeyboard::new()?;
     let delay = Delay::new_default();
+
+    let layouts = &DEFAULT;
+    let mut next_fn_switch = false;
+    
+    display.show_text_for("Welcome!", SCREEN_TEXT_TIMEOUT)?;
     const DELAY_MS: u32 = 8;
     loop {
-        delay.delay_ms(DELAY_MS);
-
         let mut all_up = true;
         let mut only_fn_pressed = None;
         let mut send_key_report = false;
@@ -105,7 +82,7 @@ fn main_body() -> anyhow::Result<()> {
                 if kc.state {
                     if !layout_key.is_fn() {
                         only_fn_pressed = Some(false);
-                    }   
+                    }
 
                     match layout_key {
                         LayoutKey::Key(key) => ble_keyboard.press_key(*key),
@@ -127,7 +104,7 @@ fn main_body() -> anyhow::Result<()> {
                         _ => { }
                     }
                 }
-                
+
                 if !kc.state && kc.changed && layout_key.is_fn() && only_fn_pressed.is_none() {
                     only_fn_pressed = Some(true);
                 }
@@ -168,19 +145,18 @@ fn main_body() -> anyhow::Result<()> {
 
         if all_up {
             ext_irq.enable_interrupt()?;
-
-            if notification.wait(IDLE_DELAY_MS).is_none() {
+            if notification.wait(IDLE_DELAY_TICKS.into()).is_none() {
                 info!("idle");
                 next_fn_switch = false;
                 ble_keyboard.set_idle()?;
 
                 let deep_sleep_timeout = if ble_keyboard.connected() {
-                    DEEP_SLEEP_INACTIVE_MS
+                    DEEP_SLEEP_INACTIVE_TICKS
                 } else {
-                    DEEP_SLEEP_DISCONNECTED_MS
+                    DEEP_SLEEP_DISCONNECTED_TICKS
                 };
 
-                if notification.wait(deep_sleep_timeout).is_none() {
+                if notification.wait(deep_sleep_timeout.into()).is_none() {
                     info!("entering deep sleep");
                     enter_deep_sleep(&ext_irq);
                 }
@@ -188,7 +164,63 @@ fn main_body() -> anyhow::Result<()> {
                 ble_keyboard.set_active()?;
                 info!("active");
             }
+        } else {
+            delay.delay_ms(DELAY_MS);
         }
+    }
+}
+
+fn peripherals() -> anyhow::Result<(Display, KeyMatrix<10, 5>, Rc<Notification>, PinDriver<'static, Input>)> {
+    let peripherals = Peripherals::take()?;
+
+    let spi = peripherals.spi2;
+    let sclk = peripherals.pins.gpio6;
+    let miso = peripherals.pins.gpio2;
+    let mosi = peripherals.pins.gpio7;
+ 
+    let i2c = peripherals.i2c0;
+    let sda = peripherals.pins.gpio9;
+    let scl = peripherals.pins.gpio10;
+
+    let mut ext_irq = PinDriver::input(peripherals.pins.gpio1, Pull::Up)?;
+    let ext_cs = peripherals.pins.gpio8;
+
+    let i2c_driver = new_i2c(i2c, sda, scl)?;
+    let spi_driver = new_spi(spi, sclk, miso, mosi)?;
+
+    let display = Display::new(i2c_driver)?;
+    let ext = new_extension(spi_driver, ext_cs)?;
+
+    prepare_deep_sleep(&ext_irq);
+    prepare_light_sleep(&ext_irq);
+    
+    let notification = Rc::new(Notification::new());
+    setup_interrupt(&mut ext_irq, notification.clone())?;
+
+    let key_matrix = KeyMatrix::new(ext, [0, 1, 2, 3, 4, 5, 6, 7, 14, 15], [8, 9, 10, 11, 12])?;
+
+    Ok((display, key_matrix, notification, ext_irq))
+}
+
+fn new_i2c(i2c: I2C0<'static>, sda: Gpio9<'static>, scl: Gpio10<'static>) -> anyhow::Result<I2cDriver<'static>> {
+    let config = I2cConfig::new().baudrate(100.kHz().into());
+    let driver = I2cDriver::new(i2c, sda, scl, &config)?;
+    Ok(driver)
+}
+
+fn new_spi(spi: SPI2<'static>, sclk: Gpio6<'static>, miso: Gpio2<'static>, mosi: Gpio7<'static>) -> anyhow::Result<Rc<SpiDriver<'static>>> {
+    let config = SpiDriverConfig::new();
+    let spi_driver = Rc::new(SpiDriver::new(spi, sclk, mosi, Some(miso), &config)?);
+    Ok(spi_driver)
+}
+
+fn prepare_light_sleep(irq_pin: &PinDriver<'static, Input>) {
+    unsafe {
+        esp_idf_sys::gpio_wakeup_enable(
+            irq_pin.pin() as i32,
+            esp_idf_sys::gpio_int_type_t_GPIO_INTR_LOW_LEVEL,
+        );
+        esp_idf_sys::esp_sleep_enable_gpio_wakeup();
     }
 }
 
@@ -212,18 +244,20 @@ fn enter_deep_sleep(irq_pin: &PinDriver<'static, Input>) {
 }
 
 fn setup_interrupt(ext_irq: &mut PinDriver<'static, Input>, notification: Rc<Notification>) -> anyhow::Result<()> {
-    ext_irq.set_interrupt_type(InterruptType::NegEdge)?;
-    
+    ext_irq.set_interrupt_type(InterruptType::LowLevel)?;
+
+    let pin = ext_irq.pin();
     let notifier = notification.notifier();
     unsafe {
         ext_irq.subscribe(move || {
             notifier.notify_and_yield(NonZeroU32::new(1).unwrap());
+            esp_idf_sys::gpio_intr_disable(pin as i32);
         })?;
     }
     Ok(())
 }
 
-fn new_extension(spi_driver: Rc<SpiDriver<'static>>, cs: impl OutputPin + 'static) -> anyhow::Result<Mcp23s17<SpiDeviceDriver<'static, Rc<SpiDriver<'static>>>>> {
+fn new_extension(spi_driver: Rc<SpiDriver<'static>>, cs: impl OutputPin + 'static) -> anyhow::Result<Mcp23s17> {
     let spi_ext_config = Config::new()
         .baudrate(10.MHz().into())
         .data_mode(MODE_0);

@@ -277,7 +277,7 @@ impl BleMouseKeyboard {
     }
 
     pub fn press_key(&mut self, key: Key) {
-        let mut keys = &mut self.key_report.keys;
+        let keys = &mut self.key_report.keys;
         for i in 0..keys.len() {
             if keys[i] == 0 {
                 keys[i] = key as u8;
