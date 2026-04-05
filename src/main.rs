@@ -9,6 +9,7 @@ mod display;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::time::Duration;
+use std::time::Instant;
 
 use embedded_hal::spi::MODE_0;
 use esp_idf_svc::hal::delay::Delay;
@@ -56,6 +57,7 @@ fn main_body() -> anyhow::Result<()> {
     let mut ble_keyboard = BleMouseKeyboard::new()?;
     let delay = Delay::new_default();
 
+    let mut since_sleep = Instant::now();
     let layouts = &DEFAULT;
     let mut next_fn_switch = false;
     
@@ -68,7 +70,8 @@ fn main_body() -> anyhow::Result<()> {
         let mut send_mouse_report = false;
         let mut send_media_key_report = false;
 
-        key_matrix.register(DELAY_MS, layouts, |kc| {
+        let elaped_ms = since_sleep.elapsed().as_millis() as u32;
+        key_matrix.register(elaped_ms, layouts, |kc| {
             if let Some(layout_key) = kc.reg_as {
                 if kc.changed {
                     match layout_key {
@@ -143,6 +146,7 @@ fn main_body() -> anyhow::Result<()> {
             }
         }
 
+        since_sleep = Instant::now();
         if all_up {
             ext_irq.enable_interrupt()?;
             if notification.wait(IDLE_DELAY_TICKS.into()).is_none() {
