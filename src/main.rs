@@ -38,7 +38,7 @@ type Mcp23s17 = mcp23s17::Mcp23s17<SpiDeviceDriver<'static, Rc<SpiDriver<'static
 const IDLE_DELAY_TICKS: TickType = TickType::new_millis(1000);
 const DEEP_SLEEP_DISCONNECTED_TICKS: TickType = TickType::new_millis(30_000);
 const DEEP_SLEEP_INACTIVE_TICKS: TickType = TickType::new_millis(5 * 60 * 1000);
-const SCREEN_TEXT_TIMEOUT: Duration = Duration::from_secs(15);
+const SCREEN_TEXT_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn main() {
     esp_idf_sys::link_patches();
