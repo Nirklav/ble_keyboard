@@ -62,7 +62,7 @@ fn main_body() -> anyhow::Result<()> {
 
     let mut since_sleep = Instant::now();
     let layouts = &DEFAULT;
-    let mut layout_switch = LayoutSwitch::new();
+    let mut special_combinations = [ Box::new(LayoutSwitch::new()) ];
     
     display.show_text_for("Welcome!", SCREEN_TEXT_TIMEOUT)?;
     const DELAY_MS: u32 = 8;
@@ -72,7 +72,9 @@ fn main_body() -> anyhow::Result<()> {
         let mut send_mouse_report = false;
         let mut send_media_key_report = false;
 
-        layout_switch.new_scan();
+        for sc in &mut special_combinations {
+            sc.new_scan();
+        }
 
         let elaped_ms = since_sleep.elapsed().as_millis() as u32;
         key_matrix.register(elaped_ms, layouts, |kc| {
@@ -109,7 +111,9 @@ fn main_body() -> anyhow::Result<()> {
                 }
             }
 
-            layout_switch.changed(&kc);
+            for sc in &mut special_combinations {
+                sc.changed(&kc);
+            }
 
             if kc.state {
                 all_up = false;
@@ -134,14 +138,20 @@ fn main_body() -> anyhow::Result<()> {
         ble_keyboard.clear_mouse();
         ble_keyboard.clear_media_key();
 
-        layout_switch.apply(&mut key_matrix, layouts, &display)?;
+        for sc in &mut special_combinations {
+            sc.apply(&mut key_matrix, layouts, &display)?;
+        }
 
         since_sleep = Instant::now();
         if all_up {
             ext_irq.enable_interrupt()?;
             if notification.wait(IDLE_DELAY_TICKS.into()).is_none() {
                 info!("idle");
-                layout_switch.reset();
+
+                for sc in &mut special_combinations {
+                    sc.reset();
+                }
+
                 ble_keyboard.set_idle()?;
 
                 let deep_sleep_timeout = if ble_keyboard.connected() {
