@@ -5,6 +5,7 @@ mod bt;
 mod key_matrix;
 mod layout;
 mod display;
+mod sc;
 
 use std::num::NonZeroU32;
 use std::rc::Rc;
@@ -33,6 +34,8 @@ use crate::display::Display;
 use crate::layout::LayoutKey;
 use crate::layout::DEFAULT;
 use crate::key_matrix::KeyMatrix;
+use crate::sc::SpecialCombination;
+use crate::sc::layout_switch::LayoutSwitch;
 
 type Mcp23s17 = mcp23s17::Mcp23s17<SpiDeviceDriver<'static, Rc<SpiDriver<'static>>>>;
 
@@ -59,16 +62,17 @@ fn main_body() -> anyhow::Result<()> {
 
     let mut since_sleep = Instant::now();
     let layouts = &DEFAULT;
-    let mut next_fn_switch = false;
+    let mut layout_switch = LayoutSwitch::new();
     
     display.show_text_for("Welcome!", SCREEN_TEXT_TIMEOUT)?;
     const DELAY_MS: u32 = 8;
     loop {
         let mut all_up = true;
-        let mut only_fn_pressed = None;
         let mut send_key_report = false;
         let mut send_mouse_report = false;
         let mut send_media_key_report = false;
+
+        layout_switch.new_scan();
 
         let elaped_ms = since_sleep.elapsed().as_millis() as u32;
         key_matrix.register(elaped_ms, layouts, |kc| {
@@ -83,10 +87,6 @@ fn main_body() -> anyhow::Result<()> {
                 }
 
                 if kc.state {
-                    if !layout_key.is_fn() {
-                        only_fn_pressed = Some(false);
-                    }
-
                     match layout_key {
                         LayoutKey::Key(key) => ble_keyboard.press_key(*key),
                         LayoutKey::KeyWithMod(key, key_mod) => {
@@ -107,11 +107,9 @@ fn main_body() -> anyhow::Result<()> {
                         _ => { }
                     }
                 }
-
-                if !kc.state && kc.changed && layout_key.is_fn() && only_fn_pressed.is_none() {
-                    only_fn_pressed = Some(true);
-                }
             }
+
+            layout_switch.changed(&kc);
 
             if kc.state {
                 all_up = false;
@@ -136,22 +134,14 @@ fn main_body() -> anyhow::Result<()> {
         ble_keyboard.clear_mouse();
         ble_keyboard.clear_media_key();
 
-        if let Some(true) = only_fn_pressed {
-            if next_fn_switch {
-                let new_layout = key_matrix.switch_layout(layouts);
-                display.show_text_for(new_layout.name(), SCREEN_TEXT_TIMEOUT)?;
-                next_fn_switch = false;
-            } else {
-                next_fn_switch = true;
-            }
-        }
+        layout_switch.apply(&mut key_matrix, layouts, &display)?;
 
         since_sleep = Instant::now();
         if all_up {
             ext_irq.enable_interrupt()?;
             if notification.wait(IDLE_DELAY_TICKS.into()).is_none() {
                 info!("idle");
-                next_fn_switch = false;
+                layout_switch.reset();
                 ble_keyboard.set_idle()?;
 
                 let deep_sleep_timeout = if ble_keyboard.connected() {
