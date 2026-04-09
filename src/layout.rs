@@ -126,22 +126,6 @@ impl<const W: usize, const H: usize, const C: usize> Layouts<W, H, C> {
     }
 }
 
-pub const TEST: Layouts<2, 2, 3> = Layouts::new([
-    Layout::new("MAIN", [
-        [k!(Num1),                km!(Num1, LeftShift)],
-        [LayoutKey::new_fn(1, 2), km!(Num2, LeftShift)],
-    ]),
-    // 
-    Layout::new("FUNCTION", [
-        [k!(Q),           k!(W)],
-        [LayoutKey::None, k!(S)],
-    ]),
-    Layout::new("GAME", [
-        [k!(R),                   k!(T)],
-        [LayoutKey::new_fn(1, 0), k!(Y)],
-    ])
-]);
-
 pub const DEFAULT: Layouts<10, 5, 3> = Layouts::new([
     Layout::new("MAIN", [
         [k!(Escape),   km!(Num1, LeftShift), km!(Num2, LeftShift),    km!(Num3, LeftShift), km!(Num7, LeftShift), k!(KpAsterisk), k!(LeftBracket), k!(RightBracket), k!(Minus),     k!(Equal)],

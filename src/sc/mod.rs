@@ -1,3 +1,4 @@
+use crate::bt::ble_mouse_keyboard::BleMouseKeyboard;
 use crate::display::Display;
 use crate::key_matrix::{KeyChange, KeyMatrix};
 use crate::layout::Layouts;
@@ -5,17 +6,46 @@ use crate::layout::Layouts;
 pub mod layout_switch;
 pub mod unpair;
 
-pub trait SpecialCombination {
-    fn new_scan(&mut self);
+use layout_switch::LayoutSwitch;
+use unpair::Unpair;
 
-    fn changed(&mut self, key: &KeyChange);
+pub enum SC {
+    LayoutSwitch(LayoutSwitch),
+    Unpair(Unpair),
+}
 
-    fn apply<const W: usize, const H: usize, const C: usize>(
+impl SC {
+    pub fn new_scan(&mut self) {
+        match self {
+            SC::LayoutSwitch(s) => s.new_scan(),
+            SC::Unpair(s) => s.new_scan(),
+        }
+    }
+
+    pub fn changed(&mut self, key: &KeyChange) {
+        match self {
+            SC::LayoutSwitch(s) => s.changed(key),
+            SC::Unpair(s) => s.changed(key),
+        }
+    }
+
+    pub fn apply<const W: usize, const H: usize, const C: usize>(
         &mut self,
         key_matrix: &mut KeyMatrix<W, H>,
         layouts: &'static Layouts<W, H, C>,
         display: &Display,
-    ) -> anyhow::Result<()>;
+        bt_keyboard: &mut BleMouseKeyboard,
+    ) -> anyhow::Result<()> {
+        match self {
+            SC::LayoutSwitch(s) => s.apply(key_matrix, layouts, display),
+            SC::Unpair(s) => s.apply(bt_keyboard, display),
+        }
+    }
 
-    fn reset(&mut self);
+    pub fn reset(&mut self) {
+        match self {
+            SC::LayoutSwitch(s) => s.reset(),
+            SC::Unpair(s) => s.reset(),
+        }
+    }
 }

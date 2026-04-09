@@ -9,7 +9,6 @@ mod sc;
 
 use std::num::NonZeroU32;
 use std::rc::Rc;
-use std::time::Duration;
 use std::time::Instant;
 
 use embedded_hal::spi::MODE_0;
@@ -34,15 +33,15 @@ use crate::display::Display;
 use crate::layout::LayoutKey;
 use crate::layout::DEFAULT;
 use crate::key_matrix::KeyMatrix;
-use crate::sc::SpecialCombination;
+use crate::sc::SC;
 use crate::sc::layout_switch::LayoutSwitch;
+use crate::sc::unpair::Unpair;
 
 type Mcp23s17 = mcp23s17::Mcp23s17<SpiDeviceDriver<'static, Rc<SpiDriver<'static>>>>;
 
 const IDLE_DELAY_TICKS: TickType = TickType::new_millis(1000);
 const DEEP_SLEEP_DISCONNECTED_TICKS: TickType = TickType::new_millis(30_000);
 const DEEP_SLEEP_INACTIVE_TICKS: TickType = TickType::new_millis(5 * 60 * 1000);
-const SCREEN_TEXT_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn main() {
     esp_idf_sys::link_patches();
@@ -62,9 +61,12 @@ fn main_body() -> anyhow::Result<()> {
 
     let mut since_sleep = Instant::now();
     let layouts = &DEFAULT;
-    let mut special_combinations = [ Box::new(LayoutSwitch::new()) ];
+    let mut special_combinations = [
+        SC::LayoutSwitch(LayoutSwitch::new()),
+        SC::Unpair(Unpair::new(0, 3)),
+    ];
     
-    display.show_text_for("Welcome!", SCREEN_TEXT_TIMEOUT)?;
+    display.show_text("Welcome!")?;
     const DELAY_MS: u32 = 8;
     loop {
         let mut all_up = true;
@@ -139,7 +141,7 @@ fn main_body() -> anyhow::Result<()> {
         ble_keyboard.clear_media_key();
 
         for sc in &mut special_combinations {
-            sc.apply(&mut key_matrix, layouts, &display)?;
+            sc.apply(&mut key_matrix, layouts, &display, &mut ble_keyboard)?;
         }
 
         since_sleep = Instant::now();

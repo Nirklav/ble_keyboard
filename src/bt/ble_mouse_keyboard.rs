@@ -335,6 +335,18 @@ impl BleMouseKeyboard {
     pub fn send_mouse_report(&self) {
         self.input_mouse.lock().set_value(self.mouse_report.as_bytes()).notify();
     }
+
+    pub fn unpair(&mut self) {
+        info!("Clearing BLE bonds and IRK...");
+        unsafe {
+            esp_idf_sys::ble_store_clear();
+        }
+        let _ = std::fs::remove_file(IRK_FILE);
+        info!("Restarting...");
+        unsafe {
+            esp_idf_sys::esp_restart();
+        }
+    }
 }
 
 impl Drop for BleMouseKeyboard {

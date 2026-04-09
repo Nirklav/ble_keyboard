@@ -14,6 +14,8 @@ use ssd1306::{I2CDisplayInterface, size::DisplaySize128x32};
 use ssd1306::prelude::{DisplayRotation, I2CInterface};
 use ssd1306::mode::{BufferedGraphicsMode, DisplayConfig};
 
+const SCREEN_TEXT_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub type Ssd1306 = ssd1306::Ssd1306<I2CInterface<I2cDriver<'static>>, DisplaySize128x32, BufferedGraphicsMode<DisplaySize128x32>>;
 
 pub struct Display {
@@ -58,7 +60,7 @@ impl Display {
         })
     }
 
-    pub fn show_text_for(&self, text: &str, duration: Duration) -> anyhow::Result<()> {
+    pub fn show_text(&self, text: &str) -> anyhow::Result<()> {
         let mut display = match self.inner.display.lock() {
             Ok(g) => g,
             Err(_) => return Err(anyhow::Error::msg("poison"))
@@ -76,7 +78,7 @@ impl Display {
 
         map_err!(display.flush());
 
-        self.clear_after(duration)?;
+        self.clear_after(SCREEN_TEXT_TIMEOUT)?;
         Ok(())
     }
 

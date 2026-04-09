@@ -1,11 +1,7 @@
-use std::time::Duration;
-
+use crate::bt::ble_mouse_keyboard::BleMouseKeyboard;
 use crate::display::Display;
 use crate::key_matrix::{KeyChange, KeyMatrix};
 use crate::layout::Layouts;
-use crate::sc::SpecialCombination;
-
-const SCREEN_TEXT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct LayoutSwitch {
     next_fn_switch: bool,
@@ -19,14 +15,12 @@ impl LayoutSwitch {
             only_fn_pressed: None,
         }
     }
-}
 
-impl SpecialCombination for LayoutSwitch {
-    fn new_scan(&mut self) {
+    pub fn new_scan(&mut self) {
         self.only_fn_pressed = None;
     }
 
-    fn changed(&mut self, key: &KeyChange) {
+    pub fn changed(&mut self, key: &KeyChange) {
         if let Some(layout_key) = key.reg_as {
             if key.state && !layout_key.is_fn() {
                 self.only_fn_pressed = Some(false);
@@ -38,7 +32,7 @@ impl SpecialCombination for LayoutSwitch {
         }
     }
 
-    fn apply<const W: usize, const H: usize, const C: usize>(
+    pub fn apply<const W: usize, const H: usize, const C: usize>(
         &mut self,
         key_matrix: &mut KeyMatrix<W, H>,
         layouts: &'static Layouts<W, H, C>,
@@ -48,7 +42,7 @@ impl SpecialCombination for LayoutSwitch {
             if self.next_fn_switch {
                 self.next_fn_switch = false;
                 let new_layout = key_matrix.switch_layout(layouts);
-                display.show_text_for(new_layout.name(), SCREEN_TEXT_TIMEOUT)?;
+                display.show_text(new_layout.name())?;
             } else {
                 self.next_fn_switch = true;
             }
@@ -56,7 +50,7 @@ impl SpecialCombination for LayoutSwitch {
         Ok(())
     }
 
-    fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.next_fn_switch = false;
     }
 }

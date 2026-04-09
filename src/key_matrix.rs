@@ -77,7 +77,7 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
                     }
                 }
 
-                key_process(key.take_change());
+                key_process(key.take_change(x, y));
 
                 if !key.state {
                     key.reg_as = None;
@@ -153,8 +153,10 @@ impl Key {
         self.debounce_left_ms = 5;
     }
 
-    pub fn take_change(&mut self) -> KeyChange {
-        let change = KeyChange { 
+    pub fn take_change(&mut self, x: usize, y: usize) -> KeyChange {
+        let change = KeyChange {
+            x,
+            y,
             state: self.state,
             changed: self.changed,
             reg_as: self.reg_as
@@ -166,6 +168,8 @@ impl Key {
 
 #[derive(Clone, Copy)]
 pub struct KeyChange {
+    pub x: usize,
+    pub y: usize,
     pub state: bool,
     pub changed: bool,
     pub reg_as: Option<&'static LayoutKey>
