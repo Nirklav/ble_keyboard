@@ -5,7 +5,6 @@ use embedded_graphics::mono_font::{MonoTextStyle, MonoTextStyleBuilder};
 use embedded_graphics::mono_font::ascii::FONT_10X20;
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
-use embedded_graphics::primitives::{PrimitiveStyle, PrimitiveStyleBuilder};
 use embedded_graphics::text::{Alignment, Baseline, Text, TextStyleBuilder};
 use esp_idf_svc::hal::i2c::I2cDriver;
 use esp_idf_svc::timer::{EspTaskTimerService, EspTimer};
@@ -20,7 +19,6 @@ pub type Ssd1306 = ssd1306::Ssd1306<I2CInterface<I2cDriver<'static>>, DisplaySiz
 
 pub struct Display {
     inner: Inner,
-    style: PrimitiveStyle<BinaryColor>,
     text_style: MonoTextStyle<'static, BinaryColor>,
     clear_timer: EspTimer<'static>
 }
@@ -47,11 +45,6 @@ impl Display {
 
         Ok(Self {
             inner,
-            style: PrimitiveStyleBuilder::new()
-                .stroke_color(BinaryColor::On)
-                .stroke_width(1)
-                .fill_color(BinaryColor::Off)
-                .build(),
             text_style: MonoTextStyleBuilder::new()
                 .font(&FONT_10X20)
                 .text_color(BinaryColor::On)
@@ -91,6 +84,7 @@ impl Display {
         Ok(())
     }
 
+    #[allow(unused)]
     pub fn clear(&self) -> anyhow::Result<()> {
         self.inner.clear()
     }

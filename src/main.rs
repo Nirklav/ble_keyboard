@@ -6,6 +6,7 @@ mod key_matrix;
 mod layout;
 mod display;
 mod sc;
+mod services;
 
 use std::num::NonZeroU32;
 use std::rc::Rc;
@@ -33,9 +34,10 @@ use crate::display::Display;
 use crate::layout::LayoutKey;
 use crate::layout::DEFAULT;
 use crate::key_matrix::KeyMatrix;
-use crate::sc::SC;
-use crate::sc::layout_switch::LayoutSwitch;
-use crate::sc::unpair::Unpair;
+use crate::sc::SpecialCombinationBuilder;
+use crate::sc::switch_layout::SwitchLayoutSpecialCombinationAction;
+use crate::sc::unpair::UnpairSpecialCombinationAction;
+use crate::services::Services;
 
 type Mcp23s17 = mcp23s17::Mcp23s17<SpiDeviceDriver<'static, Rc<SpiDriver<'static>>>>;
 
@@ -54,19 +56,28 @@ fn main() {
 fn main_body() -> anyhow::Result<()> {
     storage::mount_vfs("/spiflash", "storage")?;
 
-    let (display, mut key_matrix, notification, mut ext_irq) = peripherals()?;
+    let (display, key_matrix, notification, mut ext_irq) = peripherals()?;
     
-    let mut ble_keyboard = BleMouseKeyboard::new()?;
+    let keyboard = BleMouseKeyboard::new()?;
     let delay = Delay::new_default();
 
     let mut since_sleep = Instant::now();
     let layouts = &DEFAULT;
     let mut special_combinations = [
-        SC::LayoutSwitch(LayoutSwitch::new()),
-        SC::Unpair(Unpair::new(0, 3)),
+        SpecialCombinationBuilder::new()
+            .by_coord(2, 4, Some(2))
+            .build(SwitchLayoutSpecialCombinationAction),
+
+        SpecialCombinationBuilder::new()
+            .by_coord(2, 4, None)
+            .by_coord(3, 3, Some(3))
+            .build(UnpairSpecialCombinationAction::new()),
     ];
     
-    display.show_text("Welcome!")?;
+    let mut svc = Services::new(keyboard, key_matrix, layouts, display);
+
+    svc.display.show_text("Welcome!")?;
+
     const DELAY_MS: u32 = 8;
     loop {
         let mut all_up = true;
@@ -79,7 +90,7 @@ fn main_body() -> anyhow::Result<()> {
         }
 
         let elaped_ms = since_sleep.elapsed().as_millis() as u32;
-        key_matrix.register(elaped_ms, layouts, |kc| {
+        svc.key_matrix.register(elaped_ms, layouts, |kc| {
             if let Some(layout_key) = kc.reg_as {
                 if kc.changed {
                     match layout_key {
@@ -92,21 +103,21 @@ fn main_body() -> anyhow::Result<()> {
 
                 if kc.state {
                     match layout_key {
-                        LayoutKey::Key(key) => ble_keyboard.press_key(*key),
+                        LayoutKey::Key(key) => svc.keyboard.press_key(*key),
                         LayoutKey::KeyWithMod(key, key_mod) => {
-                            ble_keyboard.press_key_mod(*key_mod);
-                            ble_keyboard.press_key(*key);
+                            svc.keyboard.press_key_mod(*key_mod);
+                            svc.keyboard.press_key(*key);
                         },
-                        LayoutKey::Mod(key_mod) => ble_keyboard.press_key_mod(*key_mod),
-                        LayoutKey::Media(media_key) => ble_keyboard.press_media_key(*media_key),
-                        LayoutKey::MouseKey(mouse_key) => ble_keyboard.press_mouse(*mouse_key),
+                        LayoutKey::Mod(key_mod) => svc.keyboard.press_key_mod(*key_mod),
+                        LayoutKey::Media(media_key) => svc.keyboard.press_media_key(*media_key),
+                        LayoutKey::MouseKey(mouse_key) => svc.keyboard.press_mouse(*mouse_key),
                         LayoutKey::MouseTravel { dx, dy } => {
                             send_mouse_report = true;
-                            ble_keyboard.travel_mouse_cursor(*dx, *dy)
+                            svc.keyboard.travel_mouse_cursor(*dx, *dy)
                         },
                         LayoutKey::MouseScroll { dy } => {
                             send_mouse_report = true;
-                            ble_keyboard.travel_mouse_wheel(*dy)
+                            svc.keyboard.travel_mouse_wheel(*dy)
                         },
                         _ => { }
                     }
@@ -122,26 +133,26 @@ fn main_body() -> anyhow::Result<()> {
             }
         })?;
 
-        if ble_keyboard.connected() {
+        if svc.keyboard.connected() {
             if send_key_report {
-                ble_keyboard.send_key_report();
+                svc.keyboard.send_key_report();
             }
 
             if send_mouse_report {
-                ble_keyboard.send_mouse_report();
+                svc.keyboard.send_mouse_report();
             }
 
             if send_media_key_report {
-                ble_keyboard.send_media_key_report();
+                svc.keyboard.send_media_key_report();
             }
         }
 
-        ble_keyboard.clear_keys();
-        ble_keyboard.clear_mouse();
-        ble_keyboard.clear_media_key();
+        svc.keyboard.clear_keys();
+        svc.keyboard.clear_mouse();
+        svc.keyboard.clear_media_key();
 
         for sc in &mut special_combinations {
-            sc.apply(&mut key_matrix, layouts, &display, &mut ble_keyboard)?;
+            sc.try_apply(&mut svc)?;
         }
 
         since_sleep = Instant::now();
@@ -154,9 +165,9 @@ fn main_body() -> anyhow::Result<()> {
                     sc.reset();
                 }
 
-                ble_keyboard.set_idle()?;
+                svc.keyboard.set_idle()?;
 
-                let deep_sleep_timeout = if ble_keyboard.connected() {
+                let deep_sleep_timeout = if svc.keyboard.connected() {
                     DEEP_SLEEP_INACTIVE_TICKS
                 } else {
                     DEEP_SLEEP_DISCONNECTED_TICKS
@@ -167,7 +178,7 @@ fn main_body() -> anyhow::Result<()> {
                     enter_deep_sleep(&ext_irq);
                 }
 
-                ble_keyboard.set_active()?;
+                svc.keyboard.set_active()?;
                 info!("active");
             }
         } else {

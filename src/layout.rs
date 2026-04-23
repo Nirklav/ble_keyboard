@@ -67,11 +67,12 @@ impl<const W: usize, const H: usize> Layout<W, H> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum LayoutKey {
     Key(Key),
     KeyWithMod(Key, KeyMod),
     Mod(KeyMod),
+    #[allow(unused)]
     Media(MediaKey),
     MouseKey(MouseKey),
     MouseTravel {
@@ -96,6 +97,7 @@ impl LayoutKey {
         }
     }
 
+    #[allow(unused)]
     pub fn is_fn(&self) -> bool {
         if let LayoutKey::Fn { .. } = self {
             true
