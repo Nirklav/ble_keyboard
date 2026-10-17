@@ -1,0 +1,88 @@
+{
+	// Every cargo project is a separate folder, so rust-analyzer loads each one
+	// with its own target (.cargo/config.toml) and toolchain (rust-toolchain.toml).
+	"folders": [
+		{ "name": "keyboard", "path": "keyboard" },
+		{ "name": "joystick", "path": "joystick" },
+		{ "name": "desktop", "path": "desktop" },
+		{ "name": "protocol", "path": "protocol" },
+		{ "name": "root", "path": "." }
+	],
+	"settings": {
+		// Don't show projects twice: they are already listed as separate folders.
+		"files.exclude": {
+			"keyboard": true,
+			"joystick": true,
+			"desktop": true,
+			"protocol": true,
+			"target": true
+		},
+		// no_std firmware has no tests/benches, `--all-targets` would fail on them
+		"rust-analyzer.cargo.allTargets": false,
+		// Separate target dir, so rust-analyzer doesn't block cargo builds
+		"rust-analyzer.cargo.targetDir": true
+	},
+	"tasks": {
+		"version": "2.0.0",
+		"tasks": [
+			{
+				"label": "keyboard: build",
+				"type": "shell",
+				"command": "cargo build --release",
+				"options": { "cwd": "${workspaceFolder:keyboard}" },
+				"group": "build",
+				"problemMatcher": ["$rustc"]
+			},
+			{
+				"label": "keyboard: flash & monitor",
+				"type": "shell",
+				"command": "cargo run --release",
+				"options": { "cwd": "${workspaceFolder:keyboard}" },
+				"problemMatcher": ["$rustc"]
+			},
+			{
+				"label": "joystick: build",
+				"type": "shell",
+				"command": "cargo build --release",
+				"options": { "cwd": "${workspaceFolder:joystick}" },
+				"group": "build",
+				"problemMatcher": ["$rustc"]
+			},
+			{
+				"label": "joystick: build app.bin",
+				"type": "shell",
+				"command": "cargo objcopy --release -- -O binary app.bin",
+				"options": { "cwd": "${workspaceFolder:joystick}" },
+				"group": "build",
+				"problemMatcher": ["$rustc"]
+			},
+			{
+				"label": "desktop + protocol: test",
+				"type": "shell",
+				"command": "cargo test",
+				"options": { "cwd": "${workspaceFolder:root}" },
+				"group": "test",
+				"problemMatcher": ["$rustc"]
+			}
+		]
+	},
+	"launch": {
+		"version": "0.2.0",
+		"configurations": [
+			{
+				"type": "lldb",
+				"request": "launch",
+				"name": "desktop: debug",
+				"cargo": {
+					"args": ["build", "--bin=desktop", "--package=desktop"],
+					"filter": { "name": "desktop", "kind": "bin" }
+				},
+				"args": [],
+				"cwd": "${workspaceFolder:root}"
+			}
+		]
+	},
+	"extensions": {
+		"recommendations": ["rust-lang.rust-analyzer", "tamasfe.even-better-toml", "vadimcn.vscode-lldb"]
+	}
+}

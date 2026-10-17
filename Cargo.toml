@@ -1,0 +1,7 @@
+[workspace]
+resolver = "3"
+members = ["desktop", "protocol"]
+# Firmware crates are standalone cargo projects: each has its own target and
+# toolchain, which a single cargo workspace (and rust-analyzer) can't mix.
+# Build them from their own directory; they share ./target via build.target-dir.
+exclude = ["keyboard", "joystick"]
