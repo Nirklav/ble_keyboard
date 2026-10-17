@@ -53,4 +53,4 @@ mcp23s17 = "0.2.0"
 embuild = "0.33.0"
 
 [package.metadata.esp-idf-sys]
-esp_idf_tools_install_dir = "custom:../.embuild/"
+esp_idf_tools_install_dir = "custom:../../.embuild/"
