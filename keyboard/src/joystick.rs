@@ -23,7 +23,6 @@ const INVERT_Y: bool = false;
 pub struct Joystick {
     i2c: SharedI2c,
     irq: PinDriver<'static, Input>,
-    state: State,
     remainder_x: i32,
     remainder_y: i32,
 }
@@ -38,7 +37,6 @@ impl Joystick {
                 Some(Self {
                     i2c,
                     irq,
-                    state: State::default(),
                     remainder_x: 0,
                     remainder_y: 0,
                 })
@@ -62,19 +60,24 @@ impl Joystick {
         &mut self.irq
     }
 
-    /// `INT` is asserted: the state changed or the joystick is in use.
-    pub fn pending(&self) -> bool {
-        self.irq.is_low()
+    /// Applies the state to the mouse report if `INT` is asserted.
+    /// Returns `true` while the joystick is in use, so the keyboard must not go idle.
+    pub fn poll(&mut self, keyboard: &mut BleMouseKeyboard) -> bool {
+        // `INT` is asserted: the state changed or the joystick is in use.
+        if self.irq.is_high() {
+            return false;
+        }
+
+        if let Err(e) = self.register(keyboard) {
+            warn!("joystick read failed: {:?}", e);
+        }
+        true
     }
 
-    /// Reads the state and applies it to the mouse report.
-    /// Returns `true` when the mouse report has to be sent.
-    pub fn register(&mut self, keyboard: &mut BleMouseKeyboard) -> anyhow::Result<bool> {
+    fn register(&mut self, keyboard: &mut BleMouseKeyboard) -> anyhow::Result<()> {
         let mut bytes = [0; State::SIZE];
         self.i2c.write_read(ADDRESS, &[Register::State as u8], &mut bytes, TIMEOUT.ticks())?;
         let state = State::decode(&bytes);
-        let changed = state != self.state;
-        self.state = state;
 
         if state.is_pressed(BUTTON_LEFT) {
             keyboard.press_mouse(MouseKey::Left);
@@ -90,7 +93,7 @@ impl Joystick {
         let dy = travel(state.y, INVERT_Y, &mut self.remainder_y);
         keyboard.travel_mouse_cursor(dx, dy);
 
-        Ok(changed || state.is_active())
+        Ok(())
     }
 }
 

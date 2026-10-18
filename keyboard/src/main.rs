@@ -12,7 +12,6 @@ mod services;
 
 use std::num::NonZeroU32;
 use std::rc::Rc;
-use std::time::Instant;
 
 use embedded_hal::spi::MODE_0;
 use esp_idf_svc::hal::delay::Delay;
@@ -30,15 +29,15 @@ use esp_idf_svc::hal::spi::SpiDriverConfig;
 use esp_idf_svc::hal::task::notification::Notification;
 use esp_idf_svc::hal::units::*;
 use esp_idf_svc::log::EspLogger;
-use log::{info, warn};
+use log::info;
 use crate::bt::ble_mouse_keyboard::BleMouseKeyboard;
 use crate::display::Display;
 use crate::i2c_bus::SharedI2c;
 use crate::joystick::Joystick;
-use crate::layout::LayoutKey;
 use crate::layout::DEFAULT;
 use crate::key_matrix::KeyMatrix;
 use crate::sc::SpecialCombinationBuilder;
+use crate::sc::SpecialCombinations;
 use crate::sc::switch_layout::SwitchLayoutSpecialCombinationAction;
 use crate::sc::unpair::UnpairSpecialCombinationAction;
 use crate::services::Services;
@@ -60,14 +59,12 @@ fn main() {
 fn main_body() -> anyhow::Result<()> {
     storage::mount_vfs("/spiflash", "storage")?;
 
-    let (display, key_matrix, notification, mut ext_irq, mut joystick) = peripherals()?;
+    let (display, key_matrix, notification, mut joystick) = peripherals()?;
     
     let keyboard = BleMouseKeyboard::new()?;
     let delay = Delay::new_default();
 
-    let mut since_sleep = Instant::now();
-    let layouts = &DEFAULT;
-    let mut special_combinations = [
+    let mut special_combinations = SpecialCombinations::new(vec![
         SpecialCombinationBuilder::new()
             .by_coord(2, 4, Some(2))
             .build(SwitchLayoutSpecialCombinationAction),
@@ -76,135 +73,72 @@ fn main_body() -> anyhow::Result<()> {
             .by_coord(2, 4, None)
             .by_coord(3, 3, Some(3))
             .build(UnpairSpecialCombinationAction::new()),
-    ];
+    ]);
     
-    let mut svc = Services::new(keyboard, key_matrix, layouts, display);
+    let mut svc = Services::new(keyboard, key_matrix, display);
 
     svc.display.show_text("Welcome!")?;
 
     const DELAY_MS: u32 = 8;
     loop {
-        let mut all_up = true;
-        let mut send_key_report = false;
-        let mut send_mouse_report = false;
-        let mut send_media_key_report = false;
-
-        for sc in &mut special_combinations {
-            sc.new_scan();
-        }
-
-        let elaped_ms = since_sleep.elapsed().as_millis() as u32;
-        svc.key_matrix.register(elaped_ms, layouts, |kc| {
-            if let Some(layout_key) = kc.reg_as {
-                if kc.changed {
-                    match layout_key {
-                        LayoutKey::Key(_) | LayoutKey::KeyWithMod(_, _) | LayoutKey::Mod(_) => send_key_report = true,
-                        LayoutKey::Media(_) => send_media_key_report = true,
-                        LayoutKey::MouseKey(_) => send_mouse_report = true,
-                        _ => { }
-                    }
-                }
-
-                if kc.state {
-                    match layout_key {
-                        LayoutKey::Key(key) => svc.keyboard.press_key(*key),
-                        LayoutKey::KeyWithMod(key, key_mod) => {
-                            svc.keyboard.press_key_mod(*key_mod);
-                            svc.keyboard.press_key(*key);
-                        },
-                        LayoutKey::Mod(key_mod) => svc.keyboard.press_key_mod(*key_mod),
-                        LayoutKey::Media(media_key) => svc.keyboard.press_media_key(*media_key),
-                        LayoutKey::MouseKey(mouse_key) => svc.keyboard.press_mouse(*mouse_key),
-                        LayoutKey::MouseTravel { dx, dy } => {
-                            send_mouse_report = true;
-                            svc.keyboard.travel_mouse_cursor(*dx, *dy)
-                        },
-                        LayoutKey::MouseScroll { dy } => {
-                            send_mouse_report = true;
-                            svc.keyboard.travel_mouse_wheel(*dy)
-                        },
-                        _ => { }
-                    }
-                }
+        let mut all_up = !svc.key_matrix.register(|kc| {
+            if let (true, Some(layout_key)) = (kc.state, kc.reg_as) {
+                layout_key.press(&mut svc.keyboard);
             }
-
-            for sc in &mut special_combinations {
-                sc.changed(&kc);
-            }
-
-            if kc.state {
-                all_up = false;
-            }
+            special_combinations.changed(&kc);
         })?;
 
         if let Some(joystick) = &mut joystick {
-            if joystick.pending() {
-                all_up = false;
-                match joystick.register(&mut svc.keyboard) {
-                    Ok(send) => send_mouse_report |= send,
-                    Err(e) => warn!("joystick read failed: {:?}", e),
-                }
-            }
+            all_up &= !joystick.poll(&mut svc.keyboard);
         }
 
-        if svc.keyboard.connected() {
-            if send_key_report {
-                svc.keyboard.send_key_report();
-            }
+        svc.keyboard.flush();
+        special_combinations.try_apply(&mut svc)?;
 
-            if send_mouse_report {
-                svc.keyboard.send_mouse_report();
-            }
-
-            if send_media_key_report {
-                svc.keyboard.send_media_key_report();
-            }
-        }
-
-        svc.keyboard.clear_keys();
-        svc.keyboard.clear_mouse();
-        svc.keyboard.clear_media_key();
-
-        for sc in &mut special_combinations {
-            sc.try_apply(&mut svc)?;
-        }
-
-        since_sleep = Instant::now();
         if all_up {
-            ext_irq.enable_interrupt()?;
-            if let Some(joystick) = &mut joystick {
-                joystick.irq_mut().enable_interrupt()?;
-            }
-            if notification.wait(IDLE_DELAY_TICKS.into()).is_none() {
-                info!("idle");
-
-                for sc in &mut special_combinations {
-                    sc.reset();
-                }
-
-                svc.keyboard.set_idle()?;
-
-                let deep_sleep_timeout = if svc.keyboard.connected() {
-                    DEEP_SLEEP_INACTIVE_TICKS
-                } else {
-                    DEEP_SLEEP_DISCONNECTED_TICKS
-                };
-
-                if notification.wait(deep_sleep_timeout.into()).is_none() {
-                    info!("entering deep sleep");
-                    enter_deep_sleep(&wakeup_pins(&ext_irq, &joystick));
-                }
-
-                svc.keyboard.set_active()?;
-                info!("active");
-            }
+            wait_for_activity(&notification, &mut svc, &mut joystick, &mut special_combinations)?;
         } else {
             delay.delay_ms(DELAY_MS);
         }
     }
 }
 
-fn peripherals() -> anyhow::Result<(Display, KeyMatrix<10, 5>, Rc<Notification>, PinDriver<'static, Input>, Option<Joystick>)> {
+fn wait_for_activity<const W: usize, const H: usize, const C: usize>(
+    notification: &Notification,
+    svc: &mut Services<W, H, C>,
+    joystick: &mut Option<Joystick>,
+    special_combinations: &mut SpecialCombinations<W, H, C>,
+) -> anyhow::Result<()> {
+    svc.key_matrix.irq_mut().enable_interrupt()?;
+    if let Some(joystick) = joystick {
+        joystick.irq_mut().enable_interrupt()?;
+    }
+
+    if notification.wait(IDLE_DELAY_TICKS.into()).is_some() {
+        return Ok(());
+    }
+
+    info!("idle");
+    special_combinations.reset();
+    svc.keyboard.set_idle()?;
+
+    let deep_sleep_timeout = if svc.keyboard.connected() {
+        DEEP_SLEEP_INACTIVE_TICKS
+    } else {
+        DEEP_SLEEP_DISCONNECTED_TICKS
+    };
+
+    if notification.wait(deep_sleep_timeout.into()).is_none() {
+        info!("entering deep sleep");
+        enter_deep_sleep(&wakeup_pins(&svc.key_matrix, joystick));
+    }
+
+    svc.keyboard.set_active()?;
+    info!("active");
+    Ok(())
+}
+
+fn peripherals() -> anyhow::Result<(Display, KeyMatrix<10, 5, 3>, Rc<Notification>, Option<Joystick>)> {
     let peripherals = Peripherals::take()?;
 
     let spi = peripherals.spi2;
@@ -216,7 +150,7 @@ fn peripherals() -> anyhow::Result<(Display, KeyMatrix<10, 5>, Rc<Notification>,
     let sda = peripherals.pins.gpio9;
     let scl = peripherals.pins.gpio10;
 
-    let mut ext_irq = PinDriver::input(peripherals.pins.gpio1, Pull::Up)?;
+    let ext_irq = PinDriver::input(peripherals.pins.gpio1, Pull::Up)?;
     let ext_cs = peripherals.pins.gpio8;
     // Pulled up, so a missing joystick reads as idle.
     let joystick_irq = PinDriver::input(peripherals.pins.gpio3, Pull::Up)?;
@@ -227,25 +161,27 @@ fn peripherals() -> anyhow::Result<(Display, KeyMatrix<10, 5>, Rc<Notification>,
     let display = Display::new(i2c.clone())?;
     let ext = new_extension(spi_driver, ext_cs)?;
     let mut joystick = Joystick::new(i2c, joystick_irq);
+    let mut key_matrix = KeyMatrix::new(ext, ext_irq, [0, 1, 2, 3, 4, 5, 6, 7, 14, 15], [8, 9, 10, 11, 12], &DEFAULT)?;
 
-    let pins = wakeup_pins(&ext_irq, &joystick);
+    let pins = wakeup_pins(&key_matrix, &joystick);
     prepare_deep_sleep(&pins);
     prepare_light_sleep(&pins);
     
     let notification = Rc::new(Notification::new());
-    setup_interrupt(&mut ext_irq, notification.clone())?;
+    setup_interrupt(key_matrix.irq_mut(), notification.clone())?;
     if let Some(joystick) = &mut joystick {
         setup_interrupt(joystick.irq_mut(), notification.clone())?;
     }
 
-    let key_matrix = KeyMatrix::new(ext, [0, 1, 2, 3, 4, 5, 6, 7, 14, 15], [8, 9, 10, 11, 12])?;
-
-    Ok((display, key_matrix, notification, ext_irq, joystick))
+    Ok((display, key_matrix, notification, joystick))
 }
 
 /// Interrupt pins that wake the keyboard up, all active low.
-fn wakeup_pins<'a>(ext_irq: &'a PinDriver<'static, Input>, joystick: &'a Option<Joystick>) -> Vec<&'a PinDriver<'static, Input>> {
-    let mut pins = vec![ext_irq];
+fn wakeup_pins<'a, const W: usize, const H: usize, const C: usize>(
+    key_matrix: &'a KeyMatrix<W, H, C>,
+    joystick: &'a Option<Joystick>,
+) -> Vec<&'a PinDriver<'static, Input>> {
+    let mut pins = vec![key_matrix.irq()];
     if let Some(joystick) = joystick {
         pins.push(joystick.irq());
     }

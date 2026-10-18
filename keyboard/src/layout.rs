@@ -1,6 +1,7 @@
 use log::error;
 
 use crate::bt::{Key, KeyMod, MediaKey, MouseKey};
+use crate::bt::ble_mouse_keyboard::BleMouseKeyboard;
 
 macro_rules! k {
     ($key:ident) => {
@@ -103,6 +104,23 @@ impl LayoutKey {
             true
         } else {
             false
+        }
+    }
+
+    /// Adds the held key to the reports.
+    pub fn press(&self, keyboard: &mut BleMouseKeyboard) {
+        match self {
+            LayoutKey::Key(key) => keyboard.press_key(*key),
+            LayoutKey::KeyWithMod(key, key_mod) => {
+                keyboard.press_key_mod(*key_mod);
+                keyboard.press_key(*key);
+            },
+            LayoutKey::Mod(key_mod) => keyboard.press_key_mod(*key_mod),
+            LayoutKey::Media(media_key) => keyboard.press_media_key(*media_key),
+            LayoutKey::MouseKey(mouse_key) => keyboard.press_mouse(*mouse_key),
+            LayoutKey::MouseTravel { dx, dy } => keyboard.travel_mouse_cursor(*dx, *dy),
+            LayoutKey::MouseScroll { dy } => keyboard.travel_mouse_wheel(*dy),
+            LayoutKey::Fn { .. } | LayoutKey::None => { }
         }
     }
 }

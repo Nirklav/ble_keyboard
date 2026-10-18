@@ -123,6 +123,10 @@ pub struct BleMouseKeyboard {
     key_report: KeyReport,
     media_key_report: MediaKeyReport,
     mouse_report: MouseReport,
+
+    sent_key_report: KeyReport,
+    sent_media_key_report: MediaKeyReport,
+    sent_mouse_buttons: u8,
 }
 
 #[allow(unused)]
@@ -199,21 +203,12 @@ impl BleMouseKeyboard {
             output_keyboard,
             input_media_keys,
             input_mouse,
-            key_report: KeyReport {
-                modifiers: 0,
-                reserved: 0,
-                keys: [0; 6],
-            },
-            media_key_report: MediaKeyReport {
-                keys: 0
-            },
-            mouse_report: MouseReport {
-                buttons: 0,
-                x: 0,
-                y: 0,
-                wheel: 0,
-                h_wheel: 0
-            },
+            key_report: KeyReport::default(),
+            media_key_report: MediaKeyReport::default(),
+            mouse_report: MouseReport::default(),
+            sent_key_report: KeyReport::default(),
+            sent_media_key_report: MediaKeyReport::default(),
+            sent_mouse_buttons: 0,
         })
     }
 
@@ -290,25 +285,8 @@ impl BleMouseKeyboard {
         self.key_report.modifiers |= modifier.bits();
     }
 
-    pub fn clear_keys(&mut self) {
-        self.key_report.modifiers = 0;
-        self.key_report.keys.fill(0);
-    }
-
-    pub fn send_key_report(&self) {
-        self.input_keyboard.lock().set_value(self.key_report.as_bytes()).notify();
-    }
-
     pub fn press_media_key(&mut self, key: MediaKey) {
         self.media_key_report.keys = key.keys;
-    }
-
-    pub fn clear_media_key(&mut self) {
-        self.media_key_report.keys = 0;
-    }
-  
-    pub fn send_media_key_report(&self) {
-        self.input_media_keys.lock().set_value(self.media_key_report.as_bytes()).notify();
     }
 
     pub fn press_mouse(&mut self, key: MouseKey) {
@@ -324,16 +302,35 @@ impl BleMouseKeyboard {
         self.mouse_report.wheel = self.mouse_report.wheel.saturating_add(v);
     }
 
-    pub fn clear_mouse(&mut self) {
-        self.mouse_report.buttons = 0;
-        self.mouse_report.x = 0;
-        self.mouse_report.y = 0;
-        self.mouse_report.wheel = 0;
-        self.mouse_report.h_wheel = 0;
-    }
+    pub fn flush(&mut self) {
+        if self.connected() {
+            if self.key_report != self.sent_key_report {
+                self.input_keyboard.lock().set_value(self.key_report.as_bytes()).notify();
+            }
 
-    pub fn send_mouse_report(&self) {
-        self.input_mouse.lock().set_value(self.mouse_report.as_bytes()).notify();
+            if self.media_key_report != self.sent_media_key_report {
+                self.input_media_keys.lock().set_value(self.media_key_report.as_bytes()).notify();
+            }
+
+            let mouse = &self.mouse_report;
+            let moved = mouse.x != 0 || mouse.y != 0 || mouse.wheel != 0 || mouse.h_wheel != 0;
+            if moved || mouse.buttons != self.sent_mouse_buttons {
+                self.input_mouse.lock().set_value(self.mouse_report.as_bytes()).notify();
+            }
+
+            self.sent_key_report = self.key_report;
+            self.sent_media_key_report = self.media_key_report;
+            self.sent_mouse_buttons = self.mouse_report.buttons;
+        } else {
+            // A host connecting later has to receive the keys that are still held.
+            self.sent_key_report = KeyReport::default();
+            self.sent_media_key_report = MediaKeyReport::default();
+            self.sent_mouse_buttons = 0;
+        }
+
+        self.key_report = KeyReport::default();
+        self.media_key_report = MediaKeyReport::default();
+        self.mouse_report = MouseReport::default();
     }
 
     pub fn unpair(&mut self) {

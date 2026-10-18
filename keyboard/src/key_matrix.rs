@@ -1,23 +1,34 @@
 use std::rc::Rc;
+use std::time::Instant;
 
-use esp_idf_svc::hal::{delay::Delay, spi::{SpiDeviceDriver, SpiDriver}};
+use esp_idf_svc::hal::{delay::Delay, gpio::{Input, PinDriver}, spi::{SpiDeviceDriver, SpiDriver}};
 use log::info;
 use mcp23s17::{InterruptMode, Mcp23s17};
 
 use crate::layout::{Layout, LayoutKey, Layouts};
 
-pub struct KeyMatrix<const W: usize, const H: usize> {
+/// Keys behind the MCP23S17 extension, it pulls `irq` low when a row goes low.
+pub struct KeyMatrix<const W: usize, const H: usize, const C: usize> {
     ext: Mcp23s17<SpiDeviceDriver<'static, Rc<SpiDriver<'static>>>>,
+    irq: PinDriver<'static, Input>,
     delay: Delay,
 
     column_pins: [u8; W],
     row_pins: [u8; H],
     keys: [[Key; H]; W],
+    layouts: &'static Layouts<W, H, C>,
     current_layout: usize,
+    last_scan: Instant,
 }
 
-impl<const W: usize, const H: usize> KeyMatrix<W, H> {
-    pub fn new(mut ext: Mcp23s17<SpiDeviceDriver<'static, Rc<SpiDriver<'static>>>>, column_pins: [u8; W], row_pins: [u8; H]) -> anyhow::Result<Self> {
+impl<const W: usize, const H: usize, const C: usize> KeyMatrix<W, H, C> {
+    pub fn new(
+        mut ext: Mcp23s17<SpiDeviceDriver<'static, Rc<SpiDriver<'static>>>>,
+        irq: PinDriver<'static, Input>,
+        column_pins: [u8; W],
+        row_pins: [u8; H],
+        layouts: &'static Layouts<W, H, C>,
+    ) -> anyhow::Result<Self> {
 
         for column in column_pins {
             map_err!(ext.pin_mode(column, mcp23s17::PinMode::Output));
@@ -30,15 +41,27 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
 
         Ok(Self {
             ext,
+            irq,
             delay: Delay::new(5),
             column_pins,
             row_pins,
             keys: [[Key::new(); H]; W],
-            current_layout: 0
+            layouts,
+            current_layout: 0,
+            last_scan: Instant::now(),
         })
     }
 
-    pub fn switch_layout<const C: usize>(&mut self, layouts: &'static Layouts<W, H, C>) -> &'static Layout<W, H> {
+    pub fn irq(&self) -> &PinDriver<'static, Input> {
+        &self.irq
+    }
+
+    pub fn irq_mut(&mut self) -> &mut PinDriver<'static, Input> {
+        &mut self.irq
+    }
+
+    pub fn switch_layout(&mut self) -> &'static Layout<W, H> {
+        let layouts = self.layouts;
         let layout = layouts.get(self.current_layout);
         let layout_key = layout.fn_layout_key();
         if let Some(LayoutKey::Fn { permanent_switch, .. }) = layout_key {
@@ -49,10 +72,15 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
         layouts.get(self.current_layout)
     }
 
-    pub fn register<const C: usize, F>(&mut self, last_delay_ms: u32, layouts: &'static Layouts<W, H, C>, mut key_process: F) -> anyhow::Result<()> 
+    /// Scans the matrix and passes every key to `key_process`.
+    /// Returns `true` if any key is pressed.
+    pub fn register<F>(&mut self, mut key_process: F) -> anyhow::Result<bool>
         where F: FnMut(KeyChange) {
-        
-        self.scan(last_delay_ms)?;
+        let layouts = self.layouts;
+
+        let elapsed_ms = self.last_scan.elapsed().as_millis() as u32;
+        self.last_scan = Instant::now();
+        self.scan(elapsed_ms)?;
 
         let original_layout = layouts.get(self.current_layout);
         let mut current_layout = original_layout;
@@ -66,9 +94,11 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
             }
         }
 
+        let mut any_pressed = false;
         for x in 0..W {
             for y in 0..H {
                 let key = &mut self.keys[x][y];
+                any_pressed |= key.state;
                 if key.state && key.changed {
                     if original_fn_coords == Some((x, y)) {
                         key.reg_as = Some(original_layout.get(x, y));
@@ -85,7 +115,7 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
             }
         }
 
-        Ok(())
+        Ok(any_pressed)
     }
 
     fn scan(&mut self, last_delay_ms: u32) -> anyhow::Result<()> {
@@ -158,7 +188,6 @@ impl Key {
             x: x as u8,
             y: y as u8,
             state: self.state,
-            changed: self.changed,
             reg_as: self.reg_as
         };
         self.changed = false;
@@ -171,6 +200,5 @@ pub struct KeyChange {
     pub x: u8,
     pub y: u8,
     pub state: bool,
-    pub changed: bool,
     pub reg_as: Option<&'static LayoutKey>
 }

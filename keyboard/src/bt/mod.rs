@@ -11,7 +11,7 @@ mod conn_params;
 
 #[allow(unused)]
 #[repr(packed)]
-#[derive(IntoBytes, Immutable)]
+#[derive(Default, IntoBytes, Immutable)]
 struct MouseReport {
     buttons: u8,
     x: i8,
@@ -34,7 +34,7 @@ bitflags! {
 
 #[allow(unused)]
 #[repr(packed)]
-#[derive(IntoBytes, Immutable)]
+#[derive(Clone, Copy, PartialEq, Default, IntoBytes, Immutable)]
 struct KeyReport {
     modifiers: u8,
     reserved: u8,
@@ -43,7 +43,7 @@ struct KeyReport {
 
 #[allow(unused)]
 #[repr(packed)]
-#[derive(Clone, Copy, IntoBytes, Immutable)]
+#[derive(Clone, Copy, PartialEq, Default, IntoBytes, Immutable)]
 struct MediaKeyReport {
     keys: u8
 }

@@ -56,10 +56,6 @@ pub struct SpecialCombination<const W: usize, const H: usize, const C: usize> {
 }
 
 impl<const W: usize, const H: usize, const C: usize> SpecialCombination<W, H, C> {
-    pub fn new_scan(&mut self) {
-        self.invalid = false;
-    }
-
     pub fn changed(&mut self, key: &KeyChange) {
         if let Some(layout_key) = key.reg_as {
 
@@ -127,6 +123,38 @@ impl<const W: usize, const H: usize, const C: usize> SpecialCombination<W, H, C>
         }
 
         self.invalid = false;
+    }
+}
+
+/// Runs every combination against the same key changes.
+pub struct SpecialCombinations<const W: usize, const H: usize, const C: usize> {
+    combinations: Vec<SpecialCombination<W, H, C>>
+}
+
+impl<const W: usize, const H: usize, const C: usize> SpecialCombinations<W, H, C> {
+    pub fn new(combinations: Vec<SpecialCombination<W, H, C>>) -> Self {
+        Self {
+            combinations
+        }
+    }
+
+    pub fn changed(&mut self, key: &KeyChange) {
+        for sc in &mut self.combinations {
+            sc.changed(key);
+        }
+    }
+
+    pub fn try_apply(&mut self, svc: &mut Services<W, H, C>) -> anyhow::Result<()> {
+        for sc in &mut self.combinations {
+            sc.try_apply(svc)?;
+        }
+        Ok(())
+    }
+
+    pub fn reset(&mut self) {
+        for sc in &mut self.combinations {
+            sc.reset();
+        }
     }
 }
 
