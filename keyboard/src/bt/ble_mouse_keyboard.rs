@@ -316,12 +316,12 @@ impl BleMouseKeyboard {
     }
 
     pub fn travel_mouse_cursor(&mut self, x: i8, y: i8) {
-        self.mouse_report.x += x;
-        self.mouse_report.y += y;
+        self.mouse_report.x = self.mouse_report.x.saturating_add(x);
+        self.mouse_report.y = self.mouse_report.y.saturating_add(y);
     }
 
     pub fn travel_mouse_wheel(&mut self, v: i8) {
-        self.mouse_report.wheel += v;
+        self.mouse_report.wheel = self.mouse_report.wheel.saturating_add(v);
     }
 
     pub fn clear_mouse(&mut self) {

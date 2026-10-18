@@ -6,16 +6,17 @@ use embedded_graphics::mono_font::ascii::FONT_10X20;
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
 use embedded_graphics::text::{Alignment, Baseline, Text, TextStyleBuilder};
-use esp_idf_svc::hal::i2c::I2cDriver;
 use esp_idf_svc::timer::{EspTaskTimerService, EspTimer};
 use log::error;
 use ssd1306::{I2CDisplayInterface, size::DisplaySize128x32};
 use ssd1306::prelude::{DisplayRotation, I2CInterface};
 use ssd1306::mode::{BufferedGraphicsMode, DisplayConfig};
 
+use crate::i2c_bus::SharedI2c;
+
 const SCREEN_TEXT_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub type Ssd1306 = ssd1306::Ssd1306<I2CInterface<I2cDriver<'static>>, DisplaySize128x32, BufferedGraphicsMode<DisplaySize128x32>>;
+pub type Ssd1306 = ssd1306::Ssd1306<I2CInterface<SharedI2c>, DisplaySize128x32, BufferedGraphicsMode<DisplaySize128x32>>;
 
 pub struct Display {
     inner: Inner,
@@ -24,8 +25,8 @@ pub struct Display {
 }
 
 impl Display {
-    pub fn new(i2c_driver: I2cDriver<'static>) -> anyhow::Result<Display> {
-        let i2c_display = I2CDisplayInterface::new(i2c_driver);
+    pub fn new(i2c: SharedI2c) -> anyhow::Result<Display> {
+        let i2c_display = I2CDisplayInterface::new(i2c);
         let timer_service = EspTaskTimerService::new()?;
 
         let mut display = ssd1306::Ssd1306::new(i2c_display, DisplaySize128x32, DisplayRotation::Rotate0)

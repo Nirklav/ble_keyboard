@@ -3,12 +3,29 @@
 //! Register based: the master writes one byte with a [`Register`] address, then
 //! reads the register's fixed-size payload (`write_read` transaction).
 //! Multi-byte values are little-endian.
+//!
+//! The joystick signals the master over the `INT` line: open-drain, active low,
+//! level triggered. `INT` is held low while the joystick has something to report:
+//! the [`State`] changed since the master last read it, or the state is active
+//! (stick deflected or a button pressed, see [`State::is_active`]). It is released
+//! once the master has read [`Register::State`] and the state is idle. So the master
+//! keeps polling [`Register::State`] while `INT` is low and stops when it goes high.
 
 /// 7-bit I2C address of the joystick.
 pub const ADDRESS: u8 = 0x42;
 
 /// Protocol version, returned by [`Register::Version`].
 pub const VERSION: u8 = 1;
+
+/// Axis values are in `-AXIS_MAX..=AXIS_MAX`, the dead zone around the center is already applied.
+pub const AXIS_MAX: i16 = 1000;
+
+/// [`State::buttons`] bit of the stick press.
+pub const BUTTON_STICK: u8 = 0;
+/// [`State::buttons`] bit of the left button.
+pub const BUTTON_LEFT: u8 = 1;
+/// [`State::buttons`] bit of the right button.
+pub const BUTTON_RIGHT: u8 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -77,6 +94,11 @@ impl State {
     pub fn is_pressed(&self, button: u8) -> bool {
         button < 8 && self.buttons & (1 << button) != 0
     }
+
+    /// Stick is deflected or any button is pressed.
+    pub fn is_active(&self) -> bool {
+        self.x != 0 || self.y != 0 || self.buttons != 0
+    }
 }
 
 #[cfg(test)]
@@ -90,6 +112,8 @@ mod tests {
         assert!(state.is_pressed(0));
         assert!(!state.is_pressed(1));
         assert!(state.is_pressed(2));
+        assert!(state.is_active());
+        assert!(!State::default().is_active());
     }
 
     #[test]

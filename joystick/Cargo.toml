@@ -10,11 +10,9 @@ edition = "2021"
 [dependencies]
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
-stm32f0xx-hal = { version = "0.18", features = ["stm32f030x6"]}
+stm32f0xx-hal = { version = "0.18", features = ["stm32f030x6", "rt"]}
 panic-halt = "*"
 embedded-hal = "0.2"
-shared-bus = "0.3"
-heapless = "0.8"
 protocol = { path = "../protocol" }
 
 # Optional dependencies, when stm32f0xx-hal will implement the embedded-hal 1.0
