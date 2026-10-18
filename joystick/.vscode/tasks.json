@@ -1,0 +1,30 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build bin",
+            "type": "shell",
+            "command": "cargo objcopy --release -- -O binary ../target/joystick.bin",
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": ["$rustc"],
+            "group": "build"
+        },
+        {
+            "label": "flash (uart)",
+            "type": "shell",
+            "command": "stm32flash -w ../target/joystick.bin -v -g 0x08000000 ${input:port}",
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": "build bin",
+            "problemMatcher": [],
+            "group": { "kind": "build", "isDefault": true }
+        }
+    ],
+    "inputs": [
+        {
+            "id": "port",
+            "type": "promptString",
+            "description": "Serial port",
+            "default": "/dev/ttyUSB0"
+        }
+    ]
+}
