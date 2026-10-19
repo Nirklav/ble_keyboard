@@ -1,0 +1,53 @@
+# Factory config of the keyboard (`default_config()` in keyboard/src/layout.rs).
+#
+# rows[y][x]: 5 rows of 10 keys per layout. Key actions:
+#   { Key = "A" }, { KeyWithMod = ["Num1", "LeftShift"] }, { Mod = "LeftCtrl | LeftAlt" },
+#   { Media = "VolumeUp" }, { MouseKey = "Left" }, { MouseTravel = { dx = 0, dy = -10 } },
+#   { MouseScroll = { dy = 10 } }, { Fn = { temporary = 1, permanent = 2 } }, "None".
+# Fn: layout index while held / after a double tap, at most one per layout.
+# Combos: keys by { Coord = { x, y } } or { Action = <key action> }; count = number of
+# presses, 0 = must be held, at least one key needs presses.
+# Actions: "SwitchLayout", { SetLayout = 2 }, "Unpair", "ResetConfig".
+# Check with `kb check examples/config.toml`, write with `kb push examples/config.toml`.
+
+version = 1
+width = 10
+height = 5
+
+[[layouts]]
+name = "MAIN"
+rows = [
+    [{ Key = "Escape" },   { KeyWithMod = ["Num1", "LeftShift"] }, { KeyWithMod = ["Num2", "LeftShift"] },    { KeyWithMod = ["Num3", "LeftShift"] }, { KeyWithMod = ["Num7", "LeftShift"] }, { Key = "KpAsterisk" }, { Key = "LeftBracket" }, { Key = "RightBracket" }, { Key = "Minus" },     { Key = "Equal" }],
+    [{ Key = "Q" },        { Key = "W" },                          { Key = "E" },                             { Key = "R" },                          { Key = "T" },                          { Key = "Y" },          { Key = "U" },           { Key = "I" },            { Key = "O" },         { Key = "P" }],
+    [{ Key = "A" },        { Key = "S" },                          { Key = "D" },                             { Key = "F" },                          { Key = "G" },                          { Key = "H" },          { Key = "J" },           { Key = "K" },            { Key = "L" },         { Key = "Semicolon" }],
+    [{ Key = "Z" },        { Key = "X" },                          { Key = "C" },                             { Key = "V" },                          { Key = "B" },                          { Key = "N" },          { Key = "M" },           { Key = "Comma" },        { Key = "Dot" },       { Key = "Slash" }],
+    [{ Mod = "LeftCtrl" }, { Mod = "LeftShift" },                  { Fn = { temporary = 1, permanent = 2 } }, { Mod = "LeftAlt" },                    { Key = "Backspace" },                  { Key = "Space" },      { Key = "Enter" },       { Key = "Apostrophe" },   { Key = "Backslash" }, { Key = "Tab" }],
+]
+
+[[layouts]]
+name = "FUNCTION"
+rows = [
+    [{ Key = "Grave" },    { Key = "F1" },        { Key = "F2" },  { Key = "F3" },      { Key = "F4" },     { Key = "F5" },    { Key = "LeftBracket" }, { Key = "RightBracket" }, { KeyWithMod = ["Num9", "LeftShift"] }, { KeyWithMod = ["Num0", "LeftShift"] }],
+    ["None",               { Key = "F6" },        { Key = "F7" },  { Key = "F8" },      { Key = "F9" },     { Key = "F10" },   { Key = "Num7" },        { Key = "Num8" },         { Key = "Num9" },                       { Key = "KpAsterisk" }],
+    [{ Key = "CapsLock" }, { Key = "F11" },       { Key = "F12" }, { Key = "Up" },      { Key = "Up" },     { Key = "Up" },    { Key = "Num4" },        { Key = "Num5" },         { Key = "Num6" },                       { Key = "KpPlus" }],
+    ["None",               "None",                "None",          { Key = "Left" },    { Key = "Down" },   { Key = "Right" }, { Key = "Num1" },        { Key = "Num2" },         { Key = "Num3" },                       { Key = "KpDot" }],
+    [{ Mod = "LeftCtrl" }, { Mod = "LeftShift" }, "None",          { Mod = "LeftAlt" }, { Key = "Delete" }, { Key = "Space" }, { Key = "Num0" },        { Key = "Minus" },        { Key = "Slash" },                      { Key = "KpEnter" }],
+]
+
+[[layouts]]
+name = "GAME"
+rows = [
+    [{ Key = "Escape" },   { Key = "Num1" },      { Key = "Num2" },                          { Key = "Num3" },    { Key = "Num4" },      { Key = "Num5" },  { Key = "Num6" },  { Key = "RightBracket" },               { Key = "Minus" },                      { Key = "Equal" }],
+    [{ Key = "Q" },        { Key = "W" },         { Key = "E" },                             { Key = "R" },       { Key = "T" },         { Key = "Y" },     { Key = "U" },     { Key = "I" },                          { Key = "O" },                          { MouseScroll = { dy = 10 } }],
+    [{ Key = "A" },        { Key = "S" },         { Key = "D" },                             { Key = "F" },       { Key = "G" },         { Key = "H" },     { Key = "J" },     { Key = "K" },                          { Key = "L" },                          { MouseScroll = { dy = -10 } }],
+    [{ Key = "Z" },        { Key = "X" },         { Key = "C" },                             { Key = "V" },       { Key = "B" },         { Key = "N" },     { Key = "M" },     { MouseKey = "Left" },                  { MouseTravel = { dx = 0, dy = -10 } }, { MouseKey = "Right" }],
+    [{ Mod = "LeftCtrl" }, { Mod = "LeftShift" }, { Fn = { temporary = 1, permanent = 0 } }, { Mod = "LeftAlt" }, { Key = "Backspace" }, { Key = "Space" }, { Key = "Enter" }, { MouseTravel = { dx = -10, dy = 0 } }, { MouseTravel = { dx = 0, dy = 10 } },  { MouseTravel = { dx = 10, dy = 0 } }],
+]
+
+[[combos]]
+keys = [{ ident = { Coord = { x = 2, y = 4 } }, count = 2 }]
+action = "SwitchLayout"
+
+[[combos]]
+keys = [{ ident = { Coord = { x = 2, y = 4 } }, count = 0 }, { ident = { Coord = { x = 3, y = 3 } }, count = 3 }]
+action = "Unpair"

@@ -1,5 +1,7 @@
  #[macro_use]
 mod map_no_std_error;
+mod config;
+mod config_store;
 mod storage;
 mod bt;
 mod key_matrix;
@@ -34,15 +36,18 @@ use crate::bt::ble_mouse_keyboard::BleMouseKeyboard;
 use crate::display::Display;
 use crate::i2c_bus::SharedI2c;
 use crate::joystick::Joystick;
-use crate::layout::DEFAULT;
+use crate::layout::Keymap;
 use crate::key_matrix::KeyMatrix;
-use crate::sc::SpecialCombinationBuilder;
 use crate::sc::SpecialCombinations;
-use crate::sc::switch_layout::SwitchLayoutSpecialCombinationAction;
-use crate::sc::unpair::UnpairSpecialCombinationAction;
 use crate::services::Services;
 
 type Mcp23s17 = mcp23s17::Mcp23s17<SpiDeviceDriver<'static, Rc<SpiDriver<'static>>>>;
+
+const WIDTH: usize = 10;
+const HEIGHT: usize = 5;
+
+/// Held at power-on, ignores the saved config: `Escape`.
+const BOOT_KEY: (usize, usize) = (0, 0);
 
 const IDLE_DELAY_TICKS: TickType = TickType::new_millis(1000);
 const DEEP_SLEEP_DISCONNECTED_TICKS: TickType = TickType::new_millis(30_000);
@@ -59,31 +64,29 @@ fn main() {
 fn main_body() -> anyhow::Result<()> {
     storage::mount_vfs("/spiflash", "storage")?;
 
-    let (display, key_matrix, notification, mut joystick) = peripherals()?;
+    let (display, mut key_matrix, notification, mut joystick) = peripherals(Keymap::from_config(&layout::default_config()))?;
+
+    // Escape also wakes the keyboard up from deep sleep, that's not a request to bypass.
+    let bypass = !woke_from_deep_sleep() && key_matrix.is_pressed(BOOT_KEY.0, BOOT_KEY.1)?;
+    let (config, source) = config::load(WIDTH as u8, HEIGHT as u8, bypass);
+    if let Err(e) = config.validate_for(WIDTH as u8, HEIGHT as u8) {
+        panic!("config is invalid: {}", e);
+    }
+    key_matrix.set_keymap(Keymap::from_config(&config));
     
-    let keyboard = BleMouseKeyboard::new()?;
+    let keyboard = BleMouseKeyboard::new(WIDTH as u8, HEIGHT as u8, config.to_bytes(), notification.notifier())?;
     let delay = Delay::new_default();
 
-    let mut special_combinations = SpecialCombinations::new(vec![
-        SpecialCombinationBuilder::new()
-            .by_coord(2, 4, Some(2))
-            .build(SwitchLayoutSpecialCombinationAction),
+    let mut special_combinations = SpecialCombinations::from_config(&config.combos);
+    let mut svc = Services::new(keyboard, key_matrix, display, config);
 
-        SpecialCombinationBuilder::new()
-            .by_coord(2, 4, None)
-            .by_coord(3, 3, Some(3))
-            .build(UnpairSpecialCombinationAction::new()),
-    ]);
-    
-    let mut svc = Services::new(keyboard, key_matrix, display);
-
-    svc.display.show_text("Welcome!")?;
+    svc.display.show_text(source.message().unwrap_or("Welcome!"))?;
 
     const DELAY_MS: u32 = 8;
     loop {
         let mut all_up = !svc.key_matrix.register(|kc| {
-            if let (true, Some(layout_key)) = (kc.state, kc.reg_as) {
-                layout_key.press(&mut svc.keyboard);
+            if let (true, Some(action)) = (kc.state, kc.reg_as) {
+                layout::press(&action, &mut svc.keyboard);
             }
             special_combinations.changed(&kc);
         })?;
@@ -96,6 +99,7 @@ fn main_body() -> anyhow::Result<()> {
         special_combinations.try_apply(&mut svc)?;
 
         if all_up {
+            config::apply_changes(&mut svc, &mut special_combinations)?;
             wait_for_activity(&notification, &mut svc, &mut joystick, &mut special_combinations)?;
         } else {
             delay.delay_ms(DELAY_MS);
@@ -103,19 +107,27 @@ fn main_body() -> anyhow::Result<()> {
     }
 }
 
-fn wait_for_activity<const W: usize, const H: usize, const C: usize>(
+fn wait_for_activity<const W: usize, const H: usize>(
     notification: &Notification,
-    svc: &mut Services<W, H, C>,
+    svc: &mut Services<W, H>,
     joystick: &mut Option<Joystick>,
-    special_combinations: &mut SpecialCombinations<W, H, C>,
+    special_combinations: &mut SpecialCombinations,
 ) -> anyhow::Result<()> {
     svc.key_matrix.irq_mut().enable_interrupt()?;
     if let Some(joystick) = joystick {
         joystick.irq_mut().enable_interrupt()?;
     }
 
+    // Config requests wake the loop up too, a submitted config is applied on return.
     if notification.wait(IDLE_DELAY_TICKS.into()).is_some() {
         return Ok(());
+    }
+
+    // Idle connection parameters (slave latency) would slow a config transfer down.
+    while svc.keyboard.config_service().transfer_active() {
+        if notification.wait(IDLE_DELAY_TICKS.into()).is_some() {
+            return Ok(());
+        }
     }
 
     info!("idle");
@@ -126,11 +138,17 @@ fn wait_for_activity<const W: usize, const H: usize, const C: usize>(
         DEEP_SLEEP_INACTIVE_TICKS
     } else {
         DEEP_SLEEP_DISCONNECTED_TICKS
-    };
+    }
+    .into();
 
-    if notification.wait(deep_sleep_timeout.into()).is_none() {
-        info!("entering deep sleep");
-        enter_deep_sleep(&wakeup_pins(&svc.key_matrix, joystick));
+    // No deep sleep while the config app is connected; its pings don't wake the loop up,
+    // so the keyboard stays idle and checks again after another timeout.
+    while notification.wait(deep_sleep_timeout).is_none() {
+        if !svc.keyboard.config_service().session_active() {
+            info!("entering deep sleep");
+            enter_deep_sleep(&wakeup_pins(&svc.key_matrix, joystick));
+        }
+        info!("deep sleep postponed, the config app is connected");
     }
 
     svc.keyboard.set_active()?;
@@ -138,7 +156,11 @@ fn wait_for_activity<const W: usize, const H: usize, const C: usize>(
     Ok(())
 }
 
-fn peripherals() -> anyhow::Result<(Display, KeyMatrix<10, 5, 3>, Rc<Notification>, Option<Joystick>)> {
+fn woke_from_deep_sleep() -> bool {
+    unsafe { esp_idf_sys::esp_reset_reason() == esp_idf_sys::esp_reset_reason_t_ESP_RST_DEEPSLEEP }
+}
+
+fn peripherals(keymap: Keymap) -> anyhow::Result<(Display, KeyMatrix<WIDTH, HEIGHT>, Rc<Notification>, Option<Joystick>)> {
     let peripherals = Peripherals::take()?;
 
     let spi = peripherals.spi2;
@@ -161,7 +183,7 @@ fn peripherals() -> anyhow::Result<(Display, KeyMatrix<10, 5, 3>, Rc<Notificatio
     let display = Display::new(i2c.clone())?;
     let ext = new_extension(spi_driver, ext_cs)?;
     let mut joystick = Joystick::new(i2c, joystick_irq);
-    let mut key_matrix = KeyMatrix::new(ext, ext_irq, [0, 1, 2, 3, 4, 5, 6, 7, 14, 15], [8, 9, 10, 11, 12], &DEFAULT)?;
+    let mut key_matrix = KeyMatrix::new(ext, ext_irq, [0, 1, 2, 3, 4, 5, 6, 7, 14, 15], [8, 9, 10, 11, 12], keymap)?;
 
     let pins = wakeup_pins(&key_matrix, &joystick);
     prepare_deep_sleep(&pins);
@@ -177,8 +199,8 @@ fn peripherals() -> anyhow::Result<(Display, KeyMatrix<10, 5, 3>, Rc<Notificatio
 }
 
 /// Interrupt pins that wake the keyboard up, all active low.
-fn wakeup_pins<'a, const W: usize, const H: usize, const C: usize>(
-    key_matrix: &'a KeyMatrix<W, H, C>,
+fn wakeup_pins<'a, const W: usize, const H: usize>(
+    key_matrix: &'a KeyMatrix<W, H>,
     joystick: &'a Option<Joystick>,
 ) -> Vec<&'a PinDriver<'static, Input>> {
     let mut pins = vec![key_matrix.irq()];

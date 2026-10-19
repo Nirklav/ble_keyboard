@@ -1,110 +1,142 @@
-use core::fmt::Debug;
+use std::fmt::Write;
 
+use log::{error, info};
+use protocol::config::{recovery_combo, Combo, ComboAction, ComboKey, ComboKeyIdent};
+
+use crate::config::Pending;
 use crate::key_matrix::KeyChange;
-use crate::layout::LayoutKey;
 use crate::services::Services;
 
-pub mod switch_layout;
-pub mod unpair;
-
-pub struct SpecialCombinationBuilder {
-    combination: Vec<ScKey>
+#[derive(Debug)]
+struct ScAction {
+    action: ComboAction,
+    buf: String,
+    /// Presses left that the display shows, so it's redrawn only when they change.
+    shown_left: Option<u8>
 }
 
-impl SpecialCombinationBuilder {
-    pub fn new() -> Self {
+impl ScAction {
+    fn new(action: ComboAction) -> Self {
         Self {
-            combination: Vec::new()
+            action,
+            buf: String::new(),
+            shown_left: None
         }
     }
 
-    pub fn by_coord(mut self, x: u8, y: u8, required_count: Option<u8>) -> Self {
-        let sc_key = ScKey::new(ScKeyIdent::Coord { x, y }, required_count);
-        self.combination.push(sc_key);
-        self
-    }
+    fn on_progress<const W: usize, const H: usize>(&mut self, combination: &[ScKey], svc: &mut Services<W, H>) -> anyhow::Result<()> {
+        let label = match self.action {
+            ComboAction::Unpair => "Unpair",
+            ComboAction::ResetConfig => "Reset",
+            ComboAction::SwitchLayout | ComboAction::SetLayout(_) => return Ok(())
+        };
 
-    #[allow(unused)]
-    pub fn by_name(mut self, key: LayoutKey, required_count: Option<u8>) -> Self {
-        let sc_key = ScKey::new(ScKeyIdent::Name(key), required_count);
-        self.combination.push(sc_key);
-        self
-    }
-
-    pub fn build<A: SpecialCombinationAction<W, H, C> + 'static, const W: usize, const H: usize, const C: usize>(self, action: A) -> SpecialCombination<W, H, C> {
-        SpecialCombination {
-            action: Box::new(action),
-            combination: self.combination,
-            invalid: false
+        let left = combination.iter()
+            .filter(|sc_key| sc_key.required_count > 0 && sc_key.count > 0)
+            .map(|sc_key| sc_key.required_count.saturating_sub(sc_key.count))
+            .last();
+        if left.is_none() || left == self.shown_left {
+            return Ok(());
         }
-    }
-}
+        self.shown_left = left;
 
-pub trait SpecialCombinationAction<const W: usize, const H: usize, const C: usize> : Debug {
-    fn on_progress(&mut self, _combinations: &Vec<ScKey>, _svc: &mut Services<W, H, C>)  -> anyhow::Result<()> {
+        self.buf.clear();
+        let _ = write!(self.buf, "{}: {}", label, left.unwrap_or_default());
+        svc.display.show_text(&self.buf)?;
         Ok(())
     }
 
-    fn execute(&mut self, svc: &mut Services<W, H, C>)  -> anyhow::Result<()>;
+    fn execute<const W: usize, const H: usize>(&mut self, svc: &mut Services<W, H>) -> anyhow::Result<()> {
+        match self.action {
+            ComboAction::SwitchLayout => {
+                let new_layout = svc.key_matrix.switch_layout();
+                svc.display.show_text(new_layout.name())?;
+            },
+            ComboAction::SetLayout(idx) => {
+                match svc.key_matrix.set_layout(idx as usize) {
+                    Some(new_layout) => svc.display.show_text(new_layout.name())?,
+                    None => error!("SetLayout({}) is out of range, ignored.", idx)
+                }
+            },
+            ComboAction::Unpair => {
+                svc.display.show_text("Unpaired")?;
+                svc.keyboard.unpair();
+            },
+            ComboAction::ResetConfig => {
+                info!("Config reset requested");
+                svc.pending_config = Some(Pending::Reset);
+                svc.display.show_text("Default config")?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
-pub struct SpecialCombination<const W: usize, const H: usize, const C: usize> {
-    action: Box<dyn SpecialCombinationAction<W, H, C>>,
+pub struct SpecialCombination {
+    action: ScAction,
     combination: Vec<ScKey>,
     invalid: bool
 }
 
-impl<const W: usize, const H: usize, const C: usize> SpecialCombination<W, H, C> {
-    pub fn changed(&mut self, key: &KeyChange) {
-        if let Some(layout_key) = key.reg_as {
-
-            let mut any_matched = false;
-
-            for sc_key in &mut self.combination {
-                let matched = match &sc_key.ident {
-                    ScKeyIdent::Coord { x, y } => key.x == *x && key.y == *y,
-                    ScKeyIdent::Name(lk) => *layout_key == *lk,
-                };
-
-                if matched {
-                    any_matched = true;
-                }
-                
-                if key.state && !sc_key.pressed && matched {
-                    sc_key.pressed = true;
-                }
-
-                if !key.state && sc_key.pressed && matched {
-                    if sc_key.required_count == 0 {
-                        self.invalid = true;
-                    } else {
-                        sc_key.pressed = false;
-                        sc_key.count += 1;
-                    }   
-                }
-            }
-
-            if !any_matched {
-                self.invalid = true;
-            }
+impl SpecialCombination {
+    pub fn from_config(combo: &Combo) -> Self {
+        Self {
+            action: ScAction::new(combo.action),
+            combination: combo.keys.iter().map(ScKey::new).collect(),
+            invalid: false
         }
     }
 
-    pub fn try_apply(&mut self, svc: &mut Services<W, H, C>) -> anyhow::Result<()> {
+    /// Presses count only while the held keys of the combination are held,
+    /// any other key or releasing a held key breaks the combination.
+    pub fn changed(&mut self, key: &KeyChange) {
+        let Some(action) = key.reg_as else {
+            return;
+        };
 
+        let holding = self.holding();
+        let mut any_matched = false;
+
+        for sc_key in &mut self.combination {
+            let matched = match &sc_key.ident {
+                ComboKeyIdent::Coord { x, y } => key.x == *x && key.y == *y,
+                ComboKeyIdent::Action(ka) => action == *ka,
+            };
+            if !matched {
+                continue;
+            }
+            any_matched = true;
+
+            if key.state {
+                sc_key.pressed = true;
+            } else if sc_key.pressed {
+                sc_key.pressed = false;
+                if sc_key.required_count == 0 || !holding {
+                    self.invalid = true;
+                } else {
+                    sc_key.count = sc_key.count.saturating_add(1);
+                }
+            }
+        }
+
+        if !any_matched {
+            self.invalid = true;
+        }
+    }
+
+    fn holding(&self) -> bool {
+        self.combination.iter().all(|sc_key| sc_key.required_count > 0 || sc_key.pressed)
+    }
+
+    pub fn try_apply<const W: usize, const H: usize>(&mut self, svc: &mut Services<W, H>) -> anyhow::Result<()> {
         if self.invalid {
             self.reset();
             return Ok(());
         }
 
-        let mut matched = true;
-
-        for sc_key in &mut self.combination {
-            if sc_key.count < sc_key.required_count {
-                matched = false;
-            }
-        }
+        let matched = self.holding() && self.combination.iter()
+            .all(|sc_key| sc_key.count >= sc_key.required_count);
 
         self.action.on_progress(&self.combination, svc)?;
 
@@ -123,19 +155,31 @@ impl<const W: usize, const H: usize, const C: usize> SpecialCombination<W, H, C>
         }
 
         self.invalid = false;
+        self.action.shown_left = None;
     }
 }
 
 /// Runs every combination against the same key changes.
-pub struct SpecialCombinations<const W: usize, const H: usize, const C: usize> {
-    combinations: Vec<SpecialCombination<W, H, C>>
+/// The recovery combination always follows the configured ones.
+pub struct SpecialCombinations {
+    combinations: Vec<SpecialCombination>
 }
 
-impl<const W: usize, const H: usize, const C: usize> SpecialCombinations<W, H, C> {
-    pub fn new(combinations: Vec<SpecialCombination<W, H, C>>) -> Self {
+impl SpecialCombinations {
+    pub fn from_config(combos: &[Combo]) -> Self {
+        let combinations = combos.iter()
+            .chain(std::iter::once(&recovery_combo()))
+            .map(SpecialCombination::from_config)
+            .collect();
+
         Self {
             combinations
         }
+    }
+
+    /// Replaces the configured combinations, all progress is lost.
+    pub fn set(&mut self, combos: &[Combo]) {
+        *self = Self::from_config(combos);
     }
 
     pub fn changed(&mut self, key: &KeyChange) {
@@ -144,7 +188,7 @@ impl<const W: usize, const H: usize, const C: usize> SpecialCombinations<W, H, C
         }
     }
 
-    pub fn try_apply(&mut self, svc: &mut Services<W, H, C>) -> anyhow::Result<()> {
+    pub fn try_apply<const W: usize, const H: usize>(&mut self, svc: &mut Services<W, H>) -> anyhow::Result<()> {
         for sc in &mut self.combinations {
             sc.try_apply(svc)?;
         }
@@ -159,28 +203,19 @@ impl<const W: usize, const H: usize, const C: usize> SpecialCombinations<W, H, C
 }
 
 #[derive(Debug)]
-pub enum ScKeyIdent {
-    Coord {
-        x: u8,
-        y: u8
-    },
-    Name(LayoutKey)
-}
-
-#[derive(Debug)]
-pub struct ScKey {
-    ident: ScKeyIdent,
+struct ScKey {
+    ident: ComboKeyIdent,
     pressed: bool,
     required_count: u8,
     count: u8
 }
 
 impl ScKey {
-    pub fn new(ident: ScKeyIdent, required_count: Option<u8>) -> Self {
+    fn new(key: &ComboKey) -> Self {
         Self {
-            ident,
+            ident: key.ident,
             pressed: false,
-            required_count: required_count.unwrap_or_default(),
+            required_count: key.count,
             count: 0
         }
     }

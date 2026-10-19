@@ -3,5 +3,28 @@ name = "desktop"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "kb"
+path = "src/main.rs"
+
+[[bin]]
+name = "kb-gui"
+path = "src/bin/kb-gui/main.rs"
+
 [dependencies]
-protocol = { path = "../protocol" }
+anyhow = "1.0.104"
+btleplug = "0.13.5"
+clap = { version = "4.6.7", features = ["derive"] }
+eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "clipboard", "accesskit"] }
+futures = "0.3.34"
+protocol = { version = "0.1.0", path = "../protocol", features = ["std"] }
+rfd = "0.17.2"
+serde = "1.0.229"
+tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "time", "sync"] }
+toml = "1.1.8"
+uuid = "1.28.0"
+
+# Linux only (btleplug uses BlueZ over D-Bus): build libdbus from source, so that
+# building / testing on Linux doesn't need the libdbus-1-dev system package.
+[target.'cfg(target_os = "linux")'.dependencies]
+libdbus-sys = { version = "0.2.7", features = ["vendored"] }

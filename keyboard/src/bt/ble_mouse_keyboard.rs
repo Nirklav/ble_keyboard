@@ -2,13 +2,24 @@ use std::sync::Arc;
 
 use esp32_nimble::{BLEAdvertisementData, BLEHIDDevice, hid::*};
 use esp32_nimble::{utilities::mutex::Mutex, BLECharacteristic, BLEServer};
+use esp_idf_svc::hal::task::notification::Notifier;
 use zerocopy::IntoBytes;
 
+use crate::bt::config_service::ConfigService;
 use crate::bt::conn_params::ConnParams;
 
 use super::*;
 
 static IRK_FILE: &str = "/spiflash/irk_keym.txt";
+
+/// Last GATT database version the bonded hosts were told about, see [`signal_gatt_changed`].
+static GATT_DB_FILE: &str = "/spiflash/gatt_db.txt";
+/// Bump on any change of the services, characteristics or the HID report map:
+/// 1 - HID only, 2 - config service, 3 - keys up to F24.
+const GATT_DB_VERSION: &str = "3";
+
+/// ATT MTU asked for, a 247 bytes MTU fills one data length extended LL packet.
+const PREFERRED_MTU: u16 = 247;
 
 const KEYBOARD_ID: u8 = 0x01;
 const MEDIA_KEYS_ID: u8 = 0x02;
@@ -43,10 +54,10 @@ const HID_REPORT_DESCRIPTOR: &[u8] = hid!(
     (REPORT_COUNT, 0x06),       //   REPORT_COUNT (6) ; 6 bytes (Keys)
     (REPORT_SIZE, 0x08),        //   REPORT_SIZE(8)
     (LOGICAL_MINIMUM, 0x00),    //   LOGICAL_MINIMUM(0)
-    (LOGICAL_MAXIMUM, 0x65),    //   LOGICAL_MAXIMUM(0x65) ; 101 keys
+    (LOGICAL_MAXIMUM, 0x73),    //   LOGICAL_MAXIMUM(0x73) ; up to F24
     (USAGE_PAGE, 0x07),         //   USAGE_PAGE (Kbrd/Keypad)
     (USAGE_MINIMUM, 0x00),      //   USAGE_MINIMUM (0)
-    (USAGE_MAXIMUM, 0x65),      //   USAGE_MAXIMUM (0x65)
+    (USAGE_MAXIMUM, 0x73),      //   USAGE_MAXIMUM (0x73)
     (HIDINPUT, 0x00),           //   INPUT (Data,Array,Abs,No Wrap,Linear,Preferred State,No Null Position)
     (END_COLLECTION),           // END_COLLECTION
     // ------------------------------------------------- Media Keys
@@ -120,6 +131,8 @@ pub struct BleMouseKeyboard {
     input_media_keys: Arc<Mutex<BLECharacteristic>>,
     input_mouse: Arc<Mutex<BLECharacteristic>>,
 
+    config_service: ConfigService,
+
     key_report: KeyReport,
     media_key_report: MediaKeyReport,
     mouse_report: MouseReport,
@@ -131,7 +144,9 @@ pub struct BleMouseKeyboard {
 
 #[allow(unused)]
 impl BleMouseKeyboard {
-    pub fn new() -> anyhow::Result<Self> {
+    /// `width` x `height` keys, `current_config` is the encoded active config,
+    /// `wake` wakes the main loop up on config requests.
+    pub fn new(width: u8, height: u8, current_config: Vec<u8>, wake: Arc<Notifier>) -> anyhow::Result<Self> {
         unsafe {
             esp_idf_sys::ble_hs_cfg.store_gen_key_cb = Some(Self::gen_key_callback);
         }
@@ -152,18 +167,27 @@ impl BleMouseKeyboard {
             .set_io_cap(SecurityIOCap::NoInputNoOutput)
             .resolve_rpa();
 
+        if let Err(e) = device.set_preferred_mtu(PREFERRED_MTU) {
+            log::warn!("Failed to set preferred MTU: {:?}", e);
+        }
+
         let server = device.get_server();
         server.advertise_on_disconnect(true);
         server.on_connect(|server, desc| { 
             info!("Client connected: {:?}", desc);
             
-            ConnParams::ACTIVE.set(server, desc.conn_handle()).unwrap();
+            if let Err(e) = ConnParams::ACTIVE.set(server, desc.conn_handle()) {
+                log::warn!("Failed to set connection params: {:?}", e);
+            }
 
             let mut ble_advertising = device.get_advertising().lock();
             ble_advertising.stop();
         });
-        server.on_disconnect(|_desc, result| {
-            info!("Client disconnected: {:?}", result);
+        server.on_authentication_complete(|_server, desc, result| {
+            info!("Authentication complete: {:?}", result);
+            if result.is_ok() && desc.bonded() {
+                gatt_change_delivered();
+            }
         });
 
         let mut hid = BLEHIDDevice::new(server);
@@ -179,6 +203,14 @@ impl BleMouseKeyboard {
         hid.report_map(HID_REPORT_DESCRIPTOR);
 
         hid.set_battery_level(100);
+
+        // After the HID services, so their handles stay the same as in older firmware.
+        let config_service = ConfigService::register(server, width, height, current_config, wake);
+        let disconnect_service = config_service.clone();
+        server.on_disconnect(move |_desc, result| {
+            info!("Client disconnected: {:?}", result);
+            disconnect_service.on_disconnect();
+        });
 
         let mut ble_advertising_data = BLEAdvertisementData::new();
         ble_advertising_data
@@ -196,6 +228,8 @@ impl BleMouseKeyboard {
         if let Err(e) = ble_advertising.start() {
             bail!("error on advertising start [code: {:?}]", e);
         }
+        // The GATT server is started with the advertising.
+        signal_gatt_changed();
 
         Ok(Self {
             server,
@@ -203,6 +237,7 @@ impl BleMouseKeyboard {
             output_keyboard,
             input_media_keys,
             input_mouse,
+            config_service,
             key_report: KeyReport::default(),
             media_key_report: MediaKeyReport::default(),
             mouse_report: MouseReport::default(),
@@ -226,7 +261,7 @@ impl BleMouseKeyboard {
         match read_existing {
             Some(irk) => {
                 buf.copy_from_slice(&irk);
-                info!("IRK read: {:?}", &buf);
+                info!("IRK read");
             }
             None => {
                 esp_idf_sys::esp_fill_random(buf.as_mut_ptr() as *mut c_void, 16);
@@ -234,16 +269,16 @@ impl BleMouseKeyboard {
                     log::error!("Failed to write IRK file: {}", e);
                     return esp_idf_sys::BLE_HS_ESTORE_FAIL as i32;
                 }
-                info!("IRK generated: {:?}", &buf);
+                info!("IRK generated");
             }
         }
 
-        for i in 0..16 {
-            (*key).__bindgen_anon_1.irk[i] = buf[i];
-        }
-
-        info!("IRK set: {:?}", &(*key).__bindgen_anon_1.irk);
+        (*key).__bindgen_anon_1.irk = buf;
         0
+    }
+
+    pub fn config_service(&self) -> &ConfigService {
+        &self.config_service
     }
 
     pub fn connected(&self) -> bool {
@@ -286,7 +321,7 @@ impl BleMouseKeyboard {
     }
 
     pub fn press_media_key(&mut self, key: MediaKey) {
-        self.media_key_report.keys = key.keys;
+        self.media_key_report.keys |= key.report_bit();
     }
 
     pub fn press_mouse(&mut self, key: MouseKey) {
@@ -343,6 +378,34 @@ impl BleMouseKeyboard {
         unsafe {
             esp_idf_sys::esp_restart();
         }
+    }
+}
+
+/// Bonded hosts (Windows in particular) cache the GATT services and won't see the config service
+/// added by a firmware update. Once per [`GATT_DB_VERSION`], marks Service Changed (whole handle
+/// range) for every bonded host that subscribed to it: NimBLE indicates it to connected hosts and
+/// persists the flag for the others, it is sent when they reconnect.
+///
+/// NimBLE keeps the handle range in RAM only, so the indication is armed again on every boot until
+/// a bonded host has connected ([`gatt_change_delivered`]); hosts that reconnect only after a later
+/// reboot may get an empty range and keep the cache, they have to be paired again.
+fn signal_gatt_changed() {
+    if std::fs::read_to_string(GATT_DB_FILE).is_ok_and(|v| v == GATT_DB_VERSION) {
+        return;
+    }
+    info!("GATT database changed, indicating Service Changed to bonded hosts");
+    unsafe {
+        esp_idf_sys::ble_svc_gatt_changed(0x0001, 0xFFFF);
+    }
+}
+
+/// A bonded host has reconnected after [`signal_gatt_changed`], it got the indication.
+fn gatt_change_delivered() {
+    if std::fs::read_to_string(GATT_DB_FILE).is_ok_and(|v| v == GATT_DB_VERSION) {
+        return;
+    }
+    if let Err(e) = std::fs::write(GATT_DB_FILE, GATT_DB_VERSION) {
+        log::error!("Failed to write {}: {}", GATT_DB_FILE, e);
     }
 }
 

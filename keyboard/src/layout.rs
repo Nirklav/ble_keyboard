@@ -1,172 +1,164 @@
 use log::error;
+use protocol::config::{Combo, ComboAction, ComboKey, ComboKeyIdent, Config, KeyAction, CONFIG_VERSION};
 
-use crate::bt::{Key, KeyMod, MediaKey, MouseKey};
+use crate::bt::{Key, KeyMod, MouseKey};
 use crate::bt::ble_mouse_keyboard::BleMouseKeyboard;
 
 macro_rules! k {
     ($key:ident) => {
-        LayoutKey::Key(Key::$key)
+        KeyAction::Key(Key::$key)
     };
 }
 
 macro_rules! m {
     ($key:ident) => {
-        LayoutKey::Mod(KeyMod::$key)
+        KeyAction::Mod(KeyMod::$key)
     };
 }
 
 macro_rules! km {
     ($key:ident, $modif:ident) => {
-        LayoutKey::KeyWithMod(Key::$key, KeyMod::$modif)
+        KeyAction::KeyWithMod(Key::$key, KeyMod::$modif)
     };
 }
 
-pub struct Layout<const W: usize, const H: usize> {
-    name: &'static str,
-    map: [[LayoutKey; W]; H],
+macro_rules! f {
+    ($temporary:expr, $permanent:expr) => {
+        KeyAction::Fn { temporary: $temporary, permanent: $permanent }
+    };
+}
+
+/// Layout with the `Fn` key position computed at load.
+pub struct Layout {
+    name: String,
+    rows: Vec<Vec<KeyAction>>,
     fn_coord: Option<(usize, usize)>
 }
 
-impl<const W: usize, const H: usize> Layout<W, H> {
-    const fn new(name: &'static str, map: [[LayoutKey; W]; H]) -> Self {
-        let mut fn_coord = None;
-
-        let mut x = 0;
-        'outer: while x < W {
-            let mut y = 0;
-            while y < H {
-                if let &LayoutKey::Fn { .. } =  &map[y][x] {
-                    fn_coord = Some((x, y));
-                    break 'outer;
-                }
-                y += 1;
-            }
-            x += 1;
-        }
-
+impl Layout {
+    fn new(layout: &protocol::config::Layout) -> Self {
         Self {
-            name,
-            map,
-            fn_coord
+            name: layout.name.clone(),
+            rows: layout.rows.clone(),
+            fn_coord: layout.fn_coord()
         }
     }
 
-    pub fn name(&self) -> &'static str {
-        self.name
-    }
- 
-    pub fn get(&self, x: usize, y: usize) -> &LayoutKey {
-        &self.map[y][x]
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
-    pub fn fn_layout_key(&self) -> Option<&LayoutKey> {
-        self.fn_coord.map_or(None, |fn_coord| Some(&self.map[fn_coord.1][fn_coord.0]))
+    pub fn get(&self, x: usize, y: usize) -> KeyAction {
+        self.rows.get(y)
+            .and_then(|row| row.get(x))
+            .copied()
+            .unwrap_or(KeyAction::None)
     }
 
-    pub fn fn_coords(&self) -> Option<(usize, usize)> {
+    pub fn fn_action(&self) -> Option<KeyAction> {
+        self.fn_coord.map(|(x, y)| self.get(x, y))
+    }
+
+    pub fn fn_coord(&self) -> Option<(usize, usize)> {
         self.fn_coord
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum LayoutKey {
-    Key(Key),
-    KeyWithMod(Key, KeyMod),
-    Mod(KeyMod),
-    #[allow(unused)]
-    Media(MediaKey),
-    MouseKey(MouseKey),
-    MouseTravel {
-        dx: i8,
-        dy: i8
-    },
-    MouseScroll {
-        dy: i8
-    },
-    Fn {
-        temporary_switch: usize,
-        permanent_switch: usize,
-    },
-    None
+/// Runtime layouts, built from a [`Config`].
+pub struct Keymap {
+    layouts: Vec<Layout>
 }
 
-impl LayoutKey {
-    pub const fn new_fn(temporary_switch: usize, permanent_switch: usize) -> Self {
-        LayoutKey::Fn {
-            temporary_switch,
-            permanent_switch
-        }
-    }
-
-    #[allow(unused)]
-    pub fn is_fn(&self) -> bool {
-        if let LayoutKey::Fn { .. } = self {
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Adds the held key to the reports.
-    pub fn press(&self, keyboard: &mut BleMouseKeyboard) {
-        match self {
-            LayoutKey::Key(key) => keyboard.press_key(*key),
-            LayoutKey::KeyWithMod(key, key_mod) => {
-                keyboard.press_key_mod(*key_mod);
-                keyboard.press_key(*key);
-            },
-            LayoutKey::Mod(key_mod) => keyboard.press_key_mod(*key_mod),
-            LayoutKey::Media(media_key) => keyboard.press_media_key(*media_key),
-            LayoutKey::MouseKey(mouse_key) => keyboard.press_mouse(*mouse_key),
-            LayoutKey::MouseTravel { dx, dy } => keyboard.travel_mouse_cursor(*dx, *dy),
-            LayoutKey::MouseScroll { dy } => keyboard.travel_mouse_wheel(*dy),
-            LayoutKey::Fn { .. } | LayoutKey::None => { }
-        }
-    }
-}
-
-pub struct Layouts<const W: usize, const H: usize, const C: usize> {
-    values: [Layout<W, H>; C]
-}
-
-impl<const W: usize, const H: usize, const C: usize> Layouts<W, H, C> {
-    const fn new(values: [Layout<W, H>; C]) -> Self {
+impl Keymap {
+    pub fn from_config(config: &Config) -> Self {
         Self {
-            values
+            layouts: config.layouts.iter().map(Layout::new).collect()
         }
     }
-    
-    pub(crate) fn get(&self, idx: usize) -> &Layout<W, H> {
-        if idx >= C {
+
+    pub fn len(&self) -> usize {
+        self.layouts.len()
+    }
+
+    pub fn get(&self, idx: usize) -> &Layout {
+        if idx >= self.layouts.len() {
             error!("idx out of bounds, returning first layout.");
-            return &self.values[0];
+            return &self.layouts[0];
         }
 
-        &self.values[idx]
+        &self.layouts[idx]
     }
 }
 
-pub const DEFAULT: Layouts<10, 5, 3> = Layouts::new([
-    Layout::new("MAIN", [
-        [k!(Escape),   km!(Num1, LeftShift), km!(Num2, LeftShift),    km!(Num3, LeftShift), km!(Num7, LeftShift), k!(KpAsterisk), k!(LeftBracket), k!(RightBracket), k!(Minus),     k!(Equal)],
-        [k!(Q),        k!(W),                k!(E),                   k!(R),                k!(T),                k!(Y),          k!(U),           k!(I),            k!(O),         k!(P)],
-        [k!(A),        k!(S),                k!(D),                   k!(F),                k!(G),                k!(H),          k!(J),           k!(K),            k!(L),         k!(Semicolon)],
-        [k!(Z),        k!(X),                k!(C),                   k!(V),                k!(B),                k!(N),          k!(M),           k!(Comma),        k!(Dot),       k!(Slash)],
-        [m!(LeftCtrl), m!(LeftShift),        LayoutKey::new_fn(1, 2), m!(LeftAlt),          k!(Backspace),        k!(Space),      k!(Enter),       k!(Apostrophe),   k!(Backslash), k!(Tab)],
-    ]),
-    Layout::new("FUNCTION", [
-        [k!(Grave),       k!(F1),          k!(F2),          k!(F3),      k!(F4),     k!(F5),    k!(LeftBracket), k!(RightBracket), km!(Num9, LeftShift), km!(Num0, LeftShift)],
-        [LayoutKey::None, k!(F6),          k!(F7),          k!(F8),      k!(F9),     k!(F10),   k!(Num7),        k!(Num8),         k!(Num9),             k!(KpAsterisk)],
-        [k!(CapsLock),    k!(F11),         k!(F12),         k!(Up),      k!(Up),     k!(Up),    k!(Num4),        k!(Num5),         k!(Num6),             k!(KpPlus)],
-        [LayoutKey::None, LayoutKey::None, LayoutKey::None, k!(Left),    k!(Down),   k!(Right), k!(Num1),        k!(Num2),         k!(Num3),             k!(KpDot)],
-        [m!(LeftCtrl),    m!(LeftShift),   LayoutKey::None, m!(LeftAlt), k!(Delete), k!(Space), k!(Num0),        k!(Minus),        k!(Slash),            k!(KpEnter)],
-    ]),
-    Layout::new("GAME", [
-        [k!(Escape),   k!(Num1),      k!(Num2),                k!(Num3),    k!(Num4),      k!(Num5),  k!(Num6),  k!(RightBracket),                          k!(Minus),                                k!(Equal)],
-        [k!(Q),        k!(W),         k!(E),                   k!(R),       k!(T),         k!(Y),     k!(U),     k!(I),                                     k!(O),                                    LayoutKey::MouseScroll { dy: 10 }],
-        [k!(A),        k!(S),         k!(D),                   k!(F),       k!(G),         k!(H),     k!(J),     k!(K),                                     k!(L),                                    LayoutKey::MouseScroll { dy: -10 }],
-        [k!(Z),        k!(X),         k!(C),                   k!(V),       k!(B),         k!(N),     k!(M),     LayoutKey::MouseKey(MouseKey::Left),       LayoutKey::MouseTravel { dx: 0, dy:-10 }, LayoutKey::MouseKey(MouseKey::Right)],
-        [m!(LeftCtrl), m!(LeftShift), LayoutKey::new_fn(1, 0), m!(LeftAlt), k!(Backspace), k!(Space), k!(Enter), LayoutKey::MouseTravel { dx: -10, dy: 0 }, LayoutKey::MouseTravel { dx: 0, dy: 10 }, LayoutKey::MouseTravel { dx: 10, dy: 0 }],
-    ])
-]);
+/// Adds the held key to the reports.
+pub fn press(action: &KeyAction, keyboard: &mut BleMouseKeyboard) {
+    match action {
+        KeyAction::Key(key) => keyboard.press_key(*key),
+        KeyAction::KeyWithMod(key, key_mod) => {
+            keyboard.press_key_mod(*key_mod);
+            keyboard.press_key(*key);
+        },
+        KeyAction::Mod(key_mod) => keyboard.press_key_mod(*key_mod),
+        KeyAction::Media(media_key) => keyboard.press_media_key(*media_key),
+        KeyAction::MouseKey(mouse_key) => keyboard.press_mouse(*mouse_key),
+        KeyAction::MouseTravel { dx, dy } => keyboard.travel_mouse_cursor(*dx, *dy),
+        KeyAction::MouseScroll { dy } => keyboard.travel_mouse_wheel(*dy),
+        KeyAction::Fn { .. } | KeyAction::None => { }
+    }
+}
 
+/// Factory config.
+pub fn default_config() -> Config {
+    Config {
+        version: CONFIG_VERSION,
+        width: 10,
+        height: 5,
+        layouts: vec![
+            protocol::config::Layout {
+                name: "MAIN".to_string(),
+                rows: vec![
+                    vec![k!(Escape),   km!(Num1, LeftShift), km!(Num2, LeftShift), km!(Num3, LeftShift), km!(Num7, LeftShift), k!(KpAsterisk), k!(LeftBracket), k!(RightBracket), k!(Minus),     k!(Equal)],
+                    vec![k!(Q),        k!(W),                k!(E),                k!(R),                k!(T),                k!(Y),          k!(U),           k!(I),            k!(O),         k!(P)],
+                    vec![k!(A),        k!(S),                k!(D),                k!(F),                k!(G),                k!(H),          k!(J),           k!(K),            k!(L),         k!(Semicolon)],
+                    vec![k!(Z),        k!(X),                k!(C),                k!(V),                k!(B),                k!(N),          k!(M),           k!(Comma),        k!(Dot),       k!(Slash)],
+                    vec![m!(LeftCtrl), m!(LeftShift),        f!(1, 2),             m!(LeftAlt),          k!(Backspace),        k!(Space),      k!(Enter),       k!(Apostrophe),   k!(Backslash), k!(Tab)],
+                ]
+            },
+            protocol::config::Layout {
+                name: "FUNCTION".to_string(),
+                rows: vec![
+                    vec![k!(Grave),       k!(F1),          k!(F2),          k!(F3),      k!(F4),     k!(F5),    k!(LeftBracket), k!(RightBracket), km!(Num9, LeftShift), km!(Num0, LeftShift)],
+                    vec![KeyAction::None, k!(F6),          k!(F7),          k!(F8),      k!(F9),     k!(F10),   k!(Num7),        k!(Num8),         k!(Num9),             k!(KpAsterisk)],
+                    vec![k!(CapsLock),    k!(F11),         k!(F12),         k!(Up),      k!(Up),     k!(Up),    k!(Num4),        k!(Num5),         k!(Num6),             k!(KpPlus)],
+                    vec![KeyAction::None, KeyAction::None, KeyAction::None, k!(Left),    k!(Down),   k!(Right), k!(Num1),        k!(Num2),         k!(Num3),             k!(KpDot)],
+                    vec![m!(LeftCtrl),    m!(LeftShift),   KeyAction::None, m!(LeftAlt), k!(Delete), k!(Space), k!(Num0),        k!(Minus),        k!(Slash),            k!(KpEnter)],
+                ]
+            },
+            protocol::config::Layout {
+                name: "GAME".to_string(),
+                rows: vec![
+                    vec![k!(Escape),   k!(Num1),      k!(Num2),      k!(Num3),    k!(Num4),      k!(Num5),  k!(Num6),  k!(RightBracket),                          k!(Minus),                                k!(Equal)],
+                    vec![k!(Q),        k!(W),         k!(E),         k!(R),       k!(T),         k!(Y),     k!(U),     k!(I),                                     k!(O),                                    KeyAction::MouseScroll { dy: 10 }],
+                    vec![k!(A),        k!(S),         k!(D),         k!(F),       k!(G),         k!(H),     k!(J),     k!(K),                                     k!(L),                                    KeyAction::MouseScroll { dy: -10 }],
+                    vec![k!(Z),        k!(X),         k!(C),         k!(V),       k!(B),         k!(N),     k!(M),     KeyAction::MouseKey(MouseKey::Left),       KeyAction::MouseTravel { dx: 0, dy:-10 }, KeyAction::MouseKey(MouseKey::Right)],
+                    vec![m!(LeftCtrl), m!(LeftShift), f!(1, 0),      m!(LeftAlt), k!(Backspace), k!(Space), k!(Enter), KeyAction::MouseTravel { dx: -10, dy: 0 }, KeyAction::MouseTravel { dx: 0, dy: 10 }, KeyAction::MouseTravel { dx: 10, dy: 0 }],
+                ]
+            },
+        ],
+        combos: vec![
+            Combo {
+                keys: vec![
+                    ComboKey { ident: ComboKeyIdent::Coord { x: 2, y: 4 }, count: 2 },
+                ],
+                action: ComboAction::SwitchLayout
+            },
+            Combo {
+                keys: vec![
+                    ComboKey { ident: ComboKeyIdent::Coord { x: 2, y: 4 }, count: 0 },
+                    ComboKey { ident: ComboKeyIdent::Coord { x: 3, y: 3 }, count: 3 },
+                ],
+                action: ComboAction::Unpair
+            },
+        ]
+    }
+}

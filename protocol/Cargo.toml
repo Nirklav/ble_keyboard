@@ -4,4 +4,16 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.82"
 
+[features]
+default = []
+# Config model, BLE config protocol (needs a global allocator).
+alloc = ["serde/alloc", "postcard/alloc"]
+std = ["alloc", "serde/std", "postcard/use-std"]
+
 [dependencies]
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+postcard = { version = "1.1", default-features = false }
+bitflags = { version = "2.4", features = ["serde"] }
+
+[dev-dependencies]
+toml = "0.8"
