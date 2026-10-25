@@ -10,7 +10,7 @@ use crate::i2c_bus::SharedI2c;
 const TIMEOUT: TickType = TickType::new_millis(20);
 
 /// Cursor travel at full deflection, in pixels per poll.
-const MAX_SPEED: i32 = 12;
+const MAX_SPEED: i32 = 18;
 
 /// Sub-pixel accumulator scale, so slow movement isn't lost to rounding.
 const SUB_PIXEL: i32 = 256;
@@ -18,13 +18,16 @@ const SUB_PIXEL: i32 = 256;
 const INVERT_X: bool = false;
 const INVERT_Y: bool = false;
 
+/// Share of the gap to the target speed closed per poll while the stick is deflected.
+const ACCELERATION: i32 = 4;
+
 /// Joystick extension, see [`protocol::joystick`].
 /// It holds `INT` low while there is a state to read, so it's polled only then.
 pub struct Joystick {
     i2c: SharedI2c,
     irq: PinDriver<'static, Input>,
-    remainder_x: i32,
-    remainder_y: i32,
+    x: Inertia,
+    y: Inertia,
 }
 
 impl Joystick {
@@ -37,8 +40,8 @@ impl Joystick {
                 Some(Self {
                     i2c,
                     irq,
-                    remainder_x: 0,
-                    remainder_y: 0,
+                    x: Inertia::default(),
+                    y: Inertia::default(),
                 })
             },
             Ok(()) => {
@@ -89,26 +92,54 @@ impl Joystick {
             keyboard.press_mouse(MouseKey::Middle);
         }
 
-        let dx = travel(state.x, INVERT_X, &mut self.remainder_x);
-        let dy = travel(state.y, INVERT_Y, &mut self.remainder_y);
+        let (x, y) = target_speed(state.x, state.y);
+        let dx = self.x.travel(if INVERT_X { -x } else { x });
+        let dy = self.y.travel(if INVERT_Y { -y } else { y });
         keyboard.travel_mouse_cursor(dx, dy);
 
         Ok(())
     }
 }
 
-/// Converts an axis to pixels per poll. Quadratic, so small deflections are precise.
-fn travel(axis: i16, invert: bool, remainder: &mut i32) -> i8 {
-    if axis == 0 {
-        *remainder = 0;
-        return 0;
+/// Converts the stick deflection to the cursor speed, in sub-pixels per poll.
+/// Quadratic on the deflection length, so small deflections are precise. The length
+/// is clamped to [`AXIS_MAX`], so the speed is the same in any direction, diagonals included.
+fn target_speed(x: i16, y: i16) -> (i32, i32) {
+    let (x, y) = (x as f32, y as f32);
+    let length = (x * x + y * y).sqrt();
+    if length == 0.0 {
+        return (0, 0);
     }
 
-    let axis = if invert { -(axis as i32) } else { axis as i32 };
-    let max = AXIS_MAX as i32;
-    *remainder += axis * axis.abs() * MAX_SPEED * SUB_PIXEL / (max * max);
+    let deflection = (length / AXIS_MAX as f32).min(1.0);
+    let speed = deflection * deflection * (MAX_SPEED * SUB_PIXEL) as f32;
+    ((x / length * speed) as i32, (y / length * speed) as i32)
+}
 
-    let pixels = *remainder / SUB_PIXEL;
-    *remainder -= pixels * SUB_PIXEL;
-    pixels.clamp(i8::MIN as i32, i8::MAX as i32) as i8
+/// Cursor speed along one axis, in sub-pixels per poll.
+/// It ramps up while the stick is deflected and drops to zero on release.
+#[derive(Default)]
+struct Inertia {
+    speed: i32,
+    remainder: i32,
+}
+
+impl Inertia {
+    /// Moves towards the `target` speed, returns the pixels to travel this poll.
+    fn travel(&mut self, target: i32) -> i8 {
+        if target == 0 {
+            self.speed = 0;
+            self.remainder = 0;
+            return 0;
+        }
+
+        let step = (target - self.speed) / ACCELERATION;
+        // Without this, a slow target would never be reached because of the rounding.
+        self.speed = if step == 0 { target } else { self.speed + step };
+
+        self.remainder += self.speed;
+        let pixels = self.remainder / SUB_PIXEL;
+        self.remainder -= pixels * SUB_PIXEL;
+        pixels.clamp(i8::MIN as i32, i8::MAX as i32) as i8
+    }
 }
