@@ -26,6 +26,8 @@ desktop/scripts/gui.sh log              # app stdout / stderr, e.g. after a cras
 - Give several shots distinct names (`shot target/kb-gui/combos.png`) when comparing screens.
 - Without a keyboard nearby: `gui.sh start --offline` opens the editor right away
   with the example config. "Connect" needs Bluetooth (BlueZ), which WSL usually doesn't have.
+- `gui.sh start --fake-keyboard` talks to a fake keyboard instead: connect, read, write and factory
+  reset work with delays and progress, so the connected UI can be looked at. Combines with `--offline`.
 - Every action brings the window to the front and moves the user's mouse: the user's desktop is in use,
   so keep sessions short and `stop` the app when done.
 - `type` switches the window's input language to English while typing and restores it afterwards.

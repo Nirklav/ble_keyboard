@@ -1,5 +1,7 @@
 //! Short texts for keys and actions shown on the grid buttons and in pickers.
 
+use std::ops::Range;
+
 use protocol::config::{ComboAction, ComboKey, ComboKeyIdent, KeyAction, Layout};
 use protocol::keys::{Key, KeyMod, MediaKey, MouseKey};
 
@@ -19,6 +21,20 @@ pub const KEYS: [Key; 116] = {
         F13, F14, F15, F16, F17, F18, F19, F20, F21, F22, F23, F24,
     ]
 };
+
+/// Groups of [`KEYS`] for the key picker: the title and the index ranges in `KEYS`.
+/// Every key is in one group; the HID error codes are last, nobody needs them on a key.
+#[allow(clippy::single_range_in_vec_init)] // Slices of ranges, not ranges.
+pub const KEY_GROUPS: [(&str, &[Range<usize>]); 8] = [
+    ("", &[0..1]),
+    ("Letters", &[4..30]),
+    ("Digits", &[30..40]),
+    ("Basic and punctuation", &[40..58]),
+    ("Function keys", &[58..70, 104..116]),
+    ("Navigation and editing", &[70..83]),
+    ("Keypad", &[83..100, 103..104]),
+    ("Other", &[100..103, 1..4]),
+];
 
 /// Modifier bits with their short names, in report bit order.
 pub const MODIFIERS: [(KeyMod, &str); 8] = [
@@ -105,6 +121,35 @@ pub fn key_label(key: Key) -> String {
     label.to_string()
 }
 
+/// Character of `key` with Shift on the US layout, e.g. `!` for `Num1`; `None` for letters and the rest.
+fn shifted_label(key: Key) -> Option<&'static str> {
+    let label = match key {
+        Key::Num1 => "!",
+        Key::Num2 => "@",
+        Key::Num3 => "#",
+        Key::Num4 => "$",
+        Key::Num5 => "%",
+        Key::Num6 => "^",
+        Key::Num7 => "&",
+        Key::Num8 => "*",
+        Key::Num9 => "(",
+        Key::Num0 => ")",
+        Key::Minus => "_",
+        Key::Equal => "+",
+        Key::LeftBracket => "{",
+        Key::RightBracket => "}",
+        Key::Backslash => "|",
+        Key::Semicolon => ":",
+        Key::Apostrophe => "\"",
+        Key::Grave => "~",
+        Key::Comma => "<",
+        Key::Dot => ">",
+        Key::Slash => "?",
+        _ => return None,
+    };
+    Some(label)
+}
+
 /// Modifiers joined with `+`, e.g. `LCtrl+LShift`; `-` if empty.
 pub fn mods_label(mods: KeyMod) -> String {
     if mods.is_empty() {
@@ -150,6 +195,9 @@ pub fn action_label(action: &KeyAction) -> String {
     match *action {
         KeyAction::Key(key) => key_label(key),
         KeyAction::KeyWithMod(key, mods) if mods.is_empty() => key_label(key),
+        KeyAction::KeyWithMod(key, KeyMod::LeftShift) if shifted_label(key).is_some() => {
+            shifted_label(key).unwrap_or_default().to_string()
+        }
         KeyAction::KeyWithMod(key, mods) => format!("{}+{}", mods_prefix(mods), key_label(key)),
         KeyAction::Mod(mods) => mods_label(mods),
         KeyAction::Media(key) => media_label(key).to_string(),
@@ -202,7 +250,24 @@ pub fn combo_key_label(key: &ComboKey, layout: Option<&Layout>) -> String {
     let ident = combo_ident_label(key, layout);
     match key.count {
         0 => format!("{ident} hold"),
-        count => format!("{ident} x{count}"),
+        count => format!("{ident} ×{count}"),
+    }
+}
+
+/// Short combo key for a chip, e.g. `Fn 1/2 hold` or `Esc ×5`: a position is named by the action
+/// of that key in `layout`, the coordinates only if the key is empty.
+pub fn combo_key_chip(key: &ComboKey, layout: Option<&Layout>) -> String {
+    let ident = match key.ident {
+        ComboKeyIdent::Coord { x, y } => match layout.and_then(|l| l.get(x as usize, y as usize)) {
+            Some(action) if *action != KeyAction::None => action_label(action),
+            _ => format!("({x}, {y})"),
+        },
+        ComboKeyIdent::Action(KeyAction::None) => "None".to_string(),
+        ComboKeyIdent::Action(action) => action_label(&action),
+    };
+    match key.count {
+        0 => format!("{ident} hold"),
+        count => format!("{ident} ×{count}"),
     }
 }
 
@@ -237,5 +302,20 @@ mod tests {
             assert_eq!(key.usage() as usize, i, "{key:?}");
         }
         assert_eq!(KEYS.last(), Some(&Key::F24));
+    }
+
+    #[test]
+    fn shift_with_a_symbol_key_shows_the_symbol() {
+        assert_eq!(action_label(&KeyAction::KeyWithMod(Key::Num1, KeyMod::LeftShift)), "!");
+        assert_eq!(action_label(&KeyAction::KeyWithMod(Key::A, KeyMod::LeftShift)), "Shift+A");
+        assert_eq!(action_label(&KeyAction::KeyWithMod(Key::Num1, KeyMod::LeftCtrl)), "Ctrl+1");
+    }
+
+    #[test]
+    fn key_groups_cover_every_key_once() {
+        let mut indices: Vec<usize> =
+            KEY_GROUPS.iter().flat_map(|(_, ranges)| ranges.iter().cloned().flatten()).collect();
+        indices.sort();
+        assert_eq!(indices, (0..KEYS.len()).collect::<Vec<_>>());
     }
 }

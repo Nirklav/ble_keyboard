@@ -9,7 +9,8 @@ use protocol::config::{
 use crate::app::{App, EditTarget, KeyEditor, Screen};
 use crate::editing;
 use crate::labels;
-use crate::views::{key_grid, layout_select, nav_button};
+use crate::theme;
+use crate::views::{KeyMark, key_grid, layout_select};
 
 /// List of the combos: the built-in recovery one, then the configured ones.
 pub fn list(app: &mut App, ui: &mut egui::Ui) {
@@ -17,21 +18,21 @@ pub fn list(app: &mut App, ui: &mut egui::Ui) {
     let layouts = editing::layout_names(config);
     let mut open = None;
 
-    ui.strong("Built-in");
+    theme::section_heading(ui, "Built-in");
     ui.weak("Part of the firmware, always active, can't be changed or removed.");
-    ui.add_space(4.0);
+    ui.add_space(theme::GAP_XS);
     let recovery = recovery_combo();
     let title = labels::combo_action_label(&recovery.action, &layouts);
-    if nav_button(ui, LIST_BUTTON, &title, &summary(config, &recovery)).clicked() {
+    if combo_button(ui, &title, &chips(config, &recovery)).clicked() {
         open = Some(None);
     }
-    ui.add_space(12.0);
+    ui.add_space(theme::GAP_L);
 
-    ui.strong(format!("Configured ({} of {MAX_COMBOS})", config.combos.len()));
-    ui.add_space(4.0);
+    theme::section_heading(ui, format!("Configured ({} of {MAX_COMBOS})", config.combos.len()));
+    ui.add_space(theme::GAP_XS);
     for (index, combo) in config.combos.iter().enumerate() {
         let title = format!("{}. {}", index + 1, labels::combo_action_label(&combo.action, &layouts));
-        if nav_button(ui, LIST_BUTTON, &title, &summary(config, combo)).clicked() {
+        if combo_button(ui, &title, &chips(config, combo)).clicked() {
             open = Some(Some(index));
         }
     }
@@ -39,7 +40,7 @@ pub fn list(app: &mut App, ui: &mut egui::Ui) {
         app.go(Screen::Combo(index));
     }
 
-    ui.add_space(4.0);
+    ui.add_space(theme::GAP_XS);
     let add = ui
         .add_enabled(app.doc.config.combos.len() < MAX_COMBOS, egui::Button::new("+ Add combo"))
         .on_disabled_hover_text(format!("At most {MAX_COMBOS} combos"));
@@ -55,25 +56,62 @@ pub fn list(app: &mut App, ui: &mut egui::Ui) {
 }
 
 /// Size of a combo button in the list.
-const LIST_BUTTON: egui::Vec2 = egui::vec2(420.0, 48.0);
+const LIST_BUTTON: egui::Vec2 = egui::vec2(420.0, 60.0);
+/// Height of a key chip on a combo button.
+const CHIP_HEIGHT: f32 = 20.0;
+
+/// Combo button in the list: the action and the keys as chips.
+fn combo_button(ui: &mut egui::Ui, title: &str, keys: &[String]) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(LIST_BUTTON, egui::Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    let visuals = ui.style().interact(&response);
+    let painter = ui.painter().with_clip_rect(rect);
+    painter.rect(rect, visuals.corner_radius, visuals.weak_bg_fill, visuals.bg_stroke, egui::StrokeKind::Inside);
+    let left = rect.left() + theme::GAP_M;
+    let title_pos = egui::pos2(left, rect.top() + theme::GAP_S);
+    painter.text(title_pos, egui::Align2::LEFT_TOP, title, egui::FontId::proportional(16.0), visuals.text_color());
+
+    let font = egui::FontId::proportional(12.0);
+    let weak = ui.visuals().weak_text_color();
+    let center_y = rect.bottom() - theme::GAP_S - CHIP_HEIGHT / 2.0;
+    let mut x = left;
+    for (index, key) in keys.iter().enumerate() {
+        if index > 0 {
+            let pos = egui::pos2(x + theme::GAP_XS, center_y);
+            let plus = painter.text(pos, egui::Align2::LEFT_CENTER, "+", font.clone(), weak);
+            x = plus.right() + theme::GAP_XS;
+        }
+        let galley = painter.layout_no_wrap(key.clone(), font.clone(), visuals.text_color());
+        let chip = egui::Rect::from_min_size(
+            egui::pos2(x, center_y - CHIP_HEIGHT / 2.0),
+            egui::vec2(galley.size().x + 2.0 * theme::GAP_S, CHIP_HEIGHT),
+        );
+        painter.rect_filled(chip, egui::CornerRadius::same(4), ui.visuals().panel_fill);
+        painter.galley(egui::pos2(chip.left() + theme::GAP_S, center_y - galley.size().y / 2.0), galley, weak);
+        x = chip.right();
+    }
+    response
+}
 
 /// Combo `index`, `None` for the built-in recovery one (read only).
 pub fn show(app: &mut App, ui: &mut egui::Ui, index: Option<usize>) {
     let recovery = recovery_combo();
     grid(app, ui, &recovery);
-    ui.add_space(8.0);
+    ui.add_space(theme::GAP_S);
     ui.separator();
 
     let Some(index) = index else {
         ui.weak("Built into the firmware: always active, can't be changed or removed.");
-        ui.add_space(4.0);
-        egui::Grid::new("recovery").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
+        ui.add_space(theme::GAP_XS);
+        egui::Grid::new("recovery").num_columns(2).spacing([theme::GAP_M, theme::GAP_XS]).show(ui, |ui| {
             ui.label("Action:");
             ui.label(labels::combo_action_label(&recovery.action, &[]));
             ui.end_row();
             for (number, key) in recovery.keys.iter().enumerate() {
                 ui.label(format!("Key {}:", number + 1));
-                ui.monospace(labels::combo_key_label(key, app.doc.config.layouts.get(app.grid_layout)));
+                ui.label(labels::combo_key_label(key, app.doc.config.layouts.get(app.grid_layout)));
                 ui.end_row();
             }
         });
@@ -112,7 +150,8 @@ fn grid(app: &mut App, ui: &mut egui::Ui, recovery: &Combo) {
         Screen::Combo(Some(index)) => &config.combos[index],
         _ => recovery,
     };
-    let clicked = key_grid(ui, &config.layouts[app.grid_layout], |x, y| editing::combo_uses_coord(combo, x, y));
+    let mark = |x, y| if editing::combo_uses_coord(combo, x, y) { KeyMark::Marked } else { KeyMark::None };
+    let clicked = key_grid(ui, &config.layouts[app.grid_layout], mark);
 
     if let (Some((x, y)), Some((combo, key))) = (clicked, app.picking) {
         app.doc.config.combos[combo].keys[key].ident = ComboKeyIdent::Coord { x: x as u8, y: y as u8 };
@@ -136,49 +175,60 @@ fn editor(app: &mut App, ui: &mut egui::Ui, index: usize) -> bool {
         action_select(ui, index, &mut combo.action, &layouts);
     });
 
-    ui.add_space(4.0);
+    ui.add_space(theme::GAP_XS);
     let mut remove_key = None;
     let keys = combo.keys.len();
-    egui::Grid::new("combo_keys").num_columns(6).spacing([12.0, 4.0]).show(ui, |ui| {
+    egui::Grid::new("combo_keys").num_columns(6).spacing([theme::GAP_M, theme::GAP_XS]).show(ui, |ui| {
         for key in 0..keys {
             ui.label(format!("Key {}:", key + 1));
             let combo_key = &mut combo.keys[key];
             let by_coord = matches!(combo_key.ident, ComboKeyIdent::Coord { .. });
-            ui.horizontal(|ui| {
-                if ui.selectable_label(by_coord, "Position").clicked() && !by_coord {
+            // A position is picked on the grid right away; an action is edited in the editor panel,
+            // which would turn the key back into an action if left open on a position.
+            match theme::segmented(ui, if by_coord { 0 } else { 1 }, &["Position", "Action"]) {
+                Some(0) => {
                     combo_key.ident = ComboKeyIdent::Coord { x: 0, y: 0 };
+                    app.picking = Some((index, key));
+                    let target = EditTarget::ComboKey { combo: index, key };
+                    if app.key_editor.as_ref().is_some_and(|e| e.target == target) {
+                        app.key_editor = None;
+                    }
                 }
-                if ui.selectable_label(!by_coord, "Action").clicked() && by_coord {
+                Some(_) => {
                     combo_key.ident = ComboKeyIdent::Action(KeyAction::None);
+                    if app.picking == Some((index, key)) {
+                        app.picking = None;
+                    }
                 }
-            });
+                None => {}
+            }
 
-            ui.monospace(texts.get(key).map_or("", String::as_str));
+            ui.label(texts.get(key).map_or("", String::as_str));
             match combo_key.ident {
                 ComboKeyIdent::Coord { .. } => {
                     let picking = app.picking == Some((index, key));
-                    if ui.selectable_label(picking, "Pick on grid").clicked() {
+                    if ui.add(egui::Button::new("Pick on grid").selected(picking)).clicked() {
                         app.picking = if picking { None } else { Some((index, key)) };
                     }
                 }
                 ComboKeyIdent::Action(_) => {
                     if ui.button("Edit...").clicked() {
-                        let search = app.key_editor.take().map(|e| e.search).unwrap_or_default();
-                        app.key_editor = Some(KeyEditor { target: EditTarget::ComboKey { combo: index, key }, search });
+                        let target = EditTarget::ComboKey { combo: index, key };
+                        app.key_editor = Some(KeyEditor::open(target, app.key_editor.take()));
                     }
                 }
             }
 
             let count = egui::DragValue::new(&mut combo_key.count)
                 .range(0..=u8::MAX)
-                .custom_formatter(|n, _| if n == 0.0 { "hold".to_string() } else { format!("x{n}") })
+                .custom_formatter(|n, _| if n == 0.0 { "hold".to_string() } else { format!("×{n}") })
                 .custom_parser(|text| match text.trim() {
                     "hold" => Some(0.0),
-                    text => text.trim_start_matches('x').parse().ok(),
+                    text => text.trim_start_matches(['x', '×']).parse().ok(),
                 });
             ui.add(count).on_hover_text("Number of presses (press + release); 0 means the key must be held");
 
-            if ui.add_enabled(keys > 1, egui::Button::new("x")).on_hover_text("Remove the key").clicked() {
+            if ui.add_enabled(keys > 1, egui::Button::new("×")).on_hover_text("Remove the key").clicked() {
                 remove_key = Some(key);
             }
             ui.end_row();
@@ -201,8 +251,8 @@ fn editor(app: &mut App, ui: &mut egui::Ui, index: usize) -> bool {
     {
         app.picking = Some((index, key));
     }
-    ui.add_space(8.0);
-    if ui.button("Remove the combo").clicked() {
+    ui.add_space(theme::GAP_L);
+    if ui.add(theme::danger_button("Remove the combo")).clicked() {
         remove = true;
     }
     remove
@@ -232,8 +282,7 @@ fn action_select(ui: &mut egui::Ui, index: usize, action: &mut ComboAction, layo
     ui.weak(labels::combo_action_label(action, layouts));
 }
 
-/// Keys of `combo`, e.g. `Fn 1/2 (2, 4) hold + Esc (0, 0) x5`, keys named after the first layout.
-fn summary(config: &Config, combo: &Combo) -> String {
-    let keys: Vec<String> = combo.keys.iter().map(|key| labels::combo_key_label(key, config.layouts.first())).collect();
-    keys.join(" + ")
+/// Chips of the keys of `combo`, keys named after the first layout.
+fn chips(config: &Config, combo: &Combo) -> Vec<String> {
+    combo.keys.iter().map(|key| labels::combo_key_chip(key, config.layouts.first())).collect()
 }

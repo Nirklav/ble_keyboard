@@ -1,24 +1,24 @@
-//! Overview: keyboard info and actions, layouts and the way to the combos.
+//! Overview: keyboard info, layouts and the way to the combos.
 
 use eframe::egui;
 use protocol::ble;
 use protocol::config::{CONFIG_VERSION, MAX_LAYOUTS};
 
-use crate::app::{App, Dialog, Discarding, Screen};
+use crate::app::{App, Screen};
 use crate::editing;
+use crate::theme;
 use crate::views::{NAV_SIZE, nav_button};
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     keyboard(app, ui);
-    ui.add_space(16.0);
 
-    ui.heading("Layouts");
-    ui.add_space(4.0);
+    theme::section_heading(ui, "Layouts");
+    ui.add_space(theme::GAP_XS);
     layouts(app, ui);
-    ui.add_space(16.0);
+    ui.add_space(theme::GAP_XL);
 
-    ui.heading("Combos");
-    ui.add_space(4.0);
+    theme::section_heading(ui, "Combos");
+    ui.add_space(theme::GAP_XS);
     let count = app.doc.config.combos.len();
     let subtitle = format!("{count} configured + factory reset");
     if nav_button(ui, NAV_SIZE, "Special combos", &subtitle).clicked() {
@@ -26,60 +26,41 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// Info of the connected keyboard and the config actions.
-fn keyboard(app: &mut App, ui: &mut egui::Ui) {
-    let idle = !app.device.is_busy() && app.device.worker.is_some();
+/// Info of the connected keyboard in one line, nothing offline.
+fn keyboard(app: &App, ui: &mut egui::Ui) {
     let device = &app.device;
-    match (&device.info, device.connected) {
-        (Some(info), true) => {
-            let warn = ui.visuals().warn_fg_color;
-            egui::Grid::new("device_info").num_columns(2).striped(true).show(ui, |ui| {
-                ui.label("Firmware");
-                ui.label(&info.firmware_version);
-                ui.end_row();
-                ui.label("Protocol");
-                if info.protocol_version == ble::PROTOCOL_VERSION {
-                    ui.label(info.protocol_version.to_string());
-                } else {
-                    ui.colored_label(warn, format!("{} (app: {})", info.protocol_version, ble::PROTOCOL_VERSION));
-                }
-                ui.end_row();
-                ui.label("Config format");
-                if info.config_version == CONFIG_VERSION {
-                    ui.label(info.config_version.to_string());
-                } else {
-                    ui.colored_label(warn, format!("{} (app: {CONFIG_VERSION})", info.config_version));
-                }
-                ui.end_row();
-                ui.label("Keys");
-                ui.label(format!("{}x{}", info.width, info.height));
-                ui.end_row();
-                ui.label("Max layouts / combos");
-                ui.label(format!("{} / {}", info.max_layouts, info.max_combos));
-                ui.end_row();
-            });
+    let (Some(info), true) = (&device.info, device.connected) else {
+        return;
+    };
+    // One weak line; a version other than the app one is highlighted, it may break reading or writing.
+    let warn = ui.visuals().warn_fg_color;
+    let version = |name: &str, keyboard: u16, app: u16| {
+        let text = format!("{name} {keyboard}");
+        if keyboard == app {
+            egui::RichText::new(text).color(ui.visuals().weak_text_color())
+        } else {
+            egui::RichText::new(format!("{text} (app: {app})")).color(warn)
         }
-        _ => {
-            ui.weak("Not connected, the config is edited offline.");
-        }
-    }
-    ui.add_space(4.0);
-
-    ui.horizontal(|ui| {
-        let pull = if app.device.connected { "Read again" } else { "Connect and read" };
-        let pull = ui
-            .add_enabled(idle, egui::Button::new(pull))
-            .on_hover_text("Read the config from the keyboard, replacing the edited one");
-        if pull.clicked() {
-            app.discard_then(ui.ctx(), Discarding::Pull);
-        }
-        let reset = ui
-            .add_enabled(idle, egui::Button::new("Factory reset..."))
-            .on_hover_text("Restore the factory config on the keyboard");
-        if reset.clicked() {
-            app.dialog = Some(Dialog::ConfirmReset);
+    };
+    let parts = [
+        egui::RichText::new(format!("Firmware {}", info.firmware_version)).color(ui.visuals().weak_text_color()),
+        version("Protocol", info.protocol_version, ble::PROTOCOL_VERSION),
+        version("Config format", info.config_version, CONFIG_VERSION),
+        egui::RichText::new(format!(
+            "{}×{} keys, up to {} layouts and {} combos",
+            info.width, info.height, info.max_layouts, info.max_combos
+        ))
+        .color(ui.visuals().weak_text_color()),
+    ];
+    ui.horizontal_wrapped(|ui| {
+        for (index, part) in parts.into_iter().enumerate() {
+            if index > 0 {
+                ui.weak("·");
+            }
+            ui.label(part);
         }
     });
+    ui.add_space(theme::GAP_L);
 }
 
 /// Layout buttons and "Add".

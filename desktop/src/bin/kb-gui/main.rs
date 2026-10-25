@@ -10,6 +10,7 @@ mod app;
 mod device;
 mod editing;
 mod labels;
+mod theme;
 mod views;
 
 use clap::Parser;
@@ -21,6 +22,9 @@ struct Args {
     /// Opens the editor with the example config right away, without connecting to the keyboard.
     #[arg(long)]
     offline: bool,
+    /// Talks to a fake keyboard instead of Bluetooth, to see the UI connected.
+    #[arg(long)]
+    fake_keyboard: bool,
 }
 
 fn main() -> eframe::Result {
@@ -37,5 +41,9 @@ fn main() -> eframe::Result {
             .with_min_inner_size(app::MIN_SIZE),
         ..Default::default()
     };
-    eframe::run_native("kb-gui", options, Box::new(|cc| Ok(Box::new(app::App::new(&cc.egui_ctx, args.offline)))))
+    eframe::run_native(
+        "kb-gui",
+        options,
+        Box::new(|cc| Ok(Box::new(app::App::new(&cc.egui_ctx, args.offline, args.fake_keyboard)))),
+    )
 }

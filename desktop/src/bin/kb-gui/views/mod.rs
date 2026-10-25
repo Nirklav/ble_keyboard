@@ -11,9 +11,10 @@ use protocol::config::{JoystickButton, KeyAction, Layout};
 
 use crate::app::{App, Screen};
 use crate::labels;
+use crate::theme;
 
 /// Size of a key button on the grid.
-const KEY_SIZE: egui::Vec2 = egui::vec2(72.0, 44.0);
+const KEY_SIZE: egui::Vec2 = egui::vec2(76.0, 46.0);
 
 /// Size of a big navigation button (layouts, combos).
 pub const NAV_SIZE: egui::Vec2 = egui::vec2(180.0, 56.0);
@@ -25,13 +26,14 @@ pub fn nav_button(ui: &mut egui::Ui, size: egui::Vec2, title: &str, subtitle: &s
         let visuals = ui.style().interact(&response);
         let painter = ui.painter();
         painter.rect(rect, visuals.corner_radius, visuals.weak_bg_fill, visuals.bg_stroke, egui::StrokeKind::Inside);
-        let left = rect.left() + 12.0;
+        let left = rect.left() + theme::GAP_M;
         let (title_y, align) = if subtitle.is_empty() {
             (rect.center().y, egui::Align2::LEFT_CENTER)
         } else {
             (rect.center().y - 1.0, egui::Align2::LEFT_BOTTOM)
         };
-        painter.text(egui::pos2(left, title_y), align, title, egui::FontId::proportional(16.0), visuals.text_color());
+        let title_font = egui::FontId::proportional(16.0);
+        painter.text(egui::pos2(left, title_y), align, title, title_font, visuals.text_color());
         if !subtitle.is_empty() {
             painter.text(
                 egui::pos2(left, rect.center().y + 3.0),
@@ -57,8 +59,8 @@ pub fn header(app: &mut App, ui: &mut egui::Ui) {
     };
     ui.horizontal(|ui| {
         let back = match app.screen {
-            Screen::Overview if app.device.connected => "< Disconnect",
-            _ => "< Back",
+            Screen::Overview if app.device.connected => "‹ Disconnect",
+            _ => "‹ Back",
         };
         let idle = !app.device.is_busy();
         if ui.add_enabled(idle || app.screen != Screen::Overview, egui::Button::new(back)).clicked() {
@@ -67,54 +69,87 @@ pub fn header(app: &mut App, ui: &mut egui::Ui) {
                 screen => app.go(screen.parent()),
             }
         }
-        ui.heading(title);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| app.push_button(ui));
+        ui.add_space(theme::GAP_XS);
+        ui.label(theme::screen_title(title));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| app.header_actions(ui));
     });
-    ui.separator();
 }
 
-/// Button of a key showing its `action`, Fn keys are tinted.
-fn key_button(ui: &mut egui::Ui, action: &KeyAction, selected: bool, hover: String) -> egui::Response {
-    let mut button = egui::Button::new(labels::action_label(action)).min_size(KEY_SIZE).selected(selected).truncate();
-    if matches!(action, KeyAction::Fn { .. }) && !selected {
-        button = button.fill(ui.visuals().widgets.inactive.bg_fill.lerp_to_gamma(egui::Color32::BLUE, 0.25));
+/// How a key is drawn on the grid besides its action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyMark {
+    None,
+    /// Edited in the key editor.
+    Selected,
+    /// Part of something, e.g. of a combo.
+    Marked,
+}
+
+/// Labels longer than this go on two lines, split at the first space, e.g. `Move` / `0,-10`.
+const KEY_LINE_CHARS: usize = 8;
+
+/// Button of a key showing its `action`; Fn keys are tinted, empty keys only outlined,
+/// `mark` overrides both.
+fn key_button(ui: &mut egui::Ui, action: &KeyAction, mark: KeyMark, hover: String) -> egui::Response {
+    let label = labels::action_label(action);
+    let colors = match mark {
+        KeyMark::Selected => Some((theme::ACCENT, theme::ACCENT_STROKE)),
+        KeyMark::Marked => Some((theme::MARK_FILL, theme::MARK_STROKE)),
+        KeyMark::None if matches!(action, KeyAction::Fn { .. }) => Some((theme::FN_FILL, theme::FN_FILL)),
+        KeyMark::None if *action == KeyAction::None => {
+            Some((egui::Color32::TRANSPARENT, ui.visuals().widgets.inactive.bg_fill))
+        }
+        KeyMark::None => None,
+    };
+    // Narrow padding: the key labels are short, but the keys are packed.
+    ui.spacing_mut().button_padding.x = theme::GAP_XS;
+    let button = match label.split_once(' ') {
+        Some((first, rest)) if label.chars().count() > KEY_LINE_CHARS => {
+            egui::Button::new(format!("{first}\n{rest}")).wrap_mode(egui::TextWrapMode::Extend)
+        }
+        _ => egui::Button::new(label).truncate(),
+    };
+    let mut button = button.min_size(KEY_SIZE);
+    if let Some((fill, stroke)) = colors {
+        button = button.fill(fill).stroke(egui::Stroke::new(1.0, stroke));
     }
     ui.add_sized(KEY_SIZE, button).on_hover_text(hover)
 }
+
+/// Spacing between the keys on the grid.
+const KEY_GAP: f32 = 6.0;
 
 /// Draws the joystick buttons of `layout` in a row, `selected` is marked.
 /// Returns the clicked button.
 pub fn joystick_row(ui: &mut egui::Ui, layout: &Layout, selected: Option<JoystickButton>) -> Option<JoystickButton> {
     let mut clicked = None;
-    ui.horizontal(|ui| {
-        ui.label("Joystick:");
+    egui::Grid::new("joystick").spacing([KEY_GAP, theme::GAP_XS]).show(ui, |ui| {
+        for button in JoystickButton::ALL {
+            ui.weak(button.name());
+        }
+        ui.end_row();
         for button in JoystickButton::ALL {
             let action = layout.joystick.get(button);
             let hover = format!("{} button: {}", button.name(), labels::action_description(action));
-            ui.vertical(|ui| {
-                ui.weak(button.name());
-                if key_button(ui, action, selected == Some(button), hover).clicked() {
-                    clicked = Some(button);
-                }
-            });
+            let mark = if selected == Some(button) { KeyMark::Selected } else { KeyMark::None };
+            if key_button(ui, action, mark, hover).clicked() {
+                clicked = Some(button);
+            }
         }
+        ui.end_row();
     });
     clicked
 }
 
-/// Draws `layout` as a grid of key buttons, `highlight(x, y)` marks keys as selected.
+/// Draws `layout` as a grid of key buttons, `mark(x, y)` says how to draw each key.
 /// Returns the clicked key `(x, y)`.
-pub fn key_grid(
-    ui: &mut egui::Ui,
-    layout: &Layout,
-    highlight: impl Fn(usize, usize) -> bool,
-) -> Option<(usize, usize)> {
+pub fn key_grid(ui: &mut egui::Ui, layout: &Layout, mark: impl Fn(usize, usize) -> KeyMark) -> Option<(usize, usize)> {
     let mut clicked = None;
-    egui::Grid::new("key_grid").spacing([4.0, 4.0]).show(ui, |ui| {
+    egui::Grid::new("key_grid").spacing([KEY_GAP, KEY_GAP]).show(ui, |ui| {
         for (y, row) in layout.rows.iter().enumerate() {
             for (x, action) in row.iter().enumerate() {
                 let hover = format!("({x}, {y}): {}", labels::action_description(action));
-                if key_button(ui, action, highlight(x, y), hover).clicked() {
+                if key_button(ui, action, mark(x, y), hover).clicked() {
                     clicked = Some((x, y));
                 }
             }

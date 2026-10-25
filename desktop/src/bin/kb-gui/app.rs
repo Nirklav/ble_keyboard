@@ -12,6 +12,7 @@ use protocol::config::{Config, JoystickButton};
 
 use crate::device::{Command, DeviceWorker, Event};
 use crate::editing;
+use crate::theme;
 use crate::views;
 
 /// Default keyboard name filter, same as the CLI one.
@@ -92,6 +93,16 @@ pub struct KeyEditor {
     pub target: EditTarget,
     /// Key list filter.
     pub search: String,
+    /// The key list should scroll to the current key, once.
+    pub scroll_to_current: bool,
+}
+
+impl KeyEditor {
+    /// Editor of `target`, keeps the search of the `previous` editor.
+    pub fn open(target: EditTarget, previous: Option<KeyEditor>) -> KeyEditor {
+        let search = previous.map(|e| e.search).unwrap_or_default();
+        KeyEditor { target, search, scroll_to_current: true }
+    }
 }
 
 /// Action that drops the current document, waiting for "discard changes?".
@@ -162,8 +173,10 @@ pub struct App {
 }
 
 impl App {
-    /// `offline` starts in the editor instead of the connect screen.
-    pub fn new(ctx: &egui::Context, offline: bool) -> App {
+    /// `offline` starts in the editor instead of the connect screen, `fake_keyboard` talks to
+    /// a fake keyboard instead of Bluetooth.
+    pub fn new(ctx: &egui::Context, offline: bool, fake_keyboard: bool) -> App {
+        theme::apply(ctx);
         let mut device = DeviceState {
             worker: None,
             name: DEFAULT_NAME.to_string(),
@@ -172,7 +185,7 @@ impl App {
             busy: None,
             status: None,
         };
-        match DeviceWorker::spawn(ctx.clone()) {
+        match DeviceWorker::spawn(ctx.clone(), fake_keyboard) {
             Ok(worker) => device.worker = Some(worker),
             Err(error) => device.set_status(true, format!("{error:#}")),
         }
@@ -360,9 +373,14 @@ impl App {
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         let save = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S);
+        let save_as = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::S);
         let open = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::O);
         if self.dialog.is_some() {
             return;
+        }
+        // Before Save: its shortcut matches with Shift too.
+        if ctx.input_mut(|i| i.consume_shortcut(&save_as)) {
+            self.save_as();
         }
         if ctx.input_mut(|i| i.consume_shortcut(&save)) {
             self.save();
@@ -400,53 +418,61 @@ impl App {
         }
     }
 
-    fn menu(&mut self, ui: &mut egui::Ui) {
-        egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button("File", |ui| {
-                if ui.button("New from example").clicked() {
-                    self.discard_then(ui.ctx(), Discarding::NewFromExample);
-                }
-                if ui.button("Open...").clicked() {
-                    self.discard_then(ui.ctx(), Discarding::Open);
-                }
-                if ui.button("Save").clicked() {
-                    self.save();
-                }
-                if ui.button("Save as...").clicked() {
-                    self.save_as();
-                }
-                ui.separator();
-                if ui.button("Quit").clicked() {
-                    self.discard_then(ui.ctx(), Discarding::Quit);
-                }
-            });
-            ui.separator();
-            let path = match &self.doc.path {
-                Some(path) => path.display().to_string(),
-                None => "untitled".to_string(),
-            };
-            ui.label(path);
-            if self.doc.is_dirty() {
-                ui.colored_label(ui.visuals().warn_fg_color, "unsaved changes");
-            }
-        });
-    }
-
-    /// "Write to keyboard" and the connection state, right to left.
-    pub fn push_button(&mut self, ui: &mut egui::Ui) {
+    /// Header buttons, right to left: the keyboard group (Write, Read, Reset and the connection state;
+    /// Connect offline), then the file group.
+    pub fn header_actions(&mut self, ui: &mut egui::Ui) {
         let idle = !self.device.is_busy() && self.device.worker.is_some();
         let valid = self.validation().is_ok();
-        let push = ui
-            .add_enabled(idle && valid, egui::Button::new("Write to keyboard").min_size(egui::vec2(0.0, 28.0)))
-            .on_hover_text("Write the edited config to the keyboard (connects first if needed)")
-            .on_disabled_hover_text("Fix the config errors first (see the status bar)");
-        if push.clicked() {
-            self.push();
-        }
-        if self.device.connected {
-            ui.colored_label(egui::Color32::from_rgb(0, 160, 0), "connected");
+        let connected = self.device.connected;
+        // Offline the main action is connecting, without reading: the edited config is written after that.
+        let size = egui::vec2(0.0, 30.0);
+        if connected {
+            let push = ui
+                .add_enabled(idle && valid, theme::primary_button("Write").min_size(size))
+                .on_hover_text("Write the edited config to the keyboard")
+                .on_disabled_hover_text("Fix the config errors first (see the status bar)");
+            if push.clicked() {
+                self.push();
+            }
         } else {
-            ui.weak("not connected");
+            let connect = ui
+                .add_enabled(idle, theme::primary_button("Connect").min_size(size))
+                .on_hover_text("Connect to the keyboard, the edited config stays as it is");
+            if connect.clicked() {
+                self.device.send(Command::Connect);
+            }
+        }
+        // Offline Connect is the only keyboard action, the others follow once connected.
+        if connected {
+            let read = ui
+                .add_enabled(idle, egui::Button::new("Read"))
+                .on_hover_text("Read the config from the keyboard, replacing the edited one");
+            if read.clicked() {
+                self.discard_then(ui.ctx(), Discarding::Pull);
+            }
+            let reset = ui
+                .add_enabled(idle, theme::danger_button("Reset"))
+                .on_hover_text("Restore the factory config on the keyboard (asks first)");
+            if reset.clicked() {
+                self.dialog = Some(Dialog::ConfirmReset);
+            }
+        }
+        ui.add_space(theme::GAP_XS);
+        if connected {
+            theme::status(ui, theme::SUCCESS, "Connected");
+        } else {
+            theme::status(ui, ui.visuals().weak_text_color(), "Offline")
+                .on_hover_text("Edits stay in the app until written to the keyboard");
+        }
+
+        ui.add_space(theme::GAP_S);
+        ui.separator();
+        ui.add_space(theme::GAP_S);
+        if ui.button("Save as...").on_hover_text("Save the config to another file (Ctrl+Shift+S)").clicked() {
+            self.save_as();
+        }
+        if ui.button("Save").on_hover_text("Save the config to its file (Ctrl+S)").clicked() {
+            self.save();
         }
     }
 
@@ -462,9 +488,19 @@ impl App {
                     ui.label(text);
                 }
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match validation {
-                Ok(()) => ui.colored_label(egui::Color32::from_rgb(0, 160, 0), "Config is valid"),
-                Err(error) => ui.colored_label(ui.visuals().error_fg_color, format!("Invalid: {error}")),
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                match validation {
+                    Ok(()) => ui.colored_label(theme::SUCCESS, "Config is valid"),
+                    Err(error) => ui.colored_label(ui.visuals().error_fg_color, format!("Invalid: {error}")),
+                };
+                ui.add_space(theme::GAP_L);
+                if self.doc.is_dirty() {
+                    ui.colored_label(ui.visuals().warn_fg_color, "unsaved changes");
+                }
+                match &self.doc.path {
+                    Some(path) => ui.weak(path.display().to_string()),
+                    None => ui.weak("not saved to a file"),
+                };
             });
         });
     }
@@ -473,7 +509,8 @@ impl App {
         let Some(dialog) = &self.dialog else { return };
         let mut close = false;
         let mut confirmed = false;
-        let response = egui::Modal::new(egui::Id::unique("dialog")).show(ctx, |ui| {
+        let frame = egui::Frame::popup(&ctx.global_style()).inner_margin(theme::GAP_L);
+        let response = egui::Modal::new(egui::Id::unique("dialog")).frame(frame).show(ctx, |ui| {
             ui.set_max_width(420.0);
             let (title, text, confirm) = match dialog {
                 Dialog::Discard(_) => {
@@ -486,13 +523,13 @@ impl App {
                 ),
                 Dialog::Message { title, text } => (title.as_str(), text.as_str(), None),
             };
-            ui.heading(title);
-            ui.add_space(4.0);
+            ui.label(theme::screen_title(title));
+            ui.add_space(theme::GAP_S);
             ui.label(text);
-            ui.add_space(8.0);
+            ui.add_space(theme::GAP_L);
             ui.horizontal(|ui| match confirm {
                 Some(confirm) => {
-                    if ui.button(confirm).clicked() {
+                    if ui.add(theme::danger_button(confirm)).clicked() {
                         confirmed = true;
                     }
                     if ui.button("Cancel").clicked() {
@@ -538,13 +575,26 @@ impl eframe::App for App {
 
         let validation = self.validation();
         if self.screen != Screen::Start {
-            egui::Panel::top("menu").show(ui, |ui| self.menu(ui));
+            // Above the editor panel: the header buttons need the whole window width.
+            let margin = egui::Margin::symmetric(8, theme::GAP_S as i8);
+            let frame = egui::Frame::side_top_panel(ui.style()).inner_margin(margin);
+            egui::Panel::top("header").frame(frame).show(ui, |ui| views::header(self, ui));
             egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui, &validation));
+        }
+        // Side panels go before the central one.
+        let editing = self.key_editor.as_ref().map(|e| e.target);
+        if editing.is_some() {
+            let frame = egui::Frame::side_top_panel(ui.style()).inner_margin(theme::GAP_L);
+            egui::Panel::right("key_editor")
+                .frame(frame)
+                .resizable(false)
+                .exact_size(views::action_editor::WIDTH)
+                .show(ui, |ui| views::action_editor::panel(self, ui));
+            self.fix_selection();
         }
         egui::CentralPanel::default_margins().show(ui, |ui| match self.screen {
             Screen::Start => views::start::show(self, ui),
             screen => {
-                views::header(self, ui);
                 egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| match screen {
                     Screen::Start => {}
                     Screen::Overview => views::overview::show(self, ui),
@@ -556,8 +606,10 @@ impl eframe::App for App {
         });
 
         self.fix_selection();
-        views::action_editor::window(self, &ctx);
-        self.fix_selection();
+        // The editor panel is already drawn: show the key just clicked on the central panel.
+        if self.key_editor.as_ref().map(|e| e.target) != editing {
+            ctx.request_repaint();
+        }
         self.dialogs(&ctx);
         self.update_title(&ctx);
         self.enforce_min_size(&ctx);
