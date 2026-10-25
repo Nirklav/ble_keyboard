@@ -19,7 +19,6 @@ const fn make_table() -> [u32; 256] {
     table
 }
 
-/// CRC-32 of `bytes`.
 pub fn crc32(bytes: &[u8]) -> u32 {
     !bytes.iter().fold(!0u32, |crc, &byte| {
         TABLE[((crc ^ byte as u32) & 0xFF) as usize] ^ (crc >> 8)

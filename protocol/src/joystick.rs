@@ -63,7 +63,6 @@ impl TryFrom<u8> for Register {
     }
 }
 
-/// Snapshot of the joystick.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct State {
     /// Horizontal axis, 0 is center.

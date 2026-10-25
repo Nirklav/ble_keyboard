@@ -108,7 +108,7 @@ fn commit_tmp() -> io::Result<()> {
     fs::rename(CONFIG_TMP, CONFIG_FILE)
 }
 
-/// Removes the saved config, so the factory one is used from now on.
+/// The factory config is used from now on.
 pub fn remove_saved() -> io::Result<()> {
     remove(CONFIG_TMP)?;
     remove(CONFIG_FILE)

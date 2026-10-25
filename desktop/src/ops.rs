@@ -63,7 +63,7 @@ async fn read_config_bytes(device: &mut Device) -> Result<Vec<u8>> {
     }
 }
 
-/// Validates `config` against the keyboard and writes it. Returns the number of bytes sent.
+/// Validates `config` against the keyboard first. Returns the number of bytes sent.
 pub async fn write_config(
     device: &mut Device,
     info: &Info,

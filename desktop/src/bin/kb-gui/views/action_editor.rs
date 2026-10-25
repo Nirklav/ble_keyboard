@@ -1,4 +1,4 @@
-//! Key action editor: a window editing one layout key or one combo key matched by action.
+//! Key action editor: a window editing one layout key, joystick button or combo key matched by action.
 
 use eframe::egui;
 use protocol::config::{ComboKeyIdent, KeyAction};
@@ -17,12 +17,18 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
     let layouts = editing::layout_names(&app.doc.config);
     let config = &mut app.doc.config;
 
-    // `other_fn`: another Fn key of the layout, a second one is invalid.
-    let (title, action, other_fn) = match editor.target {
+    // `fn_error`: why Fn can't be here.
+    let (title, action, fn_error) = match editor.target {
         EditTarget::LayoutKey { layout, x, y } => {
             let title = format!("Key ({x}, {y}) of {}", config.layouts[layout].name);
-            let other_fn = editing::other_fn_key(&config.layouts[layout], x, y);
-            (title, &mut config.layouts[layout].rows[y][x], other_fn)
+            let fn_error = editing::other_fn_key(&config.layouts[layout], x, y)
+                .map(|(fx, fy)| format!("This layout already has an Fn key at ({fx}, {fy}), only one is allowed."));
+            (title, &mut config.layouts[layout].rows[y][x], fn_error)
+        }
+        EditTarget::JoystickButton { layout, button } => {
+            let title = format!("Joystick {} button of {}", button.name().to_lowercase(), config.layouts[layout].name);
+            let fn_error = Some("Fn can't be on a joystick button.".to_string());
+            (title, button.action_mut(&mut config.layouts[layout].joystick), fn_error)
         }
         EditTarget::ComboKey { combo, key } => {
             let title = format!("Combo {combo}, key {key}");
@@ -45,16 +51,16 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
         .default_pos(ctx.content_rect().center() - egui::vec2(160.0, 200.0))
         .show(ctx, |ui| {
             if matches!(editor.target, EditTarget::ComboKey { .. }) {
-                ui.weak("The combo key matches any key registered as this action in the current layout.");
+                ui.weak(
+                    "The combo key matches any key or joystick button registered as this action in the current layout.",
+                );
                 ui.add_space(4.0);
             }
-            action_editor(ui, action, &layouts, &mut editor.search);
-            if let (Some((fx, fy)), KeyAction::Fn { .. }) = (other_fn, &action) {
+            let allow_fn = !matches!(editor.target, EditTarget::JoystickButton { .. });
+            action_editor(ui, action, &layouts, &mut editor.search, allow_fn);
+            if let (Some(error), KeyAction::Fn { .. }) = (&fn_error, &action) {
                 ui.add_space(4.0);
-                ui.colored_label(
-                    ui.visuals().warn_fg_color,
-                    format!("This layout already has an Fn key at ({fx}, {fy}), only one is allowed."),
-                );
+                ui.colored_label(ui.visuals().warn_fg_color, error);
             }
             ui.separator();
             if ui.button("Done").clicked() {
@@ -66,13 +72,13 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
     }
 }
 
-/// Edits `action`: kind selector and the fields of that kind.
-pub fn action_editor(ui: &mut egui::Ui, action: &mut KeyAction, layouts: &[String], search: &mut String) {
+/// Edits `action`: kind selector and the fields of that kind, `allow_fn` offers [`KeyAction::Fn`].
+pub fn action_editor(ui: &mut egui::Ui, action: &mut KeyAction, layouts: &[String], search: &mut String, allow_fn: bool) {
     let kind = ActionKind::of(action);
     ui.horizontal(|ui| {
         ui.label("Action:");
         egui::ComboBox::from_id_salt("action_kind").selected_text(kind.name()).show_ui(ui, |ui| {
-            for other in ActionKind::ALL {
+            for other in ActionKind::ALL.into_iter().filter(|&kind| allow_fn || kind != ActionKind::Fn) {
                 if ui.selectable_label(other == kind, other.name()).clicked() && other != kind {
                     *action = other.convert(action);
                 }
@@ -155,7 +161,6 @@ fn key_picker(ui: &mut egui::Ui, key: &mut Key, search: &mut String) {
     });
 }
 
-/// Modifier checkboxes.
 fn mods_editor(ui: &mut egui::Ui, mods: &mut KeyMod) {
     ui.label("Modifiers:");
     egui::Grid::new("mods").show(ui, |ui| {

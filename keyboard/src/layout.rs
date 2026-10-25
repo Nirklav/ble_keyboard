@@ -1,5 +1,5 @@
 use log::error;
-use protocol::config::{Combo, ComboAction, ComboKey, ComboKeyIdent, Config, KeyAction, CONFIG_VERSION};
+use protocol::config::{Combo, ComboAction, ComboKey, ComboKeyIdent, Config, JoystickButtons, KeyAction, CONFIG_VERSION};
 
 use crate::bt::{Key, KeyMod, MouseKey};
 use crate::bt::ble_mouse_keyboard::BleMouseKeyboard;
@@ -32,6 +32,7 @@ macro_rules! f {
 pub struct Layout {
     name: String,
     rows: Vec<Vec<KeyAction>>,
+    joystick: JoystickButtons,
     fn_coord: Option<(usize, usize)>
 }
 
@@ -40,6 +41,7 @@ impl Layout {
         Self {
             name: layout.name.clone(),
             rows: layout.rows.clone(),
+            joystick: layout.joystick,
             fn_coord: layout.fn_coord()
         }
     }
@@ -53,6 +55,10 @@ impl Layout {
             .and_then(|row| row.get(x))
             .copied()
             .unwrap_or(KeyAction::None)
+    }
+
+    pub fn joystick(&self) -> &JoystickButtons {
+        &self.joystick
     }
 
     pub fn fn_action(&self) -> Option<KeyAction> {
@@ -122,7 +128,8 @@ pub fn default_config() -> Config {
                     vec![k!(A),        k!(S),                k!(D),                k!(F),                k!(G),                k!(H),          k!(J),           k!(K),            k!(L),         k!(Semicolon)],
                     vec![k!(Z),        k!(X),                k!(C),                k!(V),                k!(B),                k!(N),          k!(M),           k!(Comma),        k!(Dot),       k!(Slash)],
                     vec![m!(LeftCtrl), m!(LeftShift),        f!(1, 2),             m!(LeftAlt),          k!(Backspace),        k!(Space),      k!(Enter),       k!(Apostrophe),   k!(Backslash), k!(Tab)],
-                ]
+                ],
+                joystick: JoystickButtons::default(),
             },
             protocol::config::Layout {
                 name: "FUNCTION".to_string(),
@@ -132,7 +139,8 @@ pub fn default_config() -> Config {
                     vec![k!(CapsLock),    k!(F11),         k!(F12),         k!(Up),      k!(Up),     k!(Up),    k!(Num4),        k!(Num5),         k!(Num6),             k!(KpPlus)],
                     vec![KeyAction::None, KeyAction::None, KeyAction::None, k!(Left),    k!(Down),   k!(Right), k!(Num1),        k!(Num2),         k!(Num3),             k!(KpDot)],
                     vec![m!(LeftCtrl),    m!(LeftShift),   KeyAction::None, m!(LeftAlt), k!(Delete), k!(Space), k!(Num0),        k!(Minus),        k!(Slash),            k!(KpEnter)],
-                ]
+                ],
+                joystick: JoystickButtons::default(),
             },
             protocol::config::Layout {
                 name: "GAME".to_string(),
@@ -142,7 +150,8 @@ pub fn default_config() -> Config {
                     vec![k!(A),        k!(S),         k!(D),         k!(F),       k!(G),         k!(H),     k!(J),     k!(K),                                     k!(L),                                    KeyAction::MouseScroll { dy: -10 }],
                     vec![k!(Z),        k!(X),         k!(C),         k!(V),       k!(B),         k!(N),     k!(M),     KeyAction::MouseKey(MouseKey::Left),       KeyAction::MouseTravel { dx: 0, dy:-10 }, KeyAction::MouseKey(MouseKey::Right)],
                     vec![m!(LeftCtrl), m!(LeftShift), f!(1, 0),      m!(LeftAlt), k!(Backspace), k!(Space), k!(Enter), KeyAction::MouseTravel { dx: -10, dy: 0 }, KeyAction::MouseTravel { dx: 0, dy: 10 }, KeyAction::MouseTravel { dx: 10, dy: 0 }],
-                ]
+                ],
+                joystick: JoystickButtons::default(),
             },
         ],
         combos: vec![

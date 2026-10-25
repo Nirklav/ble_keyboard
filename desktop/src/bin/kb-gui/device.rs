@@ -33,7 +33,6 @@ pub enum Command {
     Push(Box<Config>),
     /// Restores the factory config.
     Reset,
-    /// Drops the connection.
     Disconnect,
 }
 
@@ -92,7 +91,6 @@ impl DeviceWorker {
         Ok(DeviceWorker { commands: Some(commands), events, done })
     }
 
-    /// Queues `command`.
     pub fn send(&self, options: Options, command: Command) {
         // Fails only if the worker task is gone (it panicked), nothing to do then.
         if let Some(commands) = &self.commands {
@@ -130,7 +128,6 @@ impl EventSender {
     }
 }
 
-/// Connected keyboard and its info.
 struct Connection {
     device: Device,
     info: Info,

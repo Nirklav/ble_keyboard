@@ -26,7 +26,7 @@ static CURRENT: Mutex<Cell<State>> = Mutex::new(Cell::new(State { x: 0, y: 0, bu
 /// Last state completely read by the master.
 static REPORTED: Mutex<Cell<State>> = Mutex::new(Cell::new(State { x: 0, y: 0, buttons: 0 }));
 
-/// Transaction state, owned by the interrupt handler.
+/// Owned by the interrupt handler.
 struct Transaction {
     /// Register selected by the last write.
     register: u8,

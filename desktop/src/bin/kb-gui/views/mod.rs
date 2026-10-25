@@ -10,6 +10,7 @@ use eframe::egui;
 use protocol::config::{KeyAction, Layout};
 
 use crate::app::{App, Screen};
+use crate::editing::JoystickButton;
 use crate::labels;
 
 /// Size of a key button on the grid.
@@ -73,6 +74,35 @@ pub fn header(app: &mut App, ui: &mut egui::Ui) {
     ui.separator();
 }
 
+/// Button of a key showing its `action`, Fn keys are tinted.
+fn key_button(ui: &mut egui::Ui, action: &KeyAction, selected: bool, hover: String) -> egui::Response {
+    let mut button = egui::Button::new(labels::action_label(action)).min_size(KEY_SIZE).selected(selected).truncate();
+    if matches!(action, KeyAction::Fn { .. }) && !selected {
+        button = button.fill(ui.visuals().widgets.inactive.bg_fill.lerp_to_gamma(egui::Color32::BLUE, 0.25));
+    }
+    ui.add_sized(KEY_SIZE, button).on_hover_text(hover)
+}
+
+/// Draws the joystick buttons of `layout` in a row, `selected` is marked.
+/// Returns the clicked button.
+pub fn joystick_row(ui: &mut egui::Ui, layout: &Layout, selected: Option<JoystickButton>) -> Option<JoystickButton> {
+    let mut clicked = None;
+    ui.horizontal(|ui| {
+        ui.label("Joystick:");
+        for button in JoystickButton::ALL {
+            let action = button.action(&layout.joystick);
+            let hover = format!("{} button: {}", button.name(), labels::action_description(action));
+            ui.vertical(|ui| {
+                ui.weak(button.name());
+                if key_button(ui, action, selected == Some(button), hover).clicked() {
+                    clicked = Some(button);
+                }
+            });
+        }
+    });
+    clicked
+}
+
 /// Draws `layout` as a grid of key buttons, `highlight(x, y)` marks keys as selected.
 /// Returns the clicked key `(x, y)`.
 pub fn key_grid(
@@ -84,18 +114,8 @@ pub fn key_grid(
     egui::Grid::new("key_grid").spacing([4.0, 4.0]).show(ui, |ui| {
         for (y, row) in layout.rows.iter().enumerate() {
             for (x, action) in row.iter().enumerate() {
-                let mut button = egui::Button::new(labels::action_label(action))
-                    .min_size(KEY_SIZE)
-                    .selected(highlight(x, y))
-                    .truncate();
-                if matches!(action, KeyAction::Fn { .. }) && !highlight(x, y) {
-                    button =
-                        button.fill(ui.visuals().widgets.inactive.bg_fill.lerp_to_gamma(egui::Color32::BLUE, 0.25));
-                }
-                let response = ui
-                    .add_sized(KEY_SIZE, button)
-                    .on_hover_text(format!("({x}, {y}): {}", labels::action_description(action)));
-                if response.clicked() {
+                let hover = format!("({x}, {y}): {}", labels::action_description(action));
+                if key_button(ui, action, highlight(x, y), hover).clicked() {
                     clicked = Some((x, y));
                 }
             }

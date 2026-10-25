@@ -10,6 +10,7 @@
 //!     [{ Key = "Escape" }, { KeyWithMod = ["Num1", "LeftShift"] }, ...],
 //!     ...
 //! ]
+//! joystick = { left = { MouseKey = "Left" }, stick = { MouseKey = "Middle" }, right = { MouseKey = "Right" } }
 //! ```
 
 use std::fmt::Write as _;
@@ -17,27 +18,31 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use protocol::config::{Config, ValidationError};
+use protocol::config::{Config, ValidationError, CONFIG_VERSION};
 use serde::Serialize;
 
-/// Reads and parses a TOML config, doesn't validate it.
+/// Doesn't validate the config.
 pub fn load(path: &Path) -> Result<Config> {
     let text = fs::read_to_string(path).with_context(|| format!("can't read {}", path.display()))?;
     parse(&text).with_context(|| format!("can't parse {}", path.display()))
 }
 
-/// Parses a TOML config, doesn't validate it.
+/// Doesn't validate the config.
+/// Version 1 is read as the current one: it's the same TOML without the joystick buttons.
 pub fn parse(text: &str) -> Result<Config> {
     // toml errors already contain the line, column and the source snippet.
-    Ok(toml::from_str(text)?)
+    let mut config: Config = toml::from_str(text)?;
+    if config.version == 1 {
+        config.version = CONFIG_VERSION;
+    }
+    Ok(config)
 }
 
-/// Writes `config` as TOML.
 pub fn save(path: &Path, config: &Config) -> Result<()> {
     fs::write(path, format(config)?).with_context(|| format!("can't write {}", path.display()))
 }
 
-/// `config` as TOML, one keyboard row per line.
+/// One keyboard row per line.
 pub fn format(config: &Config) -> Result<String> {
     let mut out = String::new();
     writeln!(out, "version = {}", config.version)?;
@@ -74,6 +79,7 @@ pub fn format(config: &Config) -> Result<String> {
             writeln!(out, "{line}")?;
         }
         writeln!(out, "]")?;
+        writeln!(out, "joystick = {}", inline(&layout.joystick)?)?;
     }
 
     for combo in &config.combos {
@@ -101,7 +107,8 @@ pub fn describe(error: &ValidationError, config: &Config) -> String {
         | ValidationError::Height { layout, .. }
         | ValidationError::Width { layout, .. }
         | ValidationError::MultipleFn { layout, .. }
-        | ValidationError::FnLayoutIndex { layout, .. } => Some(layout),
+        | ValidationError::FnLayoutIndex { layout, .. }
+        | ValidationError::JoystickFn { layout } => Some(layout),
         _ => None,
     };
     match layout.and_then(|index| config.layouts.get(index)) {
@@ -112,6 +119,8 @@ pub fn describe(error: &ValidationError, config: &Config) -> String {
 
 #[cfg(test)]
 mod tests {
+    use protocol::config::JoystickButtons;
+
     use super::*;
 
     const EXAMPLE: &str = include_str!("../examples/config.toml");
@@ -129,6 +138,15 @@ mod tests {
         // The example is kept in the format the app writes (after its header comment).
         let body: String = EXAMPLE.lines().skip_while(|l| l.starts_with('#')).map(|l| format!("{l}\n")).collect();
         assert_eq!(text, body.trim_start());
+    }
+
+    #[test]
+    fn version_1_is_upgraded() {
+        let text = EXAMPLE.replace("version = 2", "version = 1").replace("joystick = ", "# joystick = ");
+        let config = parse(&text).unwrap();
+        assert_eq!(config.version, CONFIG_VERSION);
+        assert!(config.layouts.iter().all(|l| l.joystick == JoystickButtons::default()));
+        config.validate_for(10, 5).unwrap();
     }
 
     #[test]

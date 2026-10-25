@@ -5,12 +5,14 @@
 #   { Media = "VolumeUp" }, { MouseKey = "Left" }, { MouseTravel = { dx = 0, dy = -10 } },
 #   { MouseScroll = { dy = 10 } }, { Fn = { temporary = 1, permanent = 2 } }, "None".
 # Fn: layout index while held / after a double tap, at most one per layout.
+# joystick: actions of the joystick buttons in the layout (any key action but Fn),
+# mouse buttons if left out.
 # Combos: keys by { Coord = { x, y } } or { Action = <key action> }; count = number of
 # presses, 0 = must be held, at least one key needs presses.
 # Actions: "SwitchLayout", { SetLayout = 2 }, "Unpair", "ResetConfig".
 # Check with `kb check examples/config.toml`, write with `kb push examples/config.toml`.
 
-version = 1
+version = 2
 width = 10
 height = 5
 
@@ -23,6 +25,7 @@ rows = [
     [{ Key = "Z" },        { Key = "X" },                          { Key = "C" },                             { Key = "V" },                          { Key = "B" },                          { Key = "N" },          { Key = "M" },           { Key = "Comma" },        { Key = "Dot" },       { Key = "Slash" }],
     [{ Mod = "LeftCtrl" }, { Mod = "LeftShift" },                  { Fn = { temporary = 1, permanent = 2 } }, { Mod = "LeftAlt" },                    { Key = "Backspace" },                  { Key = "Space" },      { Key = "Enter" },       { Key = "Apostrophe" },   { Key = "Backslash" }, { Key = "Tab" }],
 ]
+joystick = { left = { MouseKey = "Left" }, stick = { MouseKey = "Middle" }, right = { MouseKey = "Right" } }
 
 [[layouts]]
 name = "FUNCTION"
@@ -33,6 +36,7 @@ rows = [
     ["None",               "None",                "None",          { Key = "Left" },    { Key = "Down" },   { Key = "Right" }, { Key = "Num1" },        { Key = "Num2" },         { Key = "Num3" },                       { Key = "KpDot" }],
     [{ Mod = "LeftCtrl" }, { Mod = "LeftShift" }, "None",          { Mod = "LeftAlt" }, { Key = "Delete" }, { Key = "Space" }, { Key = "Num0" },        { Key = "Minus" },        { Key = "Slash" },                      { Key = "KpEnter" }],
 ]
+joystick = { left = { MouseKey = "Left" }, stick = { MouseKey = "Middle" }, right = { MouseKey = "Right" } }
 
 [[layouts]]
 name = "GAME"
@@ -43,6 +47,7 @@ rows = [
     [{ Key = "Z" },        { Key = "X" },         { Key = "C" },                             { Key = "V" },       { Key = "B" },         { Key = "N" },     { Key = "M" },     { MouseKey = "Left" },                  { MouseTravel = { dx = 0, dy = -10 } }, { MouseKey = "Right" }],
     [{ Mod = "LeftCtrl" }, { Mod = "LeftShift" }, { Fn = { temporary = 1, permanent = 0 } }, { Mod = "LeftAlt" }, { Key = "Backspace" }, { Key = "Space" }, { Key = "Enter" }, { MouseTravel = { dx = -10, dy = 0 } }, { MouseTravel = { dx = 0, dy = 10 } },  { MouseTravel = { dx = 10, dy = 0 } }],
 ]
+joystick = { left = { MouseKey = "Left" }, stick = { MouseKey = "Middle" }, right = { MouseKey = "Right" } }
 
 [[combos]]
 keys = [{ ident = { Coord = { x = 2, y = 4 } }, count = 2 }]

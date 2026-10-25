@@ -9,7 +9,7 @@ use desktop::transport::{Device, Options};
 use protocol::ble;
 use protocol::config::{self, Config};
 
-/// `kb info`: prints the keyboard info.
+/// `kb info`.
 pub async fn info(options: &Options) -> Result<()> {
     let device = Device::connect(options).await?;
     let info = device.info().await?;
@@ -24,7 +24,7 @@ pub async fn info(options: &Options) -> Result<()> {
     Ok(())
 }
 
-/// `kb pull <file>`: reads the config from the keyboard into a TOML file.
+/// `kb pull <file>`.
 pub async fn pull(options: &Options, path: &Path) -> Result<()> {
     let mut device = Device::connect(options).await?;
     let info = device.info().await?;
@@ -36,7 +36,7 @@ pub async fn pull(options: &Options, path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `kb push <file>`: validates a TOML file and writes it to the keyboard.
+/// `kb push <file>`.
 pub async fn push(options: &Options, path: &Path) -> Result<()> {
     let config = load_valid(path)?;
 
@@ -57,7 +57,7 @@ pub async fn push(options: &Options, path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `kb reset`: restores the factory config.
+/// `kb reset`.
 pub async fn reset(options: &Options) -> Result<()> {
     let mut device = Device::connect(options).await?;
     let info = device.info().await?;

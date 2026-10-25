@@ -258,7 +258,6 @@ mod messages {
             Self { width, height, transfer: None }
         }
 
-        /// Transfer is in progress.
         pub fn is_active(&self) -> bool {
             self.transfer.is_some()
         }

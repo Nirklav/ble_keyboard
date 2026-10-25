@@ -62,7 +62,7 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
         &mut self.irq
     }
 
-    /// Replaces the layouts, the first one becomes current.
+    /// The first layout becomes current.
     pub fn set_keymap(&mut self, keymap: Keymap) {
         self.keymap = keymap;
         self.current_layout = 0;
@@ -81,7 +81,7 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
         self.keymap.get(self.current_layout)
     }
 
-    /// Makes the layout with `idx` current, `None` if there is no such layout.
+    /// `None` if there is no such layout.
     pub fn set_layout(&mut self, idx: usize) -> Option<&Layout> {
         if idx >= self.keymap.len() {
             return None;
@@ -90,6 +90,11 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
         self.current_layout = idx;
         info!("Layout set to: {}", self.current_layout);
         Some(self.keymap.get(idx))
+    }
+
+    /// Layout the keys are registered in now: the `Fn` temporary one while `Fn` is held.
+    pub fn active_layout(&self) -> &Layout {
+        active_layout(&self.keymap, self.current_layout, &self.keys)
     }
 
     /// Reads the key at `(x, y)` right now, without debouncing.
@@ -116,18 +121,9 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
         self.last_scan = Instant::now();
         self.scan(elapsed_ms)?;
 
-        let layouts = &self.keymap;
-        let original_layout = layouts.get(self.current_layout);
-        let mut current_layout = original_layout;
-
-        let original_fn_coords = current_layout.fn_coord();
-        if let Some((x, y)) = original_fn_coords {
-            if self.keys[x][y].state {
-                if let KeyAction::Fn { temporary, .. } = current_layout.get(x, y) {
-                    current_layout = layouts.get(temporary as usize)
-                }
-            }
-        }
+        let original_layout = self.keymap.get(self.current_layout);
+        let original_fn_coords = original_layout.fn_coord();
+        let current_layout = active_layout(&self.keymap, self.current_layout, &self.keys);
 
         let mut any_pressed = false;
         for x in 0..W {
@@ -178,6 +174,19 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
     }
 }
 
+/// See [`KeyMatrix::active_layout`], borrows only the `keymap`, so the keys can be changed meanwhile.
+fn active_layout<'a, const W: usize, const H: usize>(keymap: &'a Keymap, current: usize, keys: &[[Key; H]; W]) -> &'a Layout {
+    let layout = keymap.get(current);
+    if let Some((x, y)) = layout.fn_coord() {
+        if keys[x][y].state {
+            if let KeyAction::Fn { temporary, .. } = layout.get(x, y) {
+                return keymap.get(temporary as usize);
+            }
+        }
+    }
+    layout
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Key {
     pub state: bool,
@@ -220,8 +229,7 @@ impl Key {
 
     pub fn take_change(&mut self, x: usize, y: usize) -> KeyChange {
         let change = KeyChange {
-            x: x as u8,
-            y: y as u8,
+            coord: Some((x as u8, y as u8)),
             state: self.state,
             reg_as: self.reg_as
         };
@@ -232,8 +240,8 @@ impl Key {
 
 #[derive(Debug, Clone, Copy)]
 pub struct KeyChange {
-    pub x: u8,
-    pub y: u8,
+    /// Matrix position `(x, y)`, `None` for a joystick button.
+    pub coord: Option<(u8, u8)>,
     pub state: bool,
     pub reg_as: Option<KeyAction>
 }

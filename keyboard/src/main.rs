@@ -92,7 +92,7 @@ fn main_body() -> anyhow::Result<()> {
         })?;
 
         if let Some(joystick) = &mut joystick {
-            all_up &= !joystick.poll(&mut svc.keyboard);
+            all_up &= !joystick.poll(svc.key_matrix.active_layout(), &mut svc.keyboard, |kc| special_combinations.changed(&kc));
         }
 
         svc.keyboard.flush();

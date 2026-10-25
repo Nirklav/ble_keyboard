@@ -84,10 +84,10 @@ impl Screen {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditTarget {
     LayoutKey { layout: usize, x: usize, y: usize },
+    JoystickButton { layout: usize, button: editing::JoystickButton },
     ComboKey { combo: usize, key: usize },
 }
 
-/// Key action editor window state.
 pub struct KeyEditor {
     pub target: EditTarget,
     /// Key list filter.
@@ -103,7 +103,6 @@ pub enum Discarding {
     Quit,
 }
 
-/// Modal dialog.
 pub enum Dialog {
     Discard(Discarding),
     ConfirmReset,
@@ -196,14 +195,14 @@ impl App {
         editing::check(&self.doc.config, info)
     }
 
-    /// Replaces the edited document, back to the overview.
+    /// Also goes back to the overview.
     fn set_document(&mut self, doc: Document) {
         self.doc = doc;
         self.grid_layout = 0;
         self.go(Screen::Overview);
     }
 
-    /// Switches the screen, closing the editors of the old one.
+    /// Closes the editors of the old screen.
     pub fn go(&mut self, screen: Screen) {
         if screen != self.screen {
             self.screen = screen;
@@ -337,6 +336,7 @@ impl App {
         }
         let editor_valid = self.key_editor.as_ref().is_none_or(|editor| match editor.target {
             EditTarget::LayoutKey { layout, x, y } => config.layouts.get(layout).and_then(|l| l.get(x, y)).is_some(),
+            EditTarget::JoystickButton { layout, .. } => layout < config.layouts.len(),
             EditTarget::ComboKey { combo, key } => config.combos.get(combo).is_some_and(|c| key < c.keys.len()),
         });
         if !editor_valid {

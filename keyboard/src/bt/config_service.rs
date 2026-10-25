@@ -46,7 +46,7 @@ struct State {
 }
 
 impl ConfigService {
-    /// Registers the service on `server`, must be called before the server starts (advertising).
+    /// Must be called before the server starts (advertising).
     /// `current` is the encoded active config.
     pub fn register(server: &mut BLEServer, width: u8, height: u8, current: Vec<u8>, wake: Arc<Notifier>) -> Self {
         let info = Info {

@@ -19,15 +19,12 @@ use crate::keys::{Key, KeyMod, MediaKey, MouseKey};
 pub use crate::crc::crc32;
 
 /// Format version of [`Config`], stored in [`Config::version`].
-pub const CONFIG_VERSION: u16 = 1;
+pub const CONFIG_VERSION: u16 = 2;
 
-/// Max number of layouts in a config.
 pub const MAX_LAYOUTS: usize = 8;
 
-/// Max number of special combinations in a config.
 pub const MAX_COMBOS: usize = 16;
 
-/// Max number of keys in one special combination.
 pub const MAX_COMBO_KEYS: usize = 8;
 
 /// Max length of a layout name in characters: the 128 px wide display with the 10x20 font fits 12.
@@ -48,7 +45,6 @@ pub enum KeyAction {
     /// Layer key: switches to layout `temporary` while held, double tap switches to `permanent`.
     /// Indices into [`Config::layouts`]. At most one per layout.
     Fn { temporary: u8, permanent: u8 },
-    /// Does nothing.
     None,
 }
 
@@ -59,6 +55,40 @@ pub struct Layout {
     pub name: String,
     /// [`Config::height`] rows of [`Config::width`] keys, `rows[y][x]`.
     pub rows: Vec<Vec<KeyAction>>,
+    /// Joystick buttons, may be left out in TOML.
+    #[serde(default)]
+    pub joystick: JoystickButtons,
+}
+
+/// What the joystick buttons do in a layout. [`KeyAction::Fn`] is not allowed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JoystickButtons {
+    pub left: KeyAction,
+    /// Pressing the stick itself.
+    pub stick: KeyAction,
+    pub right: KeyAction,
+}
+
+impl JoystickButtons {
+    /// Buttons with their [`crate::joystick`] bit numbers.
+    pub fn by_bit(&self) -> [(u8, KeyAction); 3] {
+        [
+            (crate::joystick::BUTTON_LEFT, self.left),
+            (crate::joystick::BUTTON_STICK, self.stick),
+            (crate::joystick::BUTTON_RIGHT, self.right),
+        ]
+    }
+}
+
+impl Default for JoystickButtons {
+    /// Mouse buttons: the stick is the middle one.
+    fn default() -> Self {
+        Self {
+            left: KeyAction::MouseKey(MouseKey::Left),
+            stick: KeyAction::MouseKey(MouseKey::Middle),
+            right: KeyAction::MouseKey(MouseKey::Right),
+        }
+    }
 }
 
 impl Layout {
@@ -127,7 +157,6 @@ pub fn recovery_combo() -> Combo {
     }
 }
 
-/// Full keyboard configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     /// Must be [`CONFIG_VERSION`].
@@ -244,6 +273,10 @@ impl Config {
             }
         }
 
+        if value.joystick.by_bit().iter().any(|(_, action)| matches!(action, KeyAction::Fn { .. })) {
+            return Err(ValidationError::JoystickFn { layout });
+        }
+
         Ok(())
     }
 
@@ -296,6 +329,8 @@ pub enum ValidationError {
     MultipleFn { layout: usize, first: (usize, usize), second: (usize, usize) },
     /// [`KeyAction::Fn`] at `(x, y)` points to a missing layout.
     FnLayoutIndex { layout: usize, x: usize, y: usize, index: u8 },
+    /// [`KeyAction::Fn`] on a joystick button.
+    JoystickFn { layout: usize },
     TooManyCombos { count: usize, max: usize },
     EmptyCombo { combo: usize },
     TooManyComboKeys { combo: usize, count: usize, max: usize },
@@ -332,6 +367,8 @@ impl fmt::Display for ValidationError {
                 write!(f, "layout {layout}: more than one Fn key, at {first:?} and {second:?}"),
             ValidationError::FnLayoutIndex { layout, x, y, index } =>
                 write!(f, "layout {layout}: Fn key at ({x}, {y}) points to missing layout {index}"),
+            ValidationError::JoystickFn { layout } =>
+                write!(f, "layout {layout}: Fn can't be on a joystick button"),
             ValidationError::TooManyCombos { count, max } =>
                 write!(f, "{count} combos, max is {max}"),
             ValidationError::EmptyCombo { combo } =>
@@ -383,9 +420,21 @@ pub(crate) mod tests {
             width: 10,
             height: 5,
             layouts: vec![
-                Layout { name: "MAIN".to_string(), rows: main },
-                Layout { name: "FUNCTION".to_string(), rows: func },
-                Layout { name: "GAME".to_string(), rows: game },
+                Layout { name: "MAIN".to_string(), rows: main, joystick: JoystickButtons::default() },
+                Layout {
+                    name: "FUNCTION".to_string(),
+                    rows: func,
+                    joystick: JoystickButtons { stick: KeyAction::None, ..JoystickButtons::default() },
+                },
+                Layout {
+                    name: "GAME".to_string(),
+                    rows: game,
+                    joystick: JoystickButtons {
+                        left: KeyAction::MouseKey(MouseKey::Left),
+                        stick: KeyAction::Key(Key::Space),
+                        right: KeyAction::KeyWithMod(Key::R, KeyMod::LeftShift),
+                    },
+                },
             ],
             combos: vec![
                 Combo {
@@ -437,7 +486,7 @@ pub(crate) mod tests {
     #[test]
     fn toml_handwritten() {
         let text = r#"
-            version = 1
+            version = 2
             width = 2
             height = 1
 
@@ -452,6 +501,7 @@ pub(crate) mod tests {
             rows = [
                 ["None", { Media = "PlayPause" }],
             ]
+            joystick = { left = "None", stick = { Media = "Mute" }, right = { MouseKey = "Right | Middle" } }
 
             [[combos]]
             keys = [{ ident = { Coord = { x = 1, y = 0 } }, count = 0 }, { ident = { Action = { Key = "A" } }, count = 2 }]
@@ -464,6 +514,15 @@ pub(crate) mod tests {
         let config: Config = toml::from_str(text).unwrap();
         assert_eq!(config.validate(), Ok(()));
         assert_eq!(config.layouts[1].rows[0], [KeyAction::None, KeyAction::Media(MediaKey::PlayPause)]);
+        assert_eq!(config.layouts[0].joystick, JoystickButtons::default());
+        assert_eq!(
+            config.layouts[1].joystick,
+            JoystickButtons {
+                left: KeyAction::None,
+                stick: KeyAction::Media(MediaKey::Mute),
+                right: KeyAction::MouseKey(MouseKey::Right | MouseKey::Middle),
+            }
+        );
         assert_eq!(config.combos[0].action, ComboAction::SetLayout(1));
         assert_eq!(config.combos[1].action, ComboAction::ResetConfig);
     }
@@ -512,6 +571,10 @@ pub(crate) mod tests {
         assert_eq!(
             invalid(|c| c.layouts[2].rows[4][2] = KeyAction::Fn { temporary: 1, permanent: 3 }),
             ValidationError::FnLayoutIndex { layout: 2, x: 2, y: 4, index: 3 }
+        );
+        assert_eq!(
+            invalid(|c| c.layouts[1].joystick.left = KeyAction::Fn { temporary: 0, permanent: 0 }),
+            ValidationError::JoystickFn { layout: 1 }
         );
         assert_eq!(
             invalid(|c| c.combos = vec![c.combos[0].clone(); 17]),

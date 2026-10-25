@@ -100,7 +100,7 @@ impl SpecialCombination {
 
         for sc_key in &mut self.combination {
             let matched = match &sc_key.ident {
-                ComboKeyIdent::Coord { x, y } => key.x == *x && key.y == *y,
+                ComboKeyIdent::Coord { x, y } => key.coord == Some((*x, *y)),
                 ComboKeyIdent::Action(ka) => action == *ka,
             };
             if !matched {
@@ -177,7 +177,7 @@ impl SpecialCombinations {
         }
     }
 
-    /// Replaces the configured combinations, all progress is lost.
+    /// All progress is lost.
     pub fn set(&mut self, combos: &[Combo]) {
         *self = Self::from_config(combos);
     }

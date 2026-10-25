@@ -5,7 +5,7 @@ use protocol::config::{MAX_LAYOUT_NAME_LEN, MAX_LAYOUTS};
 
 use crate::app::{App, EditTarget, KeyEditor, Screen};
 use crate::editing;
-use crate::views::key_grid;
+use crate::views::{joystick_row, key_grid};
 
 pub fn show(app: &mut App, ui: &mut egui::Ui, index: usize) {
     toolbar(app, ui, index);
@@ -15,17 +15,30 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, index: usize) {
     };
     ui.add_space(8.0);
 
-    let selected = match app.key_editor.as_ref().map(|e| e.target) {
+    let target = app.key_editor.as_ref().map(|e| e.target);
+    let selected = match target {
         Some(EditTarget::LayoutKey { layout, x, y }) if layout == index => Some((x, y)),
         _ => None,
     };
-    if let Some((x, y)) = key_grid(ui, &app.doc.config.layouts[index], |x, y| selected == Some((x, y))) {
+    let selected_button = match target {
+        Some(EditTarget::JoystickButton { layout, button }) if layout == index => Some(button),
+        _ => None,
+    };
+    let layout = &app.doc.config.layouts[index];
+    let mut clicked = key_grid(ui, layout, |x, y| selected == Some((x, y)))
+        .map(|(x, y)| EditTarget::LayoutKey { layout: index, x, y });
+    ui.add_space(8.0);
+    if let Some(button) = joystick_row(ui, layout, selected_button) {
+        clicked = Some(EditTarget::JoystickButton { layout: index, button });
+    }
+    if let Some(target) = clicked {
         let search = app.key_editor.take().map(|e| e.search).unwrap_or_default();
-        app.key_editor = Some(KeyEditor { target: EditTarget::LayoutKey { layout: index, x, y }, search });
+        app.key_editor = Some(KeyEditor { target, search });
     }
     ui.add_space(4.0);
     ui.weak(
-        "Click a key to edit it. Fn keys switch layouts: the first number while held, the second after a double tap.",
+        "Click a key to edit it. Fn keys switch layouts: the first number while held, the second after a double tap. \
+        Joystick buttons do what the layout active at the press says.",
     );
 }
 

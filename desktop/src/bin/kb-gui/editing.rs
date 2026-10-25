@@ -3,8 +3,8 @@
 use desktop::config_file;
 use protocol::ble::{self, Info};
 use protocol::config::{
-    Combo, ComboAction, ComboKey, ComboKeyIdent, Config, KeyAction, Layout, MAX_COMBO_KEYS, MAX_COMBOS,
-    MAX_LAYOUT_NAME_LEN, MAX_LAYOUTS,
+    Combo, ComboAction, ComboKey, ComboKeyIdent, Config, JoystickButtons, KeyAction, Layout, MAX_COMBO_KEYS,
+    MAX_COMBOS, MAX_LAYOUT_NAME_LEN, MAX_LAYOUTS,
 };
 use protocol::keys::{Key, KeyMod, MediaKey, MouseKey};
 
@@ -110,14 +110,18 @@ impl ActionKind {
     }
 }
 
-/// Names of the layouts, by index.
 pub fn layout_names(config: &Config) -> Vec<String> {
     config.layouts.iter().map(|l| l.name.clone()).collect()
 }
 
-/// Layout of `config`'s size with every key set to [`KeyAction::None`].
+/// Layout of `config`'s size with every key set to [`KeyAction::None`];
+/// the joystick buttons stay mouse buttons, so they work in a new `Fn` layer.
 pub fn empty_layout(config: &Config, name: String) -> Layout {
-    Layout { name, rows: vec![vec![KeyAction::None; config.width as usize]; config.height as usize] }
+    Layout {
+        name,
+        rows: vec![vec![KeyAction::None; config.width as usize]; config.height as usize],
+        joystick: JoystickButtons::default(),
+    }
 }
 
 /// `LAYER<n>` that no layout has yet.
@@ -181,7 +185,7 @@ pub fn layout_references(config: &Config, index: usize) -> Vec<String> {
     references
 }
 
-/// Removes layout `index` and shifts the indices of the following layouts.
+/// Shifts the indices of the following layouts.
 /// Refuses to remove the last layout or a layout something points to.
 pub fn remove_layout(config: &mut Config, index: usize) -> Result<(), String> {
     if config.layouts.len() <= 1 {
@@ -202,7 +206,7 @@ pub fn remove_layout(config: &mut Config, index: usize) -> Result<(), String> {
     Ok(())
 }
 
-/// Swaps layouts `a` and `b`, keeping the Fn keys and combos pointing to the same layouts.
+/// Keeps the Fn keys and combos pointing to the same layouts.
 pub fn swap_layouts(config: &mut Config, a: usize, b: usize) {
     config.layouts.swap(a, b);
     let (a, b) = (a as u8, b as u8);
@@ -244,6 +248,43 @@ pub fn other_fn_key(layout: &Layout, x: usize, y: usize) -> Option<(usize, usize
             .find(|&(fx, action)| (fx, fy) != (x, y) && matches!(action, KeyAction::Fn { .. }))
             .map(|(fx, _)| (fx, fy))
     })
+}
+
+/// Button of the joystick, see [`JoystickButtons`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoystickButton {
+    Left,
+    Stick,
+    Right,
+}
+
+impl JoystickButton {
+    /// In the order they are shown.
+    pub const ALL: [JoystickButton; 3] = [JoystickButton::Left, JoystickButton::Stick, JoystickButton::Right];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            JoystickButton::Left => "Left",
+            JoystickButton::Stick => "Stick",
+            JoystickButton::Right => "Right",
+        }
+    }
+
+    pub fn action(self, buttons: &JoystickButtons) -> &KeyAction {
+        match self {
+            JoystickButton::Left => &buttons.left,
+            JoystickButton::Stick => &buttons.stick,
+            JoystickButton::Right => &buttons.right,
+        }
+    }
+
+    pub fn action_mut(self, buttons: &mut JoystickButtons) -> &mut KeyAction {
+        match self {
+            JoystickButton::Left => &mut buttons.left,
+            JoystickButton::Stick => &mut buttons.stick,
+            JoystickButton::Right => &mut buttons.right,
+        }
+    }
 }
 
 /// New combo: double tap the key at (0, 0) to switch the layout.

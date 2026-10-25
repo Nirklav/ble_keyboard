@@ -33,7 +33,6 @@ const RESPONSE: Uuid = Uuid::from_u128(ble::RESPONSE_UUID);
 const BUSY_RETRIES: usize = 5;
 const BUSY_DELAY: Duration = Duration::from_millis(500);
 
-/// Connection options.
 #[derive(Debug, Clone)]
 pub struct Options {
     /// Device name filter (case-insensitive substring).
@@ -121,7 +120,7 @@ impl Device {
         ble::chunk_payload_size(self.mtu)
     }
 
-    /// Sends `request` and waits for its response, retrying while the keyboard is busy.
+    /// Retries while the keyboard is busy.
     /// [`Response::Error`] is returned as an error.
     pub async fn request(&mut self, request: &Request) -> Result<Response> {
         for attempt in 0.. {
