@@ -28,9 +28,16 @@ pub fn check_protocol(info: &Info) -> Result<()> {
     Ok(())
 }
 
-/// Reads, decodes and validates the keyboard config.
+/// Reads, decodes and validates the keyboard config, an older version is upgraded to the app one.
 pub async fn read_config(device: &mut Device, info: &Info) -> Result<Config> {
     check_protocol(info)?;
+    ensure!(
+        (config::OLDEST_CONFIG_VERSION..=config::CONFIG_VERSION).contains(&info.config_version),
+        "keyboard config version {} is not supported by the app (versions {}..={}), update the firmware or the app",
+        info.config_version,
+        config::OLDEST_CONFIG_VERSION,
+        config::CONFIG_VERSION
+    );
     let bytes = read_config_bytes(device).await?;
     let config = Config::from_bytes(&bytes).context("can't decode the keyboard config")?;
     config

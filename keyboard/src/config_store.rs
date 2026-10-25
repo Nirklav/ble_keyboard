@@ -5,7 +5,7 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Write};
 
-use protocol::config::{crc32, Config, ValidationError};
+use protocol::config::{crc32, Config, ValidationError, CONFIG_VERSION};
 
 const CONFIG_FILE: &str = "/spiflash/config.bin";
 const CONFIG_TMP: &str = "/spiflash/config.tmp";
@@ -26,7 +26,8 @@ pub fn encode(config: &Config) -> Vec<u8> {
 }
 
 /// Decodes and validates a config for a `width` x `height` keyboard.
-pub fn decode(bytes: &[u8], width: u8, height: u8) -> Result<Config, LoadError> {
+/// Also returns the version it was stored with, before [`Config::from_bytes`] upgraded it.
+pub fn decode(bytes: &[u8], width: u8, height: u8) -> Result<(Config, u16), LoadError> {
     if bytes.len() < HEADER_LEN {
         return Err(LoadError::Truncated);
     }
@@ -51,26 +52,42 @@ pub fn decode(bytes: &[u8], width: u8, height: u8) -> Result<Config, LoadError> 
         return Err(LoadError::Crc);
     }
 
+    let (stored_version, _) = postcard::take_from_bytes::<u16>(payload).map_err(LoadError::Decode)?;
     let config = Config::from_bytes(payload).map_err(LoadError::Decode)?;
     config.validate_for(width, height).map_err(LoadError::Invalid)?;
-    Ok(config)
+    Ok((config, stored_version))
 }
 
 /// Reads the saved config, `Ok(None)` if there is none.
-/// Falls back to the temporary file left by an interrupted [`save`].
+/// A config stored with an older version is saved again upgraded.
 pub fn load(width: u8, height: u8) -> Result<Option<Config>, LoadError> {
+    let Some((config, stored_version)) = load_stored(width, height)? else {
+        return Ok(None);
+    };
+
+    if stored_version != CONFIG_VERSION {
+        log::info!("Saving config upgraded from version {} to {}", stored_version, CONFIG_VERSION);
+        if let Err(e) = save(&config) {
+            log::error!("Failed to save upgraded config: {}", e);
+        }
+    }
+    Ok(Some(config))
+}
+
+/// Falls back to the temporary file left by an interrupted [`save`].
+fn load_stored(width: u8, height: u8) -> Result<Option<(Config, u16)>, LoadError> {
     let saved = read(CONFIG_FILE, width, height);
     if let Ok(Some(_)) = saved {
         return saved;
     }
 
     match read(CONFIG_TMP, width, height) {
-        Ok(Some(config)) => {
+        Ok(Some(loaded)) => {
             log::warn!("Using {}, {} is missing or broken", CONFIG_TMP, CONFIG_FILE);
             if let Err(e) = commit_tmp() {
                 log::error!("Failed to rename {}: {}", CONFIG_TMP, e);
             }
-            Ok(Some(config))
+            Ok(Some(loaded))
         },
         Ok(None) => saved,
         Err(e) => {
@@ -84,7 +101,7 @@ pub fn load(width: u8, height: u8) -> Result<Option<Config>, LoadError> {
 }
 
 /// `Ok(None)` if there is no `path`.
-fn read(path: &str, width: u8, height: u8) -> Result<Option<Config>, LoadError> {
+fn read(path: &str, width: u8, height: u8) -> Result<Option<(Config, u16)>, LoadError> {
     match fs::read(path) {
         Ok(bytes) => decode(&bytes, width, height).map(Some),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),

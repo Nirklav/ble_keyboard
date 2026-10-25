@@ -18,8 +18,8 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use protocol::config::{Config, ValidationError, CONFIG_VERSION};
-use serde::Serialize;
+use protocol::config::{v1, Config, ValidationError};
+use serde::{Deserialize, Serialize};
 
 /// Doesn't validate the config.
 pub fn load(path: &Path) -> Result<Config> {
@@ -27,15 +27,19 @@ pub fn load(path: &Path) -> Result<Config> {
     parse(&text).with_context(|| format!("can't parse {}", path.display()))
 }
 
-/// Doesn't validate the config.
-/// Version 1 is read as the current one: it's the same TOML without the joystick buttons.
+/// Doesn't validate the config. An older version is upgraded to [`CONFIG_VERSION`](protocol::config::CONFIG_VERSION), like [`Config::from_bytes`] does.
 pub fn parse(text: &str) -> Result<Config> {
-    // toml errors already contain the line, column and the source snippet.
-    let mut config: Config = toml::from_str(text)?;
-    if config.version == 1 {
-        config.version = CONFIG_VERSION;
+    #[derive(Deserialize)]
+    struct Header {
+        version: u16,
     }
-    Ok(config)
+
+    // toml errors already contain the line, column and the source snippet.
+    let Header { version } = toml::from_str(text)?;
+    Ok(match version {
+        1 => toml::from_str::<v1::Config>(text)?.into(),
+        _ => toml::from_str(text)?,
+    })
 }
 
 pub fn save(path: &Path, config: &Config) -> Result<()> {
@@ -119,7 +123,7 @@ pub fn describe(error: &ValidationError, config: &Config) -> String {
 
 #[cfg(test)]
 mod tests {
-    use protocol::config::JoystickButtons;
+    use protocol::config::{JoystickButtons, CONFIG_VERSION};
 
     use super::*;
 

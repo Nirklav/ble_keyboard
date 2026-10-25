@@ -250,43 +250,6 @@ pub fn other_fn_key(layout: &Layout, x: usize, y: usize) -> Option<(usize, usize
     })
 }
 
-/// Button of the joystick, see [`JoystickButtons`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JoystickButton {
-    Left,
-    Stick,
-    Right,
-}
-
-impl JoystickButton {
-    /// In the order they are shown.
-    pub const ALL: [JoystickButton; 3] = [JoystickButton::Left, JoystickButton::Stick, JoystickButton::Right];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            JoystickButton::Left => "Left",
-            JoystickButton::Stick => "Stick",
-            JoystickButton::Right => "Right",
-        }
-    }
-
-    pub fn action(self, buttons: &JoystickButtons) -> &KeyAction {
-        match self {
-            JoystickButton::Left => &buttons.left,
-            JoystickButton::Stick => &buttons.stick,
-            JoystickButton::Right => &buttons.right,
-        }
-    }
-
-    pub fn action_mut(self, buttons: &mut JoystickButtons) -> &mut KeyAction {
-        match self {
-            JoystickButton::Left => &mut buttons.left,
-            JoystickButton::Stick => &mut buttons.stick,
-            JoystickButton::Right => &mut buttons.right,
-        }
-    }
-}
-
 /// New combo: double tap the key at (0, 0) to switch the layout.
 pub fn new_combo() -> Combo {
     Combo { keys: vec![ComboKey { count: 2, ..new_combo_key() }], action: ComboAction::SwitchLayout }

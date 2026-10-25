@@ -6,7 +6,8 @@
 //! - in the desktop app it is a TOML file with key names.
 //!
 //! Compatibility: enum variants are only appended (postcard encodes the variant index),
-//! any other change to the layout of these types bumps [`CONFIG_VERSION`].
+//! any other change to the layout of these types bumps [`CONFIG_VERSION`]. The previous layouts
+//! are kept (see [`v1`]) and upgraded on decode, so saved configs survive a firmware update.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -20,6 +21,9 @@ pub use crate::crc::crc32;
 
 /// Format version of [`Config`], stored in [`Config::version`].
 pub const CONFIG_VERSION: u16 = 2;
+
+/// Oldest [`Config::version`] [`Config::from_bytes`] still reads (and upgrades).
+pub const OLDEST_CONFIG_VERSION: u16 = 1;
 
 pub const MAX_LAYOUTS: usize = 8;
 
@@ -69,14 +73,56 @@ pub struct JoystickButtons {
     pub right: KeyAction,
 }
 
+/// Button of the joystick, see [`JoystickButtons`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum JoystickButton {
+    Left,
+    Stick,
+    Right,
+}
+
+impl JoystickButton {
+    /// In the order they are shown, [`JoystickButton::index`] is the position here.
+    pub const ALL: [JoystickButton; 3] = [JoystickButton::Left, JoystickButton::Stick, JoystickButton::Right];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            JoystickButton::Left => "Left",
+            JoystickButton::Stick => "Stick",
+            JoystickButton::Right => "Right",
+        }
+    }
+
+    /// [`crate::joystick::State::buttons`] bit of the button.
+    pub fn bit(self) -> u8 {
+        match self {
+            JoystickButton::Left => crate::joystick::BUTTON_LEFT,
+            JoystickButton::Stick => crate::joystick::BUTTON_STICK,
+            JoystickButton::Right => crate::joystick::BUTTON_RIGHT,
+        }
+    }
+
+    /// Position in [`JoystickButton::ALL`].
+    pub fn index(self) -> usize {
+        self as usize
+    }
+}
+
 impl JoystickButtons {
-    /// Buttons with their [`crate::joystick`] bit numbers.
-    pub fn by_bit(&self) -> [(u8, KeyAction); 3] {
-        [
-            (crate::joystick::BUTTON_LEFT, self.left),
-            (crate::joystick::BUTTON_STICK, self.stick),
-            (crate::joystick::BUTTON_RIGHT, self.right),
-        ]
+    pub fn get(&self, button: JoystickButton) -> &KeyAction {
+        match button {
+            JoystickButton::Left => &self.left,
+            JoystickButton::Stick => &self.stick,
+            JoystickButton::Right => &self.right,
+        }
+    }
+
+    pub fn get_mut(&mut self, button: JoystickButton) -> &mut KeyAction {
+        match button {
+            JoystickButton::Left => &mut self.left,
+            JoystickButton::Stick => &mut self.stick,
+            JoystickButton::Right => &mut self.right,
+        }
     }
 }
 
@@ -177,9 +223,15 @@ impl Config {
         postcard::to_allocvec(self).expect("serialization to a vec can't fail")
     }
 
-    /// Decodes from postcard. Doesn't [`validate`](Config::validate).
+    /// Decodes from postcard, a config of an older version is upgraded to [`CONFIG_VERSION`].
+    /// Doesn't [`validate`](Config::validate).
     pub fn from_bytes(bytes: &[u8]) -> Result<Config, postcard::Error> {
-        postcard::from_bytes(bytes)
+        // `version` is the first field, so it can be read before the layout of the rest is known.
+        let (version, _) = postcard::take_from_bytes::<u16>(bytes)?;
+        match version {
+            1 => postcard::from_bytes::<v1::Config>(bytes).map(Config::from),
+            _ => postcard::from_bytes(bytes),
+        }
     }
 
     /// Checks the version, sizes, limits and indices.
@@ -273,7 +325,7 @@ impl Config {
             }
         }
 
-        if value.joystick.by_bit().iter().any(|(_, action)| matches!(action, KeyAction::Fn { .. })) {
+        if JoystickButton::ALL.iter().any(|&button| matches!(value.joystick.get(button), KeyAction::Fn { .. })) {
             return Err(ValidationError::JoystickFn { layout });
         }
 
@@ -306,6 +358,43 @@ impl Config {
         }
 
         Ok(())
+    }
+}
+
+/// Config of version 1: layouts without the joystick buttons.
+pub mod v1 {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    use serde::{Deserialize, Serialize};
+
+    use super::{Combo, JoystickButtons, KeyAction, CONFIG_VERSION};
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Layout {
+        pub name: String,
+        pub rows: Vec<Vec<KeyAction>>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Config {
+        pub version: u16,
+        pub width: u8,
+        pub height: u8,
+        pub layouts: Vec<Layout>,
+        pub combos: Vec<Combo>,
+    }
+
+    /// The joystick buttons are the default ones.
+    impl From<Config> for super::Config {
+        fn from(config: Config) -> Self {
+            let layouts = config
+                .layouts
+                .into_iter()
+                .map(|layout| super::Layout { name: layout.name, rows: layout.rows, joystick: JoystickButtons::default() })
+                .collect();
+            Self { version: CONFIG_VERSION, width: config.width, height: config.height, layouts, combos: config.combos }
+        }
     }
 }
 
@@ -471,6 +560,23 @@ pub(crate) mod tests {
         let bytes = config.to_bytes();
         assert_eq!(Config::from_bytes(&bytes).unwrap(), config);
         assert!(Config::from_bytes(&bytes[..bytes.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn version_1_is_upgraded() {
+        let config = sample();
+        let old = v1::Config {
+            version: 1,
+            width: config.width,
+            height: config.height,
+            layouts: config.layouts.iter().map(|l| v1::Layout { name: l.name.clone(), rows: l.rows.clone() }).collect(),
+            combos: config.combos.clone(),
+        };
+        let upgraded = Config::from_bytes(&postcard::to_allocvec(&old).unwrap()).unwrap();
+        assert_eq!(upgraded.version, CONFIG_VERSION);
+        assert!(upgraded.layouts.iter().all(|l| l.joystick == JoystickButtons::default()));
+        assert_eq!(upgraded.layouts.iter().map(|l| &l.rows).collect::<Vec<_>>(), config.layouts.iter().map(|l| &l.rows).collect::<Vec<_>>());
+        assert_eq!(upgraded.validate_for(10, 5), Ok(()));
     }
 
     #[test]

@@ -7,10 +7,9 @@ pub mod overview;
 pub mod start;
 
 use eframe::egui;
-use protocol::config::{KeyAction, Layout};
+use protocol::config::{JoystickButton, KeyAction, Layout};
 
 use crate::app::{App, Screen};
-use crate::editing::JoystickButton;
 use crate::labels;
 
 /// Size of a key button on the grid.
@@ -90,7 +89,7 @@ pub fn joystick_row(ui: &mut egui::Ui, layout: &Layout, selected: Option<Joystic
     ui.horizontal(|ui| {
         ui.label("Joystick:");
         for button in JoystickButton::ALL {
-            let action = button.action(&layout.joystick);
+            let action = layout.joystick.get(button);
             let hover = format!("{} button: {}", button.name(), labels::action_description(action));
             ui.vertical(|ui| {
                 ui.weak(button.name());

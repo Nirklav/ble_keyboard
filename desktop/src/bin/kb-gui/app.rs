@@ -8,7 +8,7 @@ use desktop::config_file;
 use desktop::transport::Options;
 use eframe::egui;
 use protocol::ble::Info;
-use protocol::config::Config;
+use protocol::config::{Config, JoystickButton};
 
 use crate::device::{Command, DeviceWorker, Event};
 use crate::editing;
@@ -84,7 +84,7 @@ impl Screen {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditTarget {
     LayoutKey { layout: usize, x: usize, y: usize },
-    JoystickButton { layout: usize, button: editing::JoystickButton },
+    JoystickButton { layout: usize, button: JoystickButton },
     ComboKey { combo: usize, key: usize },
 }
 

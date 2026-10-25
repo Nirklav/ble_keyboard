@@ -28,7 +28,7 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
         EditTarget::JoystickButton { layout, button } => {
             let title = format!("Joystick {} button of {}", button.name().to_lowercase(), config.layouts[layout].name);
             let fn_error = Some("Fn can't be on a joystick button.".to_string());
-            (title, button.action_mut(&mut config.layouts[layout].joystick), fn_error)
+            (title, config.layouts[layout].joystick.get_mut(button), fn_error)
         }
         EditTarget::ComboKey { combo, key } => {
             let title = format!("Combo {combo}, key {key}");
