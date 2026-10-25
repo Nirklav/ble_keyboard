@@ -26,7 +26,7 @@ pub struct Document {
     pub config: Config,
     /// File the config was opened from / saved to.
     pub path: Option<PathBuf>,
-    /// Config as last opened / saved, `None` if it was never saved (e.g. pulled from the keyboard).
+    /// Config as last opened / saved / pulled from / pushed to the keyboard.
     saved: Option<Config>,
 }
 
@@ -151,6 +151,8 @@ pub struct App {
     /// Combo key waiting for a grid click: `(combo, key)`.
     pub picking: Option<(usize, usize)>,
     pub dialog: Option<Dialog>,
+    /// Config being written to the keyboard, becomes the saved one once written.
+    pushing: Option<Config>,
     /// Quit was confirmed, don't ask again.
     quitting: bool,
     /// Last title sent to the window.
@@ -183,6 +185,7 @@ impl App {
             key_editor: None,
             picking: None,
             dialog: None,
+            pushing: None,
             quitting: false,
             title: String::new(),
             size: egui::Vec2::ZERO,
@@ -198,6 +201,7 @@ impl App {
     /// Also goes back to the overview.
     fn set_document(&mut self, doc: Document) {
         self.doc = doc;
+        self.pushing = None;
         self.grid_layout = 0;
         self.go(Screen::Overview);
     }
@@ -213,6 +217,7 @@ impl App {
 
     /// Writes the edited config to the keyboard.
     pub fn push(&mut self) {
+        self.pushing = Some(self.doc.config.clone());
         self.device.send(Command::Push(Box::new(self.doc.config.clone())));
     }
 
@@ -303,11 +308,20 @@ impl App {
                         false,
                         format!("Read {} layouts, {} combos", config.layouts.len(), config.combos.len()),
                     );
-                    self.set_document(Document { config: *config, path: None, saved: None });
+                    self.set_document(Document::opened(*config, None));
                 }
-                Event::Pushed { bytes } => self.device.set_status(false, format!("Config applied ({bytes} bytes)")),
+                Event::Pushed { bytes } => {
+                    if let Some(config) = self.pushing.take() {
+                        self.doc.saved = Some(config);
+                    }
+                    self.device.set_status(false, format!("Config applied ({bytes} bytes)"));
+                }
                 Event::Failed(error) => {
-                    self.device.connected = false;
+                    self.pushing = None;
+                    // A lost connection leads back to the start screen, like a disconnect.
+                    if std::mem::take(&mut self.device.connected) {
+                        self.go(Screen::Start);
+                    }
                     // The start screen shows the error itself.
                     if self.screen != Screen::Start {
                         self.message("Keyboard error", error.clone());
@@ -572,8 +586,6 @@ mod tests {
         assert!(doc.is_dirty());
         assert_eq!(doc.title(), "untitled * - Keyboard config");
 
-        let pulled = Document { config: doc.config.clone(), path: None, saved: None };
-        assert!(pulled.is_dirty());
 
         let opened = Document::opened(doc.config, Some(PathBuf::from("dir/my.toml")));
         assert_eq!(opened.title(), "my.toml - Keyboard config");

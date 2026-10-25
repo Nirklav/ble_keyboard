@@ -90,7 +90,7 @@ impl SpecialCombination {
 
     /// Presses count only while the held keys of the combination are held,
     /// any other matrix key or releasing a held key breaks the combination.
-    /// A joystick button that isn't part of the combination is ignored, it may be held for a drag.
+    /// A joystick button that isn't part of the combination breaks it when released, holding it is ignored.
     pub fn changed(&mut self, key: &KeyChange) {
         let Some(action) = key.reg_as else {
             return;
@@ -121,7 +121,8 @@ impl SpecialCombination {
             }
         }
 
-        if !any_matched && key.coord.is_some() {
+        // A joystick button breaks it only once clicked, while held it may be a drag.
+        if !any_matched && (key.coord.is_some() || !key.state) {
             self.invalid = true;
         }
     }
