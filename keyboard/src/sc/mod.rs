@@ -65,7 +65,7 @@ impl ScAction {
             ComboAction::ResetConfig => {
                 info!("Config reset requested");
                 svc.pending_config = Some(Pending::Reset);
-                svc.display.show_text("Default config")?;
+                svc.display.show_text("Reset")?;
             }
         }
         Ok(())

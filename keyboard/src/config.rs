@@ -91,7 +91,7 @@ pub fn apply_pending<const W: usize, const H: usize>(
 
     if let Err(e) = &stored {
         error!("Failed to store config: {}", e);
-        svc.display.show_text("Save failed")?;
+        svc.display.show_text("Failed")?;
     }
     Ok(Some(stored))
 }
@@ -110,8 +110,8 @@ pub fn apply_changes<const W: usize, const H: usize>(
         return Ok(());
     };
     let message = match pending {
-        Pending::Apply(_) => "Config updated",
-        Pending::Reset => "Default config",
+        Pending::Apply(_) => "Updated",
+        Pending::Reset => "Reset",
     };
 
     svc.pending_config = Some(pending);
