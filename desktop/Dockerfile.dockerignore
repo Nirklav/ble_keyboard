@@ -1,0 +1,9 @@
+# Context is the workspace root; only what the wasm build needs.
+*
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!.cargo
+!protocol
+!desktop
+desktop/dist
