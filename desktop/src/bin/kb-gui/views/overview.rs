@@ -1,8 +1,8 @@
-//! Overview: keyboard info, layouts and the way to the combos.
+//! Overview: keyboard info, layouts, the way to the combos and the settings.
 
 use eframe::egui;
 use protocol::ble;
-use protocol::config::{CONFIG_VERSION, MAX_LAYOUTS};
+use protocol::config::{CONFIG_VERSION, MAX_LAYOUTS, Settings};
 
 use crate::app::{App, Screen};
 use crate::editing;
@@ -23,6 +23,39 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let subtitle = format!("{count} configured + factory reset");
     if nav_button(ui, NAV_SIZE, "Special combos", &subtitle).clicked() {
         app.go(Screen::Combos);
+    }
+    ui.add_space(theme::GAP_XL);
+
+    theme::section_heading(ui, "Settings");
+    ui.add_space(theme::GAP_XS);
+    settings(app, ui);
+}
+
+/// Timing of the mod-tap and layer-tap keys.
+fn settings(app: &mut App, ui: &mut egui::Ui) {
+    let settings = &mut app.doc.config.settings;
+    egui::Grid::new("settings").num_columns(3).spacing([theme::GAP_M, theme::GAP_S]).show(ui, |ui| {
+        ui.label("Tapping term");
+        let term = egui::DragValue::new(&mut settings.tapping_term_ms).range(Settings::TAPPING_TERM_MS).suffix(" ms");
+        ui.add(term);
+        ui.weak("A mod-tap or layer-tap key held longer is a hold.");
+        ui.end_row();
+
+        ui.label("Prior idle");
+        let idle = egui::DragValue::new(&mut settings.require_prior_idle_ms)
+            .range(Settings::REQUIRE_PRIOR_IDLE_MS)
+            .suffix(" ms");
+        ui.add(idle);
+        ui.weak("Pressed this soon after a typed key, it's a tap at once; 0 turns this off.");
+        ui.end_row();
+    });
+    if *settings != Settings::default() {
+        ui.add_space(theme::GAP_XS);
+        let defaults = Settings::default();
+        let hover = format!("{} ms and {} ms", defaults.tapping_term_ms, defaults.require_prior_idle_ms);
+        if ui.button("Reset to defaults").on_hover_text(hover).clicked() {
+            *settings = defaults;
+        }
     }
 }
 

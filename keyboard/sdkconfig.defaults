@@ -32,8 +32,13 @@ CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
 CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
 CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
 
-# Bonding - keyboards need it for reconnection
-CONFIG_BT_NIMBLE_MAX_BONDS=5
+# Bonding - keyboards need it for reconnection.
+# One host per BLE profile (protocol::config::BT_PROFILES = 4) and spare slots: a host pairing on a taken
+# profile is bonded before it's rejected, and a full store makes NimBLE remove the oldest bond.
+CONFIG_BT_NIMBLE_MAX_BONDS=8
+# Subscriptions of the bonded hosts: up to 6 per host (3 HID reports, battery, Service Changed, config).
+# When full NimBLE removes the bond of another host (ble_store_util_status_rr), so it has room for all.
+CONFIG_BT_NIMBLE_MAX_CCCDS=32
 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
 
 # Security - HID requires bonding and encryption
@@ -48,4 +53,5 @@ CONFIG_PM_DFS_INIT_AUTO=y
 
 # Reconnection
 CONFIG_BT_NIMBLE_NVS_PERSIST=y
+# Unused: every BLE profile has its own static random address, no RPA (see keyboard/src/bt/profiles.rs).
 CONFIG_BT_NIMBLE_RPA_TIMEOUT=900

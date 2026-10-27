@@ -2,14 +2,10 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use esp_idf_svc::hal::{delay::Delay, gpio::{Input, PinDriver}, spi::{SpiDeviceDriver, SpiDriver}};
-use log::info;
 use mcp23s17::{InterruptMode, Mcp23s17};
 
-use protocol::config::KeyAction;
-
-use crate::layout::{Keymap, Layout};
-
 /// Keys behind the MCP23S17 extension, it pulls `irq` low when a row goes low.
+/// Only scans and debounces, what the keys do is up to [`protocol::keymap::Keymap`].
 pub struct KeyMatrix<const W: usize, const H: usize> {
     ext: Mcp23s17<SpiDeviceDriver<'static, Rc<SpiDriver<'static>>>>,
     irq: PinDriver<'static, Input>,
@@ -18,8 +14,6 @@ pub struct KeyMatrix<const W: usize, const H: usize> {
     column_pins: [u8; W],
     row_pins: [u8; H],
     keys: [[Key; H]; W],
-    keymap: Keymap,
-    current_layout: usize,
     last_scan: Instant,
 }
 
@@ -29,7 +23,6 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
         irq: PinDriver<'static, Input>,
         column_pins: [u8; W],
         row_pins: [u8; H],
-        keymap: Keymap,
     ) -> anyhow::Result<Self> {
 
         for column in column_pins {
@@ -48,8 +41,6 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
             column_pins,
             row_pins,
             keys: [[Key::new(); H]; W],
-            keymap,
-            current_layout: 0,
             last_scan: Instant::now(),
         })
     }
@@ -60,41 +51,6 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
 
     pub fn irq_mut(&mut self) -> &mut PinDriver<'static, Input> {
         &mut self.irq
-    }
-
-    /// The first layout becomes current.
-    pub fn set_keymap(&mut self, keymap: Keymap) {
-        self.keymap = keymap;
-        self.current_layout = 0;
-        for key in self.keys.iter_mut().flatten() {
-            key.reg_as = None;
-        }
-    }
-
-    pub fn switch_layout(&mut self) -> &Layout {
-        let layout = self.keymap.get(self.current_layout);
-        if let Some(KeyAction::Fn { permanent, .. }) = layout.fn_action() {
-            self.current_layout = permanent as usize;
-            info!("Layout switched to: {}", self.current_layout);
-        }
-
-        self.keymap.get(self.current_layout)
-    }
-
-    /// `None` if there is no such layout.
-    pub fn set_layout(&mut self, idx: usize) -> Option<&Layout> {
-        if idx >= self.keymap.len() {
-            return None;
-        }
-
-        self.current_layout = idx;
-        info!("Layout set to: {}", self.current_layout);
-        Some(self.keymap.get(idx))
-    }
-
-    /// Layout the keys are registered in now: the `Fn` temporary one while `Fn` is held.
-    pub fn active_layout(&self) -> &Layout {
-        active_layout(&self.keymap, self.current_layout, &self.keys)
     }
 
     /// Reads the key at `(x, y)` right now, without debouncing.
@@ -113,35 +69,22 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
         Ok(pressed)
     }
 
-    /// Scans the matrix and passes every key to `key_process`.
+    /// Scans the matrix and passes every key that went down or up to `key_change` as `(x, y, pressed)`.
     /// Returns `true` if any key is pressed.
-    pub fn register<F>(&mut self, mut key_process: F) -> anyhow::Result<bool>
-        where F: FnMut(KeyChange) {
+    pub fn register<F>(&mut self, mut key_change: F) -> anyhow::Result<bool>
+        where F: FnMut(u8, u8, bool) {
         let elapsed_ms = self.last_scan.elapsed().as_millis() as u32;
         self.last_scan = Instant::now();
         self.scan(elapsed_ms)?;
-
-        let original_layout = self.keymap.get(self.current_layout);
-        let original_fn_coords = original_layout.fn_coord();
-        let current_layout = active_layout(&self.keymap, self.current_layout, &self.keys);
 
         let mut any_pressed = false;
         for x in 0..W {
             for y in 0..H {
                 let key = &mut self.keys[x][y];
                 any_pressed |= key.state;
-                if key.state && key.changed {
-                    if original_fn_coords == Some((x, y)) {
-                        key.reg_as = Some(original_layout.get(x, y));
-                    } else {
-                        key.reg_as = Some(current_layout.get(x, y));
-                    }
-                }
-
-                key_process(key.take_change(x, y));
-
-                if !key.state {
-                    key.reg_as = None;
+                if key.changed {
+                    key.changed = false;
+                    key_change(x as u8, y as u8, key.state);
                 }
             }
         }
@@ -174,23 +117,9 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
     }
 }
 
-/// See [`KeyMatrix::active_layout`], borrows only the `keymap`, so the keys can be changed meanwhile.
-fn active_layout<'a, const W: usize, const H: usize>(keymap: &'a Keymap, current: usize, keys: &[[Key; H]; W]) -> &'a Layout {
-    let layout = keymap.get(current);
-    if let Some((x, y)) = layout.fn_coord() {
-        if keys[x][y].state {
-            if let KeyAction::Fn { temporary, .. } = layout.get(x, y) {
-                return keymap.get(temporary as usize);
-            }
-        }
-    }
-    layout
-}
-
 #[derive(Clone, Copy, Debug)]
 struct Key {
     pub state: bool,
-    reg_as: Option<KeyAction>,
     changed: bool,
     debounce_left_ms: u32
 }
@@ -199,7 +128,6 @@ impl Key {
     pub fn new() -> Self {
         Key {
             state: false,
-            reg_as: None,
             changed: false,
             debounce_left_ms: 0,
         }
@@ -226,22 +154,4 @@ impl Key {
         self.changed = true;
         self.debounce_left_ms = 5;
     }
-
-    pub fn take_change(&mut self, x: usize, y: usize) -> KeyChange {
-        let change = KeyChange {
-            coord: Some((x as u8, y as u8)),
-            state: self.state,
-            reg_as: self.reg_as
-        };
-        self.changed = false;
-        change
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct KeyChange {
-    /// Matrix position `(x, y)`, `None` for a joystick button.
-    pub coord: Option<(u8, u8)>,
-    pub state: bool,
-    pub reg_as: Option<KeyAction>
 }

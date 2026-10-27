@@ -1,7 +1,7 @@
 //! Layout editor: name, order and the key grid.
 
 use eframe::egui;
-use protocol::config::{KeyAction, MAX_LAYOUT_NAME_LEN, MAX_LAYOUTS};
+use protocol::config::{JoystickButton, KeyAction, MAX_LAYOUT_NAME_LEN, MAX_LAYOUTS};
 
 use crate::app::{App, EditTarget, KeyEditor, Screen};
 use crate::editing;
@@ -32,9 +32,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, index: usize) {
     ui.horizontal(|ui| {
         ui.weak("Click a key to edit it.");
         ui.add_space(theme::GAP_L);
-        if layout.rows.iter().flatten().any(|action| matches!(action, KeyAction::Fn { .. })) {
-            let text = "Fn: the first layout while held, the second after a double tap";
+        let actions = || layout.rows.iter().flatten().chain(JoystickButton::ALL.map(|b| layout.joystick.get(b)));
+        if actions().any(|action| matches!(action, KeyAction::Fn { .. })) {
+            let text = "Layer keys; Fn: the first layout while held, the second after a double tap";
             theme::legend(ui, theme::FN_FILL, theme::FN_FILL, text);
+        } else if actions().any(|action| action.layers().next().is_some()) {
+            theme::legend(ui, theme::FN_FILL, theme::FN_FILL, "Layer keys");
         }
     });
     ui.add_space(theme::GAP_L);

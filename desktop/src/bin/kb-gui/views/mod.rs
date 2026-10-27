@@ -7,7 +7,7 @@ pub mod overview;
 pub mod start;
 
 use eframe::egui;
-use protocol::config::{JoystickButton, KeyAction, Layout};
+use protocol::config::{BT_PROFILES, JoystickButton, KeyAction, Layout};
 
 use crate::app::{App, Screen};
 use crate::labels;
@@ -85,27 +85,31 @@ pub enum KeyMark {
     Marked,
 }
 
-/// Labels longer than this go on two lines, split at the first space, e.g. `Move` / `0,-10`.
+/// Labels longer than this go on two lines, split at the first space or after the first `/`,
+/// e.g. `Move` / `0,-10`, `Ctrl+Shift/` / `A`.
 const KEY_LINE_CHARS: usize = 8;
 
-/// Button of a key showing its `action`; Fn keys are tinted, empty keys only outlined,
-/// `mark` overrides both.
+/// Button of a key showing its `action`; layer keys are tinted, empty keys only outlined,
+/// transparent ones also weak, `mark` overrides all.
 fn key_button(ui: &mut egui::Ui, action: &KeyAction, mark: KeyMark, hover: String) -> egui::Response {
     let label = labels::action_label(action);
     let colors = match mark {
         KeyMark::Selected => Some((theme::ACCENT, theme::ACCENT_STROKE)),
         KeyMark::Marked => Some((theme::MARK_FILL, theme::MARK_STROKE)),
-        KeyMark::None if matches!(action, KeyAction::Fn { .. }) => Some((theme::FN_FILL, theme::FN_FILL)),
-        KeyMark::None if *action == KeyAction::None => {
+        KeyMark::None if action.layers().next().is_some() => Some((theme::FN_FILL, theme::FN_FILL)),
+        KeyMark::None if matches!(action, KeyAction::None | KeyAction::Transparent) => {
             Some((egui::Color32::TRANSPARENT, ui.visuals().widgets.inactive.bg_fill))
         }
         KeyMark::None => None,
     };
     // Narrow padding: the key labels are short, but the keys are packed.
     ui.spacing_mut().button_padding.x = theme::GAP_XS;
-    let button = match label.split_once(' ') {
-        Some((first, rest)) if label.chars().count() > KEY_LINE_CHARS => {
+    let button = match split_label(&label) {
+        Some((first, rest)) if label.chars().count() > KEY_LINE_CHARS && !rest.is_empty() => {
             egui::Button::new(format!("{first}\n{rest}")).wrap_mode(egui::TextWrapMode::Extend)
+        }
+        _ if *action == KeyAction::Transparent && mark == KeyMark::None => {
+            egui::Button::new(egui::RichText::new(label).color(ui.visuals().weak_text_color())).truncate()
         }
         _ => egui::Button::new(label).truncate(),
     };
@@ -114,6 +118,11 @@ fn key_button(ui: &mut egui::Ui, action: &KeyAction, mark: KeyMark, hover: Strin
         button = button.fill(fill).stroke(egui::Stroke::new(1.0, stroke));
     }
     ui.add_sized(KEY_SIZE, button).on_hover_text(hover)
+}
+
+/// Where a long key label breaks: at the first space, or after the first `/`.
+fn split_label(label: &str) -> Option<(&str, &str)> {
+    label.split_once(' ').or_else(|| label.find('/').map(|i| label.split_at(i + 1)))
 }
 
 /// Spacing between the keys on the grid.
@@ -157,6 +166,15 @@ pub fn key_grid(ui: &mut egui::Ui, layout: &Layout, mark: impl Fn(usize, usize) 
         }
     });
     clicked
+}
+
+/// Combo box choosing a BLE profile index, shown as `BT 1`..
+pub fn bt_profile_select(ui: &mut egui::Ui, id_salt: impl std::hash::Hash + std::fmt::Debug, value: &mut u8) {
+    egui::ComboBox::from_id_salt(id_salt).selected_text(labels::bt_profile_name(*value)).show_ui(ui, |ui| {
+        for index in 0..BT_PROFILES as u8 {
+            ui.selectable_value(value, index, labels::bt_profile_name(index));
+        }
+    });
 }
 
 /// Combo box choosing a layout index among `layouts` names.

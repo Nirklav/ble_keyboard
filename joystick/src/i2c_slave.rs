@@ -7,7 +7,7 @@
 use core::cell::{Cell, RefCell};
 
 use cortex_m::interrupt::{CriticalSection, Mutex};
-use protocol::joystick::{Register, State, ADDRESS, VERSION};
+use protocol::joystick::{ButtonQueue, Register, State, ADDRESS, VERSION};
 
 use crate::hal::pac::{self, interrupt, GPIOA, I2C1, RCC};
 
@@ -21,8 +21,14 @@ const TIMINGR: u32 = 0x0031_0309;
 /// Value returned for bytes read past the end of a register.
 const FILLER: u8 = 0xFF;
 
+/// Button changes kept for the master: a debounced change takes at least 5 ms, so 8 cover a 40 ms polling gap.
+const BUTTON_CHANGES: usize = 8;
+
 /// Latest state, written by the main loop.
 static CURRENT: Mutex<Cell<State>> = Mutex::new(Cell::new(State { x: 0, y: 0, buttons: 0 }));
+/// Button changes not read by the master yet, so a click shorter than its polling period is seen,
+/// a double click as two clicks.
+static BUTTONS: Mutex<RefCell<ButtonQueue<BUTTON_CHANGES>>> = Mutex::new(RefCell::new(ButtonQueue::new()));
 /// Last state completely read by the master.
 static REPORTED: Mutex<Cell<State>> = Mutex::new(Cell::new(State { x: 0, y: 0, buttons: 0 }));
 
@@ -35,8 +41,8 @@ struct Transaction {
     tx: [u8; State::SIZE],
     tx_len: usize,
     tx_pos: usize,
-    /// State being read by the master, becomes reported on STOP.
-    sending: Option<State>,
+    /// State being read by the master, becomes reported on STOP; its buttons are a queued change.
+    sending: Option<(State, bool)>,
 }
 
 static TRANSACTION: Mutex<RefCell<Transaction>> = Mutex::new(RefCell::new(Transaction {
@@ -76,13 +82,22 @@ pub fn init(i2c: I2C1) {
 pub fn publish(state: State) {
     cortex_m::interrupt::free(|cs| {
         CURRENT.borrow(cs).set(state);
+        BUTTONS.borrow(cs).borrow_mut().push(state.buttons);
         update_int(cs);
     });
 }
 
-fn update_int(cs: &CriticalSection) {
+/// State the master reads next: the latest axes with the oldest unread button change, or the latest
+/// buttons if there is none. The flag tells it's a queued change.
+fn to_report(cs: &CriticalSection) -> (State, bool) {
     let current = CURRENT.borrow(cs).get();
-    let pending = current.is_active() || current != REPORTED.borrow(cs).get();
+    let (buttons, queued) = BUTTONS.borrow(cs).borrow().next();
+    (State { buttons, ..current }, queued)
+}
+
+fn update_int(cs: &CriticalSection) {
+    let (state, _) = to_report(cs);
+    let pending = state.is_active() || state != REPORTED.borrow(cs).get() || BUTTONS.borrow(cs).borrow().pending();
     set_int(pending);
 }
 
@@ -126,10 +141,10 @@ fn I2C1() {
                         t.tx_len = Register::Version.size();
                     }
                     Ok(Register::State) => {
-                        let state = CURRENT.borrow(cs).get();
+                        let (state, queued) = to_report(cs);
                         t.tx = state.encode();
                         t.tx_len = Register::State.size();
-                        t.sending = Some(state);
+                        t.sending = Some((state, queued));
                     }
                     Err(_) => t.tx_len = 0,
                 }
@@ -160,9 +175,11 @@ fn I2C1() {
             t.expect_register = false;
             // TXDR is preloaded ahead of the bus, so `tx_pos` may exceed the bytes actually
             // sent by one; a partial read of the state is a protocol violation anyway.
-            if let Some(state) = t.sending.take() {
+            if let Some((state, queued)) = t.sending.take() {
                 if t.tx_pos >= t.tx_len {
                     REPORTED.borrow(cs).set(state);
+                    // The next read gets the next change.
+                    BUTTONS.borrow(cs).borrow_mut().ack(queued);
                     update_int(cs);
                 }
             }

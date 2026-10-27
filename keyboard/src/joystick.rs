@@ -1,13 +1,11 @@
 use esp_idf_svc::hal::delay::TickType;
 use esp_idf_svc::hal::gpio::{Input, PinDriver};
 use log::{info, warn};
-use protocol::config::{JoystickButton, KeyAction};
+use protocol::config::JoystickButton;
 use protocol::joystick::{Register, State, ADDRESS, AXIS_MAX, VERSION};
 
 use crate::bt::ble_mouse_keyboard::BleMouseKeyboard;
 use crate::i2c_bus::SharedI2c;
-use crate::key_matrix::KeyChange;
-use crate::layout::{self, Layout};
 
 const TIMEOUT: TickType = TickType::new_millis(20);
 
@@ -30,8 +28,8 @@ pub struct Joystick {
     irq: PinDriver<'static, Input>,
     x: Inertia,
     y: Inertia,
-    /// Action of each held button by [`JoystickButton::index`], taken from the layout when it was pressed.
-    held: [Option<KeyAction>; JoystickButton::ALL.len()],
+    /// Held buttons, like [`State::buttons`].
+    buttons: u8,
 }
 
 impl Joystick {
@@ -46,7 +44,7 @@ impl Joystick {
                     irq,
                     x: Inertia::default(),
                     y: Inertia::default(),
-                    held: [None; JoystickButton::ALL.len()],
+                    buttons: 0,
                 })
             },
             Ok(()) => {
@@ -68,34 +66,30 @@ impl Joystick {
         &mut self.irq
     }
 
-    /// Applies the state to the reports if `INT` is asserted, buttons do what `layout` says.
-    /// Passes every held or just released button to `key_process`, like [`KeyMatrix::register`](crate::key_matrix::KeyMatrix::register).
+    /// Moves the cursor if `INT` is asserted, passes every button that went down or up to `button_change`,
+    /// like [`KeyMatrix::register`](crate::key_matrix::KeyMatrix::register).
     /// Returns `true` while the joystick is in use, so the keyboard must not go idle.
-    pub fn poll<F>(&mut self, layout: &Layout, keyboard: &mut BleMouseKeyboard, mut key_process: F) -> bool
-        where F: FnMut(KeyChange) {
+    pub fn poll<F>(&mut self, keyboard: &mut BleMouseKeyboard, mut button_change: F) -> bool
+        where F: FnMut(JoystickButton, bool) {
         // `INT` is released: nothing is pressed and the last state is read.
         if self.irq.is_high() {
-            self.buttons(State::default(), layout, keyboard, &mut key_process);
+            self.buttons(0, &mut button_change);
             return false;
         }
 
-        if let Err(e) = self.register(layout, keyboard, &mut key_process) {
+        // Keeps the held buttons on a failure, otherwise the host would see them released.
+        if let Err(e) = self.register(keyboard, &mut button_change) {
             warn!("joystick read failed: {:?}", e);
-            // Keeps the held buttons, otherwise the host would see them released for a report.
-            for action in self.held.iter().flatten() {
-                layout::press(action, keyboard);
-                key_process(KeyChange { coord: None, state: true, reg_as: Some(*action) });
-            }
         }
         true
     }
 
-    fn register(&mut self, layout: &Layout, keyboard: &mut BleMouseKeyboard, key_process: &mut impl FnMut(KeyChange)) -> anyhow::Result<()> {
+    fn register(&mut self, keyboard: &mut BleMouseKeyboard, button_change: &mut impl FnMut(JoystickButton, bool)) -> anyhow::Result<()> {
         let mut bytes = [0; State::SIZE];
         self.i2c.write_read(ADDRESS, &[Register::State as u8], &mut bytes, TIMEOUT.ticks())?;
         let state = State::decode(&bytes);
 
-        self.buttons(state, layout, keyboard, key_process);
+        self.buttons(state.buttons, button_change);
 
         let (x, y) = target_speed(state.x, state.y);
         let dx = self.x.travel(if INVERT_X { -x } else { x });
@@ -105,24 +99,16 @@ impl Joystick {
         Ok(())
     }
 
-    /// Presses the buttons pressed in `state`, releases the others.
-    fn buttons(&mut self, state: State, layout: &Layout, keyboard: &mut BleMouseKeyboard, key_process: &mut impl FnMut(KeyChange)) {
+    /// Passes the buttons that differ from the held ones.
+    fn buttons(&mut self, buttons: u8, button_change: &mut impl FnMut(JoystickButton, bool)) {
         for button in JoystickButton::ALL {
-            let held = &mut self.held[button.index()];
-            let pressed = state.is_pressed(button.bit());
-            let action = if pressed {
-                // Like a matrix key, keeps doing what it did when pressed, even if the layout changed.
-                let action = *held.get_or_insert(*layout.joystick().get(button));
-                layout::press(&action, keyboard);
-                action
-            } else {
-                match held.take() {
-                    Some(action) => action,
-                    None => continue,
-                }
-            };
-            key_process(KeyChange { coord: None, state: pressed, reg_as: Some(action) });
+            let mask = 1 << button.bit();
+            let pressed = buttons & mask != 0;
+            if pressed != (self.buttons & mask != 0) {
+                button_change(button, pressed);
+            }
         }
+        self.buttons = buttons;
     }
 }
 

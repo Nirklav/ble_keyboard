@@ -3,9 +3,10 @@ use std::io;
 use log::{error, info};
 use protocol::ble::{ErrorCode, Response};
 use protocol::config::Config;
+use protocol::keymap::Keymap;
 
 use crate::config_store;
-use crate::layout::{default_config, Keymap};
+use crate::layout::default_config;
 use crate::sc::SpecialCombinations;
 use crate::services::Services;
 
@@ -135,7 +136,7 @@ pub fn apply_changes<const W: usize, const H: usize>(
 
 fn apply<const W: usize, const H: usize>(config: Config, svc: &mut Services<W, H>, special_combinations: &mut SpecialCombinations) {
     info!("Applying config");
-    svc.key_matrix.set_keymap(Keymap::from_config(&config));
+    svc.keymap = Keymap::new(&config);
     special_combinations.set(&config.combos);
     svc.config = config;
 }

@@ -2,7 +2,7 @@
 //!
 //! Features:
 //! - none: [`joystick`], [`keys`], [`crc`] and the [`ble`] constants, usable without an allocator;
-//! - `alloc`: [`config`] model and the [`ble`] config protocol messages;
+//! - `alloc`: [`config`] model, the [`keymap`] key processing and the [`ble`] config protocol messages;
 //! - `std`: `alloc` + `std::error::Error` impls.
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 
@@ -16,3 +16,5 @@ pub mod keys;
 
 #[cfg(feature = "alloc")]
 pub mod config;
+#[cfg(feature = "alloc")]
+pub mod keymap;

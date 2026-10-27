@@ -190,6 +190,9 @@ pub fn mouse_label(buttons: MouseKey) -> String {
     if names.is_empty() { "Mouse -".to_string() } else { format!("Mouse {}", names.join("+")) }
 }
 
+/// Short label of [`KeyAction::Transparent`]; ASCII, the default fonts have no triangle.
+pub const TRANSPARENT_LABEL: &str = "TRNS";
+
 /// Short label of an action for a key button, empty for [`KeyAction::None`].
 pub fn action_label(action: &KeyAction) -> String {
     match *action {
@@ -206,7 +209,24 @@ pub fn action_label(action: &KeyAction) -> String {
         KeyAction::MouseScroll { dy } => format!("Scroll {dy:+}"),
         KeyAction::Fn { temporary, permanent } => format!("Fn {temporary}/{permanent}"),
         KeyAction::None => String::new(),
+        KeyAction::Transparent => TRANSPARENT_LABEL.to_string(),
+        KeyAction::Momentary(layer) => format!("MO {layer}"),
+        KeyAction::Toggle(layer) => format!("TG {layer}"),
+        KeyAction::To(layer) => format!("TO {layer}"),
+        // Invalid (see `ActionError::ModTapWithoutMods`), shown as such rather than as a plain key.
+        KeyAction::ModTap { mods, tap } if mods.is_empty() => format!("-/{}", key_label(tap)),
+        KeyAction::ModTap { mods, tap } => format!("{}/{}", mods_prefix(mods), key_label(tap)),
+        KeyAction::LayerTap { layer, tap } => format!("LT{layer} {}", key_label(tap)),
+        KeyAction::BtSelect(profile) => bt_profile_name(profile),
+        KeyAction::BtNext => "BT >".to_string(),
+        KeyAction::BtPrev => "BT <".to_string(),
+        KeyAction::BtClear => "BT clr".to_string(),
     }
+}
+
+/// BLE profile as the keyboard shows it, 1-based: `BT 1` for profile 0.
+pub fn bt_profile_name(profile: u8) -> String {
+    format!("BT {}", profile as u16 + 1)
 }
 
 /// Longer description of an action, for tooltips.
@@ -229,6 +249,16 @@ pub fn action_description(action: &KeyAction) -> String {
             format!("Fn: layout {temporary} while held, layout {permanent} after a double tap")
         }
         KeyAction::None => "Nothing".to_string(),
+        KeyAction::Transparent => "Transparent: does what this key does in the layer below".to_string(),
+        KeyAction::Momentary(layer) => format!("MO: layout {layer} while held"),
+        KeyAction::Toggle(layer) => format!("TG: turns layout {layer} on or off"),
+        KeyAction::To(layer) => format!("TO: switches to layout {layer}, turns the other layers off"),
+        KeyAction::ModTap { mods, tap } => format!("Mod-tap: tap {}, hold {}", key_name(tap), mods_label(mods)),
+        KeyAction::LayerTap { layer, tap } => format!("Layer-tap: tap {}, hold layout {layer}", key_name(tap)),
+        KeyAction::BtSelect(profile) => format!("Switch to BLE profile {} and its host", bt_profile_name(profile)),
+        KeyAction::BtNext => "Switch to the next BLE profile".to_string(),
+        KeyAction::BtPrev => "Switch to the previous BLE profile".to_string(),
+        KeyAction::BtClear => "Forget the host of the current BLE profile".to_string(),
     }
 }
 
@@ -279,8 +309,13 @@ pub fn combo_action_label(action: &ComboAction, layouts: &[String]) -> String {
             Some(name) => format!("Set layout {index} ({name})"),
             None => format!("Set layout {index} (missing)"),
         },
-        ComboAction::Unpair => "Unpair (remove bonded devices)".to_string(),
+        ComboAction::Unpair => "Unpair (forget the host of the current BLE profile)".to_string(),
         ComboAction::ResetConfig => "Reset config to factory".to_string(),
+        ComboAction::BtSelect(profile) => format!("Switch to BLE profile {}", bt_profile_name(profile)),
+        ComboAction::BtNext => "Switch to the next BLE profile".to_string(),
+        ComboAction::BtPrev => "Switch to the previous BLE profile".to_string(),
+        ComboAction::BtClear => "Forget the host of the current BLE profile".to_string(),
+        ComboAction::BtClearAll => "Forget the hosts of all BLE profiles".to_string(),
     }
 }
 
@@ -309,6 +344,31 @@ mod tests {
         assert_eq!(action_label(&KeyAction::KeyWithMod(Key::Num1, KeyMod::LeftShift)), "!");
         assert_eq!(action_label(&KeyAction::KeyWithMod(Key::A, KeyMod::LeftShift)), "Shift+A");
         assert_eq!(action_label(&KeyAction::KeyWithMod(Key::Num1, KeyMod::LeftCtrl)), "Ctrl+1");
+    }
+
+    #[test]
+    fn layer_and_tap_hold_labels() {
+        assert_eq!(action_label(&KeyAction::Transparent), "TRNS");
+        assert_eq!(action_label(&KeyAction::Momentary(1)), "MO 1");
+        assert_eq!(action_label(&KeyAction::Toggle(2)), "TG 2");
+        assert_eq!(action_label(&KeyAction::To(0)), "TO 0");
+        assert_eq!(action_label(&KeyAction::ModTap { mods: KeyMod::LeftCtrl, tap: Key::A }), "Ctrl/A");
+        assert_eq!(action_label(&KeyAction::ModTap { mods: KeyMod::empty(), tap: Key::A }), "-/A");
+        assert_eq!(
+            action_label(&KeyAction::ModTap { mods: KeyMod::RightAlt | KeyMod::LeftShift, tap: Key::Num1 }),
+            "Shift+RAlt/1"
+        );
+        assert_eq!(action_label(&KeyAction::LayerTap { layer: 1, tap: Key::Space }), "LT1 Space");
+    }
+
+    #[test]
+    fn bt_labels_are_one_based() {
+        assert_eq!(action_label(&KeyAction::BtSelect(0)), "BT 1");
+        assert_eq!(action_label(&KeyAction::BtSelect(3)), "BT 4");
+        assert_eq!(action_label(&KeyAction::BtNext), "BT >");
+        assert_eq!(action_label(&KeyAction::BtPrev), "BT <");
+        assert_eq!(action_label(&KeyAction::BtClear), "BT clr");
+        assert_eq!(combo_action_label(&ComboAction::BtSelect(1), &[]), "Switch to BLE profile BT 2");
     }
 
     #[test]

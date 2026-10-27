@@ -10,7 +10,7 @@ use crate::app::{App, EditTarget, KeyEditor, Screen};
 use crate::editing;
 use crate::labels;
 use crate::theme;
-use crate::views::{KeyMark, key_grid, layout_select};
+use crate::views::{KeyMark, bt_profile_select, key_grid, layout_select};
 
 /// List of the combos: the built-in recovery one, then the configured ones.
 pub fn list(app: &mut App, ui: &mut egui::Ui) {
@@ -263,8 +263,13 @@ fn action_select(ui: &mut egui::Ui, index: usize, action: &mut ComboAction, layo
     let kinds = [
         (ComboAction::SwitchLayout, "Switch layout"),
         (ComboAction::SetLayout(0), "Set layout"),
-        (ComboAction::Unpair, "Unpair"),
         (ComboAction::ResetConfig, "Reset config"),
+        (ComboAction::BtSelect(0), "BLE profile: select"),
+        (ComboAction::BtNext, "BLE profile: next"),
+        (ComboAction::BtPrev, "BLE profile: previous"),
+        (ComboAction::BtClear, "BLE profile: forget host"),
+        (ComboAction::BtClearAll, "BLE profile: forget all hosts"),
+        (ComboAction::Unpair, "Unpair (= forget host)"),
     ];
     let same_kind = |a: &ComboAction, b: &ComboAction| std::mem::discriminant(a) == std::mem::discriminant(b);
     let current = kinds.iter().find(|(kind, _)| same_kind(kind, action)).map_or("?", |(_, name)| *name);
@@ -276,8 +281,10 @@ fn action_select(ui: &mut egui::Ui, index: usize, action: &mut ComboAction, layo
             }
         }
     });
-    if let ComboAction::SetLayout(layout) = action {
-        layout_select(ui, ("combo_layout", index), layout, layouts);
+    match action {
+        ComboAction::SetLayout(layout) => layout_select(ui, ("combo_layout", index), layout, layouts),
+        ComboAction::BtSelect(profile) => bt_profile_select(ui, ("combo_bt_profile", index), profile),
+        _ => {}
     }
     ui.weak(labels::combo_action_label(action, layouts));
 }

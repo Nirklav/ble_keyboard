@@ -7,11 +7,12 @@
 //!
 //! Compatibility: enum variants are only appended (postcard encodes the variant index),
 //! any other change to the layout of these types bumps [`CONFIG_VERSION`]. The previous layouts
-//! are kept (see [`v1`]) and upgraded on decode, so saved configs survive a firmware update.
+//! are kept (see [`v1`], [`v2`]) and upgraded on decode, so saved configs survive a firmware update.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
+use core::ops::RangeInclusive;
 
 use serde::{Deserialize, Serialize};
 
@@ -20,7 +21,7 @@ use crate::keys::{Key, KeyMod, MediaKey, MouseKey};
 pub use crate::crc::crc32;
 
 /// Format version of [`Config`], stored in [`Config::version`].
-pub const CONFIG_VERSION: u16 = 2;
+pub const CONFIG_VERSION: u16 = 3;
 
 /// Oldest [`Config::version`] [`Config::from_bytes`] still reads (and upgrades).
 pub const OLDEST_CONFIG_VERSION: u16 = 1;
@@ -34,7 +35,21 @@ pub const MAX_COMBO_KEYS: usize = 8;
 /// Max length of a layout name in characters: the 128 px wide display with the 10x20 font fits 12.
 pub const MAX_LAYOUT_NAME_LEN: usize = 12;
 
+/// Number of BLE host profiles, see [`KeyAction::BtSelect`]. Each one remembers one host;
+/// the firmware keeps the bonds of all of them, `CONFIG_BT_NIMBLE_MAX_BONDS` must be larger.
+pub const BT_PROFILES: usize = 4;
+
 /// What a key does when it's pressed.
+///
+/// Layer actions ([`KeyAction::Fn`], [`KeyAction::Momentary`], [`KeyAction::Toggle`], [`KeyAction::To`],
+/// [`KeyAction::LayerTap`]) and [`KeyAction::Transparent`] work on a base layer and a stack of layers on top
+/// of it, see [`crate::keymap`].
+///
+/// BLE profile actions ([`KeyAction::BtSelect`], [`KeyAction::BtNext`], [`KeyAction::BtPrev`],
+/// [`KeyAction::BtClear`]) switch between the hosts the keyboard remembers, see [`BT_PROFILES`].
+/// A profile is bound to at most one host: selecting a bound profile reconnects to its host only,
+/// an empty one waits for a new host to pair and binds it. Profiles are 0-based here and shown as
+/// `BT 1`..`BT 4` on the display and in the app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum KeyAction {
     Key(Key),
@@ -46,10 +61,100 @@ pub enum KeyAction {
     MouseTravel { dx: i8, dy: i8 },
     /// Scrolls the mouse wheel every report while held.
     MouseScroll { dy: i8 },
-    /// Layer key: switches to layout `temporary` while held, double tap switches to `permanent`.
-    /// Indices into [`Config::layouts`]. At most one per layout.
+    /// Layer key: switches to layout `temporary` while held (like [`KeyAction::Momentary`]),
+    /// double tap switches to `permanent`. Indices into [`Config::layouts`]. At most one per layout.
     Fn { temporary: u8, permanent: u8 },
     None,
+    /// Does what the same key does in the next active layer below, nothing in the base layer.
+    Transparent,
+    /// `MO(n)`: layout `n` is on top of the active ones while held.
+    Momentary(u8),
+    /// `TG(n)`: a press puts layout `n` on top of the active ones, or turns it off if it's active,
+    /// even if it's held by a [`KeyAction::Momentary`] (like QMK).
+    Toggle(u8),
+    /// `TO(n)`: a press makes layout `n` the base layer and turns every other layer off.
+    To(u8),
+    /// Tap sends `tap`, hold holds `mods` (at least one); [`Settings`] tell a tap from a hold.
+    ModTap { mods: KeyMod, tap: Key },
+    /// Tap sends `tap`, hold is [`KeyAction::Momentary`] of `layer`; [`Settings`] tell a tap from a hold.
+    LayerTap { layer: u8, tap: Key },
+    /// Selects BLE host profile `n` (0-based), less than [`BT_PROFILES`]: the keyboard drops the current
+    /// host and connects to the one bound to the profile, or waits for a new host to pair.
+    BtSelect(u8),
+    /// Selects the next BLE host profile, the first one after the last.
+    BtNext,
+    /// Selects the previous BLE host profile, the last one before the first.
+    BtPrev,
+    /// Forgets the host of the current BLE profile, the profile waits for a new host to pair.
+    BtClear,
+}
+
+impl KeyAction {
+    /// Indices into [`Config::layouts`] the action points to.
+    pub fn layers(&self) -> impl Iterator<Item = u8> {
+        let (first, second) = match *self {
+            KeyAction::Fn { temporary, permanent } => (Some(temporary), Some(permanent)),
+            KeyAction::Momentary(layer)
+            | KeyAction::Toggle(layer)
+            | KeyAction::To(layer)
+            | KeyAction::LayerTap { layer, .. } => (Some(layer), None),
+            _ => (None, None),
+        };
+        first.into_iter().chain(second)
+    }
+
+    /// Applies `map` to every layout index of [`KeyAction::layers`].
+    pub fn map_layers(&mut self, mut map: impl FnMut(u8) -> u8) {
+        match self {
+            KeyAction::Fn { temporary, permanent } => {
+                *temporary = map(*temporary);
+                *permanent = map(*permanent);
+            }
+            KeyAction::Momentary(layer)
+            | KeyAction::Toggle(layer)
+            | KeyAction::To(layer)
+            | KeyAction::LayerTap { layer, .. } => *layer = map(*layer),
+            _ => {}
+        }
+    }
+
+    /// BLE profile index of [`KeyAction::BtSelect`], must be less than [`BT_PROFILES`].
+    pub fn bt_profile(&self) -> Option<u8> {
+        match *self {
+            KeyAction::BtSelect(profile) => Some(profile),
+            _ => None,
+        }
+    }
+
+    /// [`KeyAction::ModTap`] with no modifiers: its hold would do nothing, yet it delays the taps.
+    pub fn is_mod_tap_without_mods(&self) -> bool {
+        matches!(self, KeyAction::ModTap { mods, .. } if mods.is_empty())
+    }
+}
+
+/// Global key processing settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    /// A [`KeyAction::ModTap`] or [`KeyAction::LayerTap`] held this long is a hold.
+    /// Released earlier it's a tap, unless another key was pressed and released meanwhile.
+    pub tapping_term_ms: u16,
+    /// A tap-hold key pressed this soon after the press of a typed key is a tap at once:
+    /// no misfires while typing fast. 0 turns it off.
+    pub require_prior_idle_ms: u16,
+}
+
+impl Settings {
+    /// Allowed [`Settings::tapping_term_ms`].
+    pub const TAPPING_TERM_MS: RangeInclusive<u16> = 50..=1000;
+    /// Allowed [`Settings::require_prior_idle_ms`].
+    pub const REQUIRE_PRIOR_IDLE_MS: RangeInclusive<u16> = 0..=1000;
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self { tapping_term_ms: 200, require_prior_idle_ms: 150 }
+    }
 }
 
 /// One layer of the keymap.
@@ -64,7 +169,7 @@ pub struct Layout {
     pub joystick: JoystickButtons,
 }
 
-/// What the joystick buttons do in a layout. [`KeyAction::Fn`] is not allowed.
+/// What the joystick buttons do in a layout. [`KeyAction::Fn`] is not allowed, the other layer actions are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JoystickButtons {
     pub left: KeyAction,
@@ -173,7 +278,9 @@ pub struct ComboKey {
 pub enum ComboKeyIdent {
     /// Physical key position.
     Coord { x: u8, y: u8 },
-    /// Any key registered as this action in the current layout.
+    /// Any key registered as this action in the current layout. Matched against the action a key was pressed as,
+    /// after the [`KeyAction::Transparent`] fall-through, so `Transparent` never matches; a [`KeyAction::ModTap`]
+    /// key is matched as the `ModTap` itself, not as its tap key.
     Action(KeyAction),
 }
 
@@ -184,10 +291,21 @@ pub enum ComboAction {
     SwitchLayout,
     /// Switches to the layout with this index.
     SetLayout(u8),
-    /// Removes bonded devices.
+    /// Same as [`ComboAction::BtClear`], kept for older configs: forgets the host of the current
+    /// BLE profile. Before the profiles it removed every bonded host.
     Unpair,
     /// Resets the config to the factory one.
     ResetConfig,
+    /// Like [`KeyAction::BtSelect`]: selects BLE host profile `n`, less than [`BT_PROFILES`].
+    BtSelect(u8),
+    /// Like [`KeyAction::BtNext`].
+    BtNext,
+    /// Like [`KeyAction::BtPrev`].
+    BtPrev,
+    /// Like [`KeyAction::BtClear`]: forgets the host of the current BLE profile.
+    BtClear,
+    /// Forgets the hosts of all BLE profiles.
+    BtClearAll,
 }
 
 /// Factory reset built into the firmware, the config can't override it:
@@ -215,6 +333,9 @@ pub struct Config {
     pub layouts: Vec<Layout>,
     /// Up to [`MAX_COMBOS`] special combinations.
     pub combos: Vec<Combo>,
+    /// May be left out in TOML.
+    #[serde(default)]
+    pub settings: Settings,
 }
 
 impl Config {
@@ -230,6 +351,7 @@ impl Config {
         let (version, _) = postcard::take_from_bytes::<u16>(bytes)?;
         match version {
             1 => postcard::from_bytes::<v1::Config>(bytes).map(Config::from),
+            2 => postcard::from_bytes::<v2::Config>(bytes).map(Config::from),
             _ => postcard::from_bytes(bytes),
         }
     }
@@ -262,6 +384,16 @@ impl Config {
 
         for (index, combo) in self.combos.iter().enumerate() {
             self.validate_combo(index, combo)?;
+        }
+
+        let settings = [
+            ("tapping_term_ms", self.settings.tapping_term_ms, Settings::TAPPING_TERM_MS),
+            ("require_prior_idle_ms", self.settings.require_prior_idle_ms, Settings::REQUIRE_PRIOR_IDLE_MS),
+        ];
+        for (name, value, range) in settings {
+            if !range.contains(&value) {
+                return Err(ValidationError::Setting { name, value, min: *range.start(), max: *range.end() });
+            }
         }
 
         Ok(())
@@ -310,25 +442,43 @@ impl Config {
             }
 
             for (x, action) in row.iter().enumerate() {
-                if let KeyAction::Fn { temporary, permanent } = *action {
+                let is_fn = matches!(action, KeyAction::Fn { .. });
+                if is_fn {
                     if let Some((first_x, first_y)) = fn_key {
                         return Err(ValidationError::MultipleFn { layout, first: (first_x, first_y), second: (x, y) });
                     }
                     fn_key = Some((x, y));
-
-                    for index in [temporary, permanent] {
-                        if index as usize >= self.layouts.len() {
-                            return Err(ValidationError::FnLayoutIndex { layout, x, y, index });
-                        }
-                    }
                 }
+
+                self.check_action(action).map_err(|error| match error {
+                    ActionError::LayerIndex(index) if is_fn => ValidationError::FnLayoutIndex { layout, x, y, index },
+                    error => ValidationError::Key { layout, x, y, error },
+                })?;
             }
         }
 
-        if JoystickButton::ALL.iter().any(|&button| matches!(value.joystick.get(button), KeyAction::Fn { .. })) {
-            return Err(ValidationError::JoystickFn { layout });
+        for button in JoystickButton::ALL {
+            let action = value.joystick.get(button);
+            if matches!(action, KeyAction::Fn { .. }) {
+                return Err(ValidationError::JoystickFn { layout });
+            }
+            self.check_action(action).map_err(|error| ValidationError::Joystick { layout, button, error })?;
         }
 
+        Ok(())
+    }
+
+    /// Checks of a [`KeyAction`] wherever it is: a layout key, a joystick button or a combo key.
+    fn check_action(&self, action: &KeyAction) -> Result<(), ActionError> {
+        if let Some(index) = action.layers().find(|&index| index as usize >= self.layouts.len()) {
+            return Err(ActionError::LayerIndex(index));
+        }
+        if let Some(index) = action.bt_profile().filter(|&index| index as usize >= BT_PROFILES) {
+            return Err(ActionError::BtProfileIndex(index));
+        }
+        if action.is_mod_tap_without_mods() {
+            return Err(ActionError::ModTapWithoutMods);
+        }
         Ok(())
     }
 
@@ -344,17 +494,29 @@ impl Config {
         }
 
         for key in &value.keys {
-            if let ComboKeyIdent::Coord { x, y } = key.ident {
-                if x >= self.width || y >= self.height {
+            match key.ident {
+                ComboKeyIdent::Coord { x, y } if x >= self.width || y >= self.height => {
                     return Err(ValidationError::ComboCoord { combo, x, y });
                 }
+                ComboKeyIdent::Action(KeyAction::Transparent) => {
+                    return Err(ValidationError::ComboTransparentKey { combo });
+                }
+                // Like a key of a layout, though the action is only compared: a valid config has no such keys.
+                ComboKeyIdent::Action(action) => {
+                    self.check_action(&action).map_err(|error| ValidationError::ComboKey { combo, error })?;
+                }
+                _ => {}
             }
         }
 
-        if let ComboAction::SetLayout(index) = value.action {
-            if index as usize >= self.layouts.len() {
+        match value.action {
+            ComboAction::SetLayout(index) if index as usize >= self.layouts.len() => {
                 return Err(ValidationError::ComboLayoutIndex { combo, index });
             }
+            ComboAction::BtSelect(index) if index as usize >= BT_PROFILES => {
+                return Err(ValidationError::ComboBtProfileIndex { combo, index });
+            }
+            _ => {}
         }
 
         Ok(())
@@ -368,7 +530,7 @@ pub mod v1 {
 
     use serde::{Deserialize, Serialize};
 
-    use super::{Combo, JoystickButtons, KeyAction, CONFIG_VERSION};
+    use super::{Combo, JoystickButtons, KeyAction};
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub struct Layout {
@@ -393,7 +555,40 @@ pub mod v1 {
                 .into_iter()
                 .map(|layout| super::Layout { name: layout.name, rows: layout.rows, joystick: JoystickButtons::default() })
                 .collect();
-            Self { version: CONFIG_VERSION, width: config.width, height: config.height, layouts, combos: config.combos }
+            super::v2::Config { version: 2, width: config.width, height: config.height, layouts, combos: config.combos }
+                .into()
+        }
+    }
+}
+
+/// Config of version 2: no [`Settings`].
+pub mod v2 {
+    use alloc::vec::Vec;
+
+    use serde::{Deserialize, Serialize};
+
+    use super::{Combo, Layout, Settings, CONFIG_VERSION};
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Config {
+        pub version: u16,
+        pub width: u8,
+        pub height: u8,
+        pub layouts: Vec<Layout>,
+        pub combos: Vec<Combo>,
+    }
+
+    /// The settings are the default ones.
+    impl From<Config> for super::Config {
+        fn from(config: Config) -> Self {
+            Self {
+                version: CONFIG_VERSION,
+                width: config.width,
+                height: config.height,
+                layouts: config.layouts,
+                combos: config.combos,
+                settings: Settings::default(),
+            }
         }
     }
 }
@@ -420,6 +615,12 @@ pub enum ValidationError {
     FnLayoutIndex { layout: usize, x: usize, y: usize, index: u8 },
     /// [`KeyAction::Fn`] on a joystick button.
     JoystickFn { layout: usize },
+    /// Action of the key at `(x, y)` is invalid; a layer index of [`KeyAction::Fn`] is [`ValidationError::FnLayoutIndex`].
+    Key { layout: usize, x: usize, y: usize, error: ActionError },
+    /// Action of a joystick button is invalid.
+    Joystick { layout: usize, button: JoystickButton, error: ActionError },
+    /// A [`Settings`] value is out of its range.
+    Setting { name: &'static str, value: u16, min: u16, max: u16 },
     TooManyCombos { count: usize, max: usize },
     EmptyCombo { combo: usize },
     TooManyComboKeys { combo: usize, count: usize, max: usize },
@@ -429,6 +630,37 @@ pub enum ValidationError {
     ComboCoord { combo: usize, x: u8, y: u8 },
     /// [`ComboAction::SetLayout`] points to a missing layout.
     ComboLayoutIndex { combo: usize, index: u8 },
+    /// [`ComboAction::BtSelect`] points to a missing BLE profile.
+    ComboBtProfileIndex { combo: usize, index: u8 },
+    /// [`ComboKeyIdent::Action`] is [`KeyAction::Transparent`]: a transparent key resolves to the action of
+    /// the layer below, so it never matches.
+    ComboTransparentKey { combo: usize },
+    /// [`ComboKeyIdent::Action`] is invalid, like it would be on a key.
+    ComboKey { combo: usize, error: ActionError },
+}
+
+/// Why a [`KeyAction`] is invalid wherever it is, see [`ValidationError::Key`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionError {
+    /// Layer action points to a missing layout.
+    LayerIndex(u8),
+    /// [`KeyAction::BtSelect`] points to a missing BLE profile, see [`BT_PROFILES`].
+    BtProfileIndex(u8),
+    /// [`KeyAction::ModTap`] has no modifiers.
+    ModTapWithoutMods,
+}
+
+impl fmt::Display for ActionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            ActionError::LayerIndex(index) =>
+                write!(f, "points to missing layout {index}"),
+            ActionError::BtProfileIndex(index) =>
+                write!(f, "selects BLE profile {index}, there are {BT_PROFILES} (0..={})", BT_PROFILES - 1),
+            ActionError::ModTapWithoutMods =>
+                write!(f, "is a mod-tap without modifiers"),
+        }
+    }
 }
 
 impl fmt::Display for ValidationError {
@@ -458,6 +690,12 @@ impl fmt::Display for ValidationError {
                 write!(f, "layout {layout}: Fn key at ({x}, {y}) points to missing layout {index}"),
             ValidationError::JoystickFn { layout } =>
                 write!(f, "layout {layout}: Fn can't be on a joystick button"),
+            ValidationError::Key { layout, x, y, error } =>
+                write!(f, "layout {layout}: key at ({x}, {y}) {error}"),
+            ValidationError::Joystick { layout, button, error } =>
+                write!(f, "layout {layout}: joystick {} button {error}", button.name()),
+            ValidationError::Setting { name, value, min, max } =>
+                write!(f, "settings: {name} is {value}, must be {min}..={max}"),
             ValidationError::TooManyCombos { count, max } =>
                 write!(f, "{count} combos, max is {max}"),
             ValidationError::EmptyCombo { combo } =>
@@ -470,6 +708,12 @@ impl fmt::Display for ValidationError {
                 write!(f, "combo {combo}: key ({x}, {y}) is outside the keyboard"),
             ValidationError::ComboLayoutIndex { combo, index } =>
                 write!(f, "combo {combo}: points to missing layout {index}"),
+            ValidationError::ComboBtProfileIndex { combo, index } =>
+                write!(f, "combo {combo}: selects BLE profile {index}, there are {BT_PROFILES} (0..={})", BT_PROFILES - 1),
+            ValidationError::ComboTransparentKey { combo } =>
+                write!(f, "combo {combo}: a Transparent key never matches, use the key's position or action"),
+            ValidationError::ComboKey { combo, error } =>
+                write!(f, "combo {combo}: key action {error}"),
         }
     }
 }
@@ -503,6 +747,16 @@ pub(crate) mod tests {
         game[3][8] = KeyAction::MouseTravel { dx: 0, dy: -10 };
         game[1][9] = KeyAction::MouseScroll { dy: 10 };
         game[4][2] = KeyAction::Fn { temporary: 1, permanent: 0 };
+        game[2][0] = KeyAction::ModTap { mods: KeyMod::LeftCtrl | KeyMod::LeftShift, tap: Key::A };
+        game[2][1] = KeyAction::LayerTap { layer: 1, tap: Key::Space };
+        game[2][2] = KeyAction::Momentary(1);
+        game[2][3] = KeyAction::Toggle(0);
+        game[2][4] = KeyAction::To(2);
+        game[2][5] = KeyAction::Transparent;
+        game[0][0] = KeyAction::BtSelect(3);
+        game[0][1] = KeyAction::BtNext;
+        game[0][2] = KeyAction::BtPrev;
+        game[0][3] = KeyAction::BtClear;
 
         Config {
             version: CONFIG_VERSION,
@@ -521,7 +775,7 @@ pub(crate) mod tests {
                     joystick: JoystickButtons {
                         left: KeyAction::MouseKey(MouseKey::Left),
                         stick: KeyAction::Key(Key::Space),
-                        right: KeyAction::KeyWithMod(Key::R, KeyMod::LeftShift),
+                        right: KeyAction::Momentary(1),
                     },
                 },
             ],
@@ -544,7 +798,12 @@ pub(crate) mod tests {
                     keys: vec![ComboKey { ident: ComboKeyIdent::Coord { x: 9, y: 4 }, count: 5 }],
                     action: ComboAction::Unpair,
                 },
+                Combo {
+                    keys: vec![ComboKey { ident: ComboKeyIdent::Coord { x: 9, y: 3 }, count: 2 }],
+                    action: ComboAction::BtSelect(1),
+                },
             ],
+            settings: Settings { tapping_term_ms: 180, require_prior_idle_ms: 0 },
         }
     }
 
@@ -562,6 +821,52 @@ pub(crate) mod tests {
         assert!(Config::from_bytes(&bytes[..bytes.len() - 1]).is_err());
     }
 
+    /// [`sample`] without what version 2 didn't have.
+    fn sample_v2() -> v2::Config {
+        let mut config = sample();
+        for layout in &mut config.layouts {
+            for action in layout.rows.iter_mut().flatten() {
+                if matches!(action, KeyAction::ModTap { .. } | KeyAction::LayerTap { .. } | KeyAction::Momentary(_)
+                    | KeyAction::Toggle(_) | KeyAction::To(_) | KeyAction::Transparent | KeyAction::BtSelect(_)
+                    | KeyAction::BtNext | KeyAction::BtPrev | KeyAction::BtClear) {
+                    *action = KeyAction::None;
+                }
+            }
+            if matches!(layout.joystick.right, KeyAction::Momentary(_)) {
+                layout.joystick.right = KeyAction::None;
+            }
+        }
+        let Config { width, height, layouts, mut combos, .. } = config;
+        combos.retain(|combo| !matches!(combo.action, ComboAction::BtSelect(_)));
+        v2::Config { version: 2, width, height, layouts, combos }
+    }
+
+    #[test]
+    fn version_2_is_upgraded() {
+        let old = sample_v2();
+        let upgraded = Config::from_bytes(&postcard::to_allocvec(&old).unwrap()).unwrap();
+        assert_eq!(upgraded.version, CONFIG_VERSION);
+        assert_eq!(upgraded.settings, Settings::default());
+        assert_eq!(upgraded.layouts, old.layouts);
+        assert_eq!(upgraded.combos, old.combos);
+        assert_eq!(upgraded.validate_for(10, 5), Ok(()));
+    }
+
+    #[test]
+    fn new_actions_keep_old_indices() {
+        // postcard writes the variant index first: the old variants must not move.
+        assert_eq!(postcard::to_allocvec(&KeyAction::None).unwrap(), [8]);
+        assert_eq!(postcard::to_allocvec(&KeyAction::Transparent).unwrap(), [9]);
+        assert_eq!(postcard::to_allocvec(&KeyAction::Momentary(3)).unwrap(), [10, 3]);
+        assert_eq!(postcard::to_allocvec(&KeyAction::LayerTap { layer: 1, tap: Key::A }).unwrap(), [14, 1, 4]);
+        assert_eq!(postcard::to_allocvec(&KeyAction::BtSelect(2)).unwrap(), [15, 2]);
+        assert_eq!(postcard::to_allocvec(&KeyAction::BtClear).unwrap(), [18]);
+        assert_eq!(postcard::to_allocvec(&ComboAction::Unpair).unwrap(), [2]);
+        assert_eq!(postcard::to_allocvec(&ComboAction::ResetConfig).unwrap(), [3]);
+        assert_eq!(postcard::to_allocvec(&ComboAction::BtSelect(1)).unwrap(), [4, 1]);
+        assert_eq!(postcard::to_allocvec(&ComboAction::BtClearAll).unwrap(), [8]);
+    }
+
     #[test]
     fn version_1_is_upgraded() {
         let config = sample();
@@ -574,6 +879,7 @@ pub(crate) mod tests {
         };
         let upgraded = Config::from_bytes(&postcard::to_allocvec(&old).unwrap()).unwrap();
         assert_eq!(upgraded.version, CONFIG_VERSION);
+        assert_eq!(upgraded.settings, Settings::default());
         assert!(upgraded.layouts.iter().all(|l| l.joystick == JoystickButtons::default()));
         assert_eq!(upgraded.layouts.iter().map(|l| &l.rows).collect::<Vec<_>>(), config.layouts.iter().map(|l| &l.rows).collect::<Vec<_>>());
         assert_eq!(upgraded.validate_for(10, 5), Ok(()));
@@ -592,9 +898,12 @@ pub(crate) mod tests {
     #[test]
     fn toml_handwritten() {
         let text = r#"
-            version = 2
+            version = 3
             width = 2
             height = 1
+
+            [settings]
+            tapping_term_ms = 250
 
             [[layouts]]
             name = "MAIN"
@@ -605,9 +914,9 @@ pub(crate) mod tests {
             [[layouts]]
             name = "MEDIA"
             rows = [
-                ["None", { Media = "PlayPause" }],
+                ["Transparent", { ModTap = { mods = "LeftCtrl", tap = "F" } }],
             ]
-            joystick = { left = "None", stick = { Media = "Mute" }, right = { MouseKey = "Right | Middle" } }
+            joystick = { left = { Toggle = 0 }, stick = { Media = "Mute" }, right = { MouseKey = "Right | Middle" } }
 
             [[combos]]
             keys = [{ ident = { Coord = { x = 1, y = 0 } }, count = 0 }, { ident = { Action = { Key = "A" } }, count = 2 }]
@@ -616,21 +925,31 @@ pub(crate) mod tests {
             [[combos]]
             keys = [{ ident = { Action = "None" }, count = 1 }]
             action = "ResetConfig"
+
+            [[combos]]
+            keys = [{ ident = { Action = "BtNext" }, count = 2 }]
+            action = { BtSelect = 3 }
         "#;
         let config: Config = toml::from_str(text).unwrap();
         assert_eq!(config.validate(), Ok(()));
-        assert_eq!(config.layouts[1].rows[0], [KeyAction::None, KeyAction::Media(MediaKey::PlayPause)]);
+        assert_eq!(config.settings, Settings { tapping_term_ms: 250, ..Settings::default() });
+        assert_eq!(
+            config.layouts[1].rows[0],
+            [KeyAction::Transparent, KeyAction::ModTap { mods: KeyMod::LeftCtrl, tap: Key::F }]
+        );
         assert_eq!(config.layouts[0].joystick, JoystickButtons::default());
         assert_eq!(
             config.layouts[1].joystick,
             JoystickButtons {
-                left: KeyAction::None,
+                left: KeyAction::Toggle(0),
                 stick: KeyAction::Media(MediaKey::Mute),
                 right: KeyAction::MouseKey(MouseKey::Right | MouseKey::Middle),
             }
         );
         assert_eq!(config.combos[0].action, ComboAction::SetLayout(1));
         assert_eq!(config.combos[1].action, ComboAction::ResetConfig);
+        assert_eq!(config.combos[2].keys[0].ident, ComboKeyIdent::Action(KeyAction::BtNext));
+        assert_eq!(config.combos[2].action, ComboAction::BtSelect(3));
     }
 
     #[test]
@@ -683,6 +1002,26 @@ pub(crate) mod tests {
             ValidationError::JoystickFn { layout: 1 }
         );
         assert_eq!(
+            invalid(|c| c.layouts[0].rows[1][3] = KeyAction::LayerTap { layer: 3, tap: Key::A }),
+            ValidationError::Key { layout: 0, x: 3, y: 1, error: ActionError::LayerIndex(3) }
+        );
+        assert_eq!(
+            invalid(|c| c.layouts[2].rows[0][0] = KeyAction::To(8)),
+            ValidationError::Key { layout: 2, x: 0, y: 0, error: ActionError::LayerIndex(8) }
+        );
+        assert_eq!(
+            invalid(|c| c.layouts[1].joystick.stick = KeyAction::Toggle(3)),
+            ValidationError::Joystick { layout: 1, button: JoystickButton::Stick, error: ActionError::LayerIndex(3) }
+        );
+        assert_eq!(
+            invalid(|c| c.settings.tapping_term_ms = 10),
+            ValidationError::Setting { name: "tapping_term_ms", value: 10, min: 50, max: 1000 }
+        );
+        assert_eq!(
+            invalid(|c| c.settings.require_prior_idle_ms = 5000),
+            ValidationError::Setting { name: "require_prior_idle_ms", value: 5000, min: 0, max: 1000 }
+        );
+        assert_eq!(
             invalid(|c| c.combos = vec![c.combos[0].clone(); 17]),
             ValidationError::TooManyCombos { count: 17, max: MAX_COMBOS }
         );
@@ -704,6 +1043,56 @@ pub(crate) mod tests {
             invalid(|c| c.combos[0].action = ComboAction::SetLayout(3)),
             ValidationError::ComboLayoutIndex { combo: 0, index: 3 }
         );
+        assert_eq!(
+            invalid(|c| c.layouts[1].rows[2][3] = KeyAction::BtSelect(BT_PROFILES as u8)),
+            ValidationError::Key { layout: 1, x: 3, y: 2, error: ActionError::BtProfileIndex(BT_PROFILES as u8) }
+        );
+        assert_eq!(
+            invalid(|c| c.layouts[0].joystick.right = KeyAction::BtSelect(200)),
+            ValidationError::Joystick { layout: 0, button: JoystickButton::Right, error: ActionError::BtProfileIndex(200) }
+        );
+        assert_eq!(
+            invalid(|c| c.combos[1].action = ComboAction::BtSelect(BT_PROFILES as u8)),
+            ValidationError::ComboBtProfileIndex { combo: 1, index: BT_PROFILES as u8 }
+        );
+        assert_eq!(
+            invalid(|c| c.combos[1].keys[0].ident = ComboKeyIdent::Action(KeyAction::Transparent)),
+            ValidationError::ComboTransparentKey { combo: 1 }
+        );
+        assert_eq!(
+            invalid(|c| c.combos[1].keys[0].ident = ComboKeyIdent::Action(KeyAction::Momentary(3))),
+            ValidationError::ComboKey { combo: 1, error: ActionError::LayerIndex(3) }
+        );
+        assert_eq!(
+            invalid(|c| c.combos[0].keys[0].ident = ComboKeyIdent::Action(KeyAction::Fn { temporary: 1, permanent: 7 })),
+            ValidationError::ComboKey { combo: 0, error: ActionError::LayerIndex(7) }
+        );
+        assert_eq!(
+            invalid(|c| c.combos[2].keys[0].ident = ComboKeyIdent::Action(KeyAction::LayerTap { layer: 9, tap: Key::A })),
+            ValidationError::ComboKey { combo: 2, error: ActionError::LayerIndex(9) }
+        );
+        assert_eq!(
+            invalid(|c| c.combos[1].keys[0].ident = ComboKeyIdent::Action(KeyAction::BtSelect(BT_PROFILES as u8))),
+            ValidationError::ComboKey { combo: 1, error: ActionError::BtProfileIndex(BT_PROFILES as u8) }
+        );
+        let no_mods = KeyAction::ModTap { mods: KeyMod::empty(), tap: Key::A };
+        assert_eq!(
+            invalid(|c| c.layouts[1].rows[2][3] = no_mods),
+            ValidationError::Key { layout: 1, x: 3, y: 2, error: ActionError::ModTapWithoutMods }
+        );
+        assert_eq!(
+            invalid(|c| c.layouts[2].joystick.stick = no_mods),
+            ValidationError::Joystick { layout: 2, button: JoystickButton::Stick, error: ActionError::ModTapWithoutMods }
+        );
+        assert_eq!(
+            invalid(|c| c.combos[0].keys[0].ident = ComboKeyIdent::Action(no_mods)),
+            ValidationError::ComboKey { combo: 0, error: ActionError::ModTapWithoutMods }
+        );
+        // In range: valid.
+        let mut config = sample();
+        config.combos[1].keys[0].ident = ComboKeyIdent::Action(KeyAction::To(2));
+        config.combos[2].keys[0].ident = ComboKeyIdent::Action(KeyAction::BtSelect(BT_PROFILES as u8 - 1));
+        config.validate().unwrap();
         assert_eq!(
             sample().validate_for(12, 5),
             Err(ValidationError::WrongKeyboardSize { expected_width: 12, expected_height: 5, width: 10, height: 5 })

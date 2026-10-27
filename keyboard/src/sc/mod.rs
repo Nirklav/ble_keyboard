@@ -2,9 +2,9 @@ use std::fmt::Write;
 
 use log::{error, info};
 use protocol::config::{recovery_combo, Combo, ComboAction, ComboKey, ComboKeyIdent};
+use protocol::keymap::{BtCommand, Change};
 
 use crate::config::Pending;
-use crate::key_matrix::KeyChange;
 use crate::services::Services;
 
 #[derive(Debug)]
@@ -25,10 +25,17 @@ impl ScAction {
     }
 
     fn on_progress<const W: usize, const H: usize>(&mut self, combination: &[ScKey], svc: &mut Services<W, H>) -> anyhow::Result<()> {
+        // Destructive ones count the presses down; at most 12 characters with the number.
         let label = match self.action {
             ComboAction::Unpair => "Unpair",
             ComboAction::ResetConfig => "Reset",
-            ComboAction::SwitchLayout | ComboAction::SetLayout(_) => return Ok(())
+            ComboAction::BtClear => "Clear",
+            ComboAction::BtClearAll => "Clear all",
+            ComboAction::SwitchLayout
+            | ComboAction::SetLayout(_)
+            | ComboAction::BtSelect(_)
+            | ComboAction::BtNext
+            | ComboAction::BtPrev => return Ok(())
         };
 
         let left = combination.iter()
@@ -49,19 +56,24 @@ impl ScAction {
     fn execute<const W: usize, const H: usize>(&mut self, svc: &mut Services<W, H>) -> anyhow::Result<()> {
         match self.action {
             ComboAction::SwitchLayout => {
-                let new_layout = svc.key_matrix.switch_layout();
-                svc.display.show_text(new_layout.name())?;
+                let new_layout = svc.keymap.switch_layout();
+                info!("Layout switched to: {}", new_layout);
+                svc.display.show_text(&svc.keymap.layout(new_layout).name)?;
             },
             ComboAction::SetLayout(idx) => {
-                match svc.key_matrix.set_layout(idx as usize) {
-                    Some(new_layout) => svc.display.show_text(new_layout.name())?,
-                    None => error!("SetLayout({}) is out of range, ignored.", idx)
+                if svc.keymap.set_base(idx) {
+                    info!("Layout set to: {}", idx);
+                    svc.display.show_text(&svc.keymap.layout(idx).name)?;
+                } else {
+                    error!("SetLayout({}) is out of range, ignored.", idx);
                 }
             },
-            ComboAction::Unpair => {
-                svc.display.show_text("Unpaired")?;
-                svc.keyboard.unpair();
-            },
+            // Unpair is what the configs before the BLE profiles have.
+            ComboAction::Unpair | ComboAction::BtClear => svc.bt_command(BtCommand::Clear)?,
+            ComboAction::BtSelect(index) => svc.bt_command(BtCommand::Select(index))?,
+            ComboAction::BtNext => svc.bt_command(BtCommand::Next)?,
+            ComboAction::BtPrev => svc.bt_command(BtCommand::Prev)?,
+            ComboAction::BtClearAll => svc.bt_command(BtCommand::ClearAll)?,
             ComboAction::ResetConfig => {
                 info!("Config reset requested");
                 svc.pending_config = Some(Pending::Reset);
@@ -91,17 +103,16 @@ impl SpecialCombination {
     /// Presses count only while the held keys of the combination are held,
     /// any other matrix key or releasing a held key breaks the combination.
     /// A joystick button that isn't part of the combination breaks it when released, holding it is ignored.
-    pub fn changed(&mut self, key: &KeyChange) {
-        let Some(action) = key.reg_as else {
-            return;
-        };
-
+    /// Gets every press and release once, see [`SpecialCombination::reset`] for the keys held meanwhile.
+    pub fn changed(&mut self, key: &Change) {
+        let action = key.action;
+        let coord = key.key.coord();
         let holding = self.holding();
         let mut any_matched = false;
 
         for sc_key in &mut self.combination {
             let matched = match &sc_key.ident {
-                ComboKeyIdent::Coord { x, y } => key.coord == Some((*x, *y)),
+                ComboKeyIdent::Coord { x, y } => coord == Some((*x, *y)),
                 ComboKeyIdent::Action(ka) => action == *ka,
             };
             if !matched {
@@ -109,7 +120,7 @@ impl SpecialCombination {
             }
             any_matched = true;
 
-            if key.state {
+            if key.pressed {
                 sc_key.pressed = true;
             } else if sc_key.pressed {
                 sc_key.pressed = false;
@@ -122,7 +133,7 @@ impl SpecialCombination {
         }
 
         // A joystick button breaks it only once clicked, while held it may be a drag.
-        if !any_matched && (key.coord.is_some() || !key.state) {
+        if !any_matched && (coord.is_some() || !key.pressed) {
             self.invalid = true;
         }
     }
@@ -131,9 +142,9 @@ impl SpecialCombination {
         self.combination.iter().all(|sc_key| sc_key.required_count > 0 || sc_key.pressed)
     }
 
-    pub fn try_apply<const W: usize, const H: usize>(&mut self, svc: &mut Services<W, H>) -> anyhow::Result<()> {
+    pub fn try_apply<const W: usize, const H: usize>(&mut self, held: &[Change], svc: &mut Services<W, H>) -> anyhow::Result<()> {
         if self.invalid {
-            self.reset();
+            self.reset(held);
             return Ok(());
         }
 
@@ -143,14 +154,16 @@ impl SpecialCombination {
         self.action.on_progress(&self.combination, svc)?;
 
         if matched {
-            self.reset();
+            self.reset(held);
             self.action.execute(svc)?;
         }
 
         Ok(())
     }
 
-    pub fn reset(&mut self) {
+    /// Starts over with the `held` keys pressed again: a held key of the combination still counts as held,
+    /// a held matrix key outside it breaks the new attempt at once.
+    pub fn reset(&mut self, held: &[Change]) {
         for sc_key in &mut self.combination {
             sc_key.pressed = false;
             sc_key.count = 0;
@@ -158,13 +171,19 @@ impl SpecialCombination {
 
         self.invalid = false;
         self.action.shown_left = None;
+
+        for key in held {
+            self.changed(key);
+        }
     }
 }
 
 /// Runs every combination against the same key changes.
 /// The recovery combination always follows the configured ones.
 pub struct SpecialCombinations {
-    combinations: Vec<SpecialCombination>
+    combinations: Vec<SpecialCombination>,
+    /// Pressed keys, as their presses came.
+    held: Vec<Change>
 }
 
 impl SpecialCombinations {
@@ -175,16 +194,22 @@ impl SpecialCombinations {
             .collect();
 
         Self {
-            combinations
+            combinations,
+            held: Vec::new()
         }
     }
 
-    /// All progress is lost.
+    /// All progress is lost, so are the held keys: it goes with a new keymap.
     pub fn set(&mut self, combos: &[Combo]) {
         *self = Self::from_config(combos);
     }
 
-    pub fn changed(&mut self, key: &KeyChange) {
+    pub fn changed(&mut self, key: &Change) {
+        if key.pressed {
+            self.held.push(*key);
+        } else {
+            self.held.retain(|held| held.key != key.key);
+        }
         for sc in &mut self.combinations {
             sc.changed(key);
         }
@@ -192,14 +217,14 @@ impl SpecialCombinations {
 
     pub fn try_apply<const W: usize, const H: usize>(&mut self, svc: &mut Services<W, H>) -> anyhow::Result<()> {
         for sc in &mut self.combinations {
-            sc.try_apply(svc)?;
+            sc.try_apply(&self.held, svc)?;
         }
         Ok(())
     }
 
     pub fn reset(&mut self) {
         for sc in &mut self.combinations {
-            sc.reset();
+            sc.reset(&self.held);
         }
     }
 }

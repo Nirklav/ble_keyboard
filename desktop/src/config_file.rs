@@ -4,6 +4,10 @@
 //! keyboard row is one line with aligned columns, which makes a layout readable as a grid:
 //!
 //! ```toml
+//! [settings]
+//! tapping_term_ms = 200
+//! require_prior_idle_ms = 150
+//!
 //! [[layouts]]
 //! name = "MAIN"
 //! rows = [
@@ -18,7 +22,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use protocol::config::{v1, Config, ValidationError};
+use protocol::config::{v1, v2, Config, ValidationError};
 use serde::{Deserialize, Serialize};
 
 /// Doesn't validate the config.
@@ -38,6 +42,7 @@ pub fn parse(text: &str) -> Result<Config> {
     let Header { version } = toml::from_str(text)?;
     Ok(match version {
         1 => toml::from_str::<v1::Config>(text)?.into(),
+        2 => toml::from_str::<v2::Config>(text)?.into(),
         _ => toml::from_str(text)?,
     })
 }
@@ -52,6 +57,11 @@ pub fn format(config: &Config) -> Result<String> {
     writeln!(out, "version = {}", config.version)?;
     writeln!(out, "width = {}", config.width)?;
     writeln!(out, "height = {}", config.height)?;
+
+    writeln!(out)?;
+    writeln!(out, "[settings]")?;
+    writeln!(out, "tapping_term_ms = {}", config.settings.tapping_term_ms)?;
+    writeln!(out, "require_prior_idle_ms = {}", config.settings.require_prior_idle_ms)?;
 
     for layout in &config.layouts {
         writeln!(out)?;
@@ -112,7 +122,9 @@ pub fn describe(error: &ValidationError, config: &Config) -> String {
         | ValidationError::Width { layout, .. }
         | ValidationError::MultipleFn { layout, .. }
         | ValidationError::FnLayoutIndex { layout, .. }
-        | ValidationError::JoystickFn { layout } => Some(layout),
+        | ValidationError::JoystickFn { layout }
+        | ValidationError::Key { layout, .. }
+        | ValidationError::Joystick { layout, .. } => Some(layout),
         _ => None,
     };
     match layout.and_then(|index| config.layouts.get(index)) {
@@ -123,7 +135,7 @@ pub fn describe(error: &ValidationError, config: &Config) -> String {
 
 #[cfg(test)]
 mod tests {
-    use protocol::config::{JoystickButtons, CONFIG_VERSION};
+    use protocol::config::{JoystickButtons, Settings, CONFIG_VERSION};
 
     use super::*;
 
@@ -144,13 +156,63 @@ mod tests {
         assert_eq!(text, body.trim_start());
     }
 
+    /// The example as an older version without `[settings]`.
+    fn example_of_version(version: u16) -> String {
+        let (head, rest) = EXAMPLE.split_once("[settings]").unwrap();
+        let (_, layouts) = rest.split_once("[[layouts]]").unwrap();
+        format!("{head}[[layouts]]{layouts}").replace("version = 3", &format!("version = {version}"))
+    }
+
     #[test]
     fn version_1_is_upgraded() {
-        let text = EXAMPLE.replace("version = 2", "version = 1").replace("joystick = ", "# joystick = ");
+        let text = example_of_version(1).replace("joystick = ", "# joystick = ");
         let config = parse(&text).unwrap();
         assert_eq!(config.version, CONFIG_VERSION);
         assert!(config.layouts.iter().all(|l| l.joystick == JoystickButtons::default()));
+        assert_eq!(config.settings, Settings::default());
         config.validate_for(10, 5).unwrap();
+    }
+
+    #[test]
+    fn version_2_is_upgraded() {
+        let config = parse(&example_of_version(2)).unwrap();
+        assert_eq!(config.version, CONFIG_VERSION);
+        assert_eq!(config.settings, Settings::default());
+        assert_eq!(config.layouts, parse(EXAMPLE).unwrap().layouts);
+        config.validate_for(10, 5).unwrap();
+    }
+
+    #[test]
+    fn new_actions_roundtrip() {
+        use protocol::config::KeyAction;
+        use protocol::keys::{Key, KeyMod};
+
+        let mut config = parse(EXAMPLE).unwrap();
+        config.settings = Settings { tapping_term_ms: 180, require_prior_idle_ms: 0 };
+        let row = &mut config.layouts[1].rows[2];
+        row[0] = KeyAction::Transparent;
+        row[1] = KeyAction::Momentary(2);
+        row[2] = KeyAction::Toggle(1);
+        row[3] = KeyAction::To(0);
+        row[4] = KeyAction::ModTap { mods: KeyMod::LeftCtrl | KeyMod::LeftShift, tap: Key::A };
+        row[5] = KeyAction::LayerTap { layer: 1, tap: Key::Space };
+        row[6] = KeyAction::BtSelect(3);
+        row[7] = KeyAction::BtNext;
+        row[8] = KeyAction::BtPrev;
+        row[9] = KeyAction::BtClear;
+        config.layouts[1].joystick.stick = KeyAction::Momentary(2);
+        config.combos[0].action = protocol::config::ComboAction::BtClearAll;
+        config.validate_for(10, 5).unwrap();
+
+        let text = format(&config).unwrap();
+        assert!(text.contains(r#"{ ModTap = { mods = "LeftCtrl | LeftShift", tap = "A" } }"#), "{text}");
+        assert!(text.contains(r#"{ LayerTap = { layer = 1, tap = "Space" } }"#), "{text}");
+        assert!(text.contains("tapping_term_ms = 180"), "{text}");
+        for action in [r#"{ BtSelect = 3 },"#, r#""BtNext","#, r#""BtPrev","#, r#""BtClear"],"#] {
+            assert!(text.contains(action), "{action} in {text}");
+        }
+        assert!(text.contains(r#"action = "BtClearAll""#), "{text}");
+        assert_eq!(parse(&text).unwrap(), config);
     }
 
     #[test]

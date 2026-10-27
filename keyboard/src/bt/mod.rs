@@ -9,6 +9,7 @@ pub use protocol::keys::{Key, KeyMod, MediaKey, MouseKey};
 
 pub mod ble_mouse_keyboard;
 pub mod config_service;
+pub mod profiles;
 mod conn_params;
 
 #[allow(unused)]

@@ -3,18 +3,37 @@
 # rows[y][x]: 5 rows of 10 keys per layout. Key actions:
 #   { Key = "A" }, { KeyWithMod = ["Num1", "LeftShift"] }, { Mod = "LeftCtrl | LeftAlt" },
 #   { Media = "VolumeUp" }, { MouseKey = "Left" }, { MouseTravel = { dx = 0, dy = -10 } },
-#   { MouseScroll = { dy = 10 } }, { Fn = { temporary = 1, permanent = 2 } }, "None".
+#   { MouseScroll = { dy = 10 } }, { Fn = { temporary = 1, permanent = 2 } }, "None",
+#   "Transparent", { Momentary = 1 }, { Toggle = 1 }, { To = 2 },
+#   { ModTap = { mods = "LeftCtrl", tap = "F" } }, { LayerTap = { layer = 1, tap = "Space" } },
+#   { BtSelect = 0 }, "BtNext", "BtPrev", "BtClear".
 # Fn: layout index while held / after a double tap, at most one per layout.
+# Layers: the base layer (layout 0 after boot) and layers on top of it. Momentary: on top while held;
+# Toggle: on top / off; To: the new base layer, the others off. Transparent: the key of the layer below.
+# ModTap / LayerTap: tap sends `tap`, hold holds `mods` / the layer. A hold is a key held for
+# settings.tapping_term_ms or held while another key is pressed and released; pressed within
+# settings.require_prior_idle_ms after a typed key it's a tap (0 turns that off).
+# BLE profiles: the keyboard remembers 4 hosts, one per profile; the display shows them as BT 1..BT 4,
+# BtSelect takes 0..3. Switching drops the current host and connects to the host of the profile, an empty
+# profile waits for a new host to pair (display: "BT 2 pair"). BtClear forgets the host of the current
+# profile; the host has to remove the keyboard before it pairs again.
 # joystick: actions of the joystick buttons in the layout (any key action but Fn),
 # mouse buttons if left out.
 # Combos: keys by { Coord = { x, y } } or { Action = <key action> }; count = number of
 # presses, 0 = must be held, at least one key needs presses.
-# Actions: "SwitchLayout", { SetLayout = 2 }, "Unpair", "ResetConfig".
+# Actions: "SwitchLayout", { SetLayout = 2 }, "ResetConfig", { BtSelect = 0 }, "BtNext", "BtPrev",
+# "BtClear", "BtClearAll" (forgets all hosts); "Unpair" is the same as "BtClear".
+# Factory combos: double tap Fn: SwitchLayout; hold Fn, press Left x3: Unpair; hold Fn, double press
+# Q, Z, X, C: BT 1..BT 4 (keys that are "None" in FUNCTION, so nothing is typed on the host being left).
 # Check with `kb check examples/config.toml`, write with `kb push examples/config.toml`.
 
-version = 2
+version = 3
 width = 10
 height = 5
+
+[settings]
+tapping_term_ms = 200
+require_prior_idle_ms = 150
 
 [[layouts]]
 name = "MAIN"
@@ -56,3 +75,19 @@ action = "SwitchLayout"
 [[combos]]
 keys = [{ ident = { Coord = { x = 2, y = 4 } }, count = 0 }, { ident = { Coord = { x = 3, y = 3 } }, count = 3 }]
 action = "Unpair"
+
+[[combos]]
+keys = [{ ident = { Coord = { x = 2, y = 4 } }, count = 0 }, { ident = { Coord = { x = 0, y = 1 } }, count = 2 }]
+action = { BtSelect = 0 }
+
+[[combos]]
+keys = [{ ident = { Coord = { x = 2, y = 4 } }, count = 0 }, { ident = { Coord = { x = 0, y = 3 } }, count = 2 }]
+action = { BtSelect = 1 }
+
+[[combos]]
+keys = [{ ident = { Coord = { x = 2, y = 4 } }, count = 0 }, { ident = { Coord = { x = 1, y = 3 } }, count = 2 }]
+action = { BtSelect = 2 }
+
+[[combos]]
+keys = [{ ident = { Coord = { x = 2, y = 4 } }, count = 0 }, { ident = { Coord = { x = 2, y = 3 } }, count = 2 }]
+action = { BtSelect = 3 }

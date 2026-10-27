@@ -1,5 +1,4 @@
-use log::error;
-use protocol::config::{Combo, ComboAction, ComboKey, ComboKeyIdent, Config, JoystickButtons, KeyAction, CONFIG_VERSION};
+use protocol::config::{Combo, ComboAction, ComboKey, ComboKeyIdent, Config, JoystickButtons, KeyAction, Settings, CONFIG_VERSION};
 
 use crate::bt::{Key, KeyMod, MouseKey};
 use crate::bt::ble_mouse_keyboard::BleMouseKeyboard;
@@ -28,75 +27,8 @@ macro_rules! f {
     };
 }
 
-/// Layout with the `Fn` key position computed at load.
-pub struct Layout {
-    name: String,
-    rows: Vec<Vec<KeyAction>>,
-    joystick: JoystickButtons,
-    fn_coord: Option<(usize, usize)>
-}
-
-impl Layout {
-    fn new(layout: &protocol::config::Layout) -> Self {
-        Self {
-            name: layout.name.clone(),
-            rows: layout.rows.clone(),
-            joystick: layout.joystick,
-            fn_coord: layout.fn_coord()
-        }
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn get(&self, x: usize, y: usize) -> KeyAction {
-        self.rows.get(y)
-            .and_then(|row| row.get(x))
-            .copied()
-            .unwrap_or(KeyAction::None)
-    }
-
-    pub fn joystick(&self) -> &JoystickButtons {
-        &self.joystick
-    }
-
-    pub fn fn_action(&self) -> Option<KeyAction> {
-        self.fn_coord.map(|(x, y)| self.get(x, y))
-    }
-
-    pub fn fn_coord(&self) -> Option<(usize, usize)> {
-        self.fn_coord
-    }
-}
-
-/// Runtime layouts, built from a [`Config`].
-pub struct Keymap {
-    layouts: Vec<Layout>
-}
-
-impl Keymap {
-    pub fn from_config(config: &Config) -> Self {
-        Self {
-            layouts: config.layouts.iter().map(Layout::new).collect()
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        self.layouts.len()
-    }
-
-    pub fn get(&self, idx: usize) -> &Layout {
-        if idx >= self.layouts.len() {
-            error!("idx out of bounds, returning first layout.");
-            return &self.layouts[0];
-        }
-
-        &self.layouts[idx]
-    }
-}
-
-/// Adds the held key to the reports.
+/// Adds the held key to the reports. Layer, tap-hold and BLE profile actions are resolved by
+/// [`protocol::keymap::Keymap`] and never reach the report, they do nothing here.
 pub fn press(action: &KeyAction, keyboard: &mut BleMouseKeyboard) {
     match action {
         KeyAction::Key(key) => keyboard.press_key(*key),
@@ -109,7 +41,18 @@ pub fn press(action: &KeyAction, keyboard: &mut BleMouseKeyboard) {
         KeyAction::MouseKey(mouse_key) => keyboard.press_mouse(*mouse_key),
         KeyAction::MouseTravel { dx, dy } => keyboard.travel_mouse_cursor(*dx, *dy),
         KeyAction::MouseScroll { dy } => keyboard.travel_mouse_wheel(*dy),
-        KeyAction::Fn { .. } | KeyAction::None => { }
+        KeyAction::Fn { .. }
+        | KeyAction::None
+        | KeyAction::Transparent
+        | KeyAction::Momentary(_)
+        | KeyAction::Toggle(_)
+        | KeyAction::To(_)
+        | KeyAction::ModTap { .. }
+        | KeyAction::LayerTap { .. }
+        | KeyAction::BtSelect(_)
+        | KeyAction::BtNext
+        | KeyAction::BtPrev
+        | KeyAction::BtClear => { }
     }
 }
 
@@ -168,6 +111,24 @@ pub fn default_config() -> Config {
                 ],
                 action: ComboAction::Unpair
             },
-        ]
+            // Fn + double press of Q, Z, X, C (`None` in FUNCTION, so nothing goes to the host being left):
+            // BLE profile BT 1..BT 4.
+            bt_select_combo(0, 0, 1),
+            bt_select_combo(1, 0, 3),
+            bt_select_combo(2, 1, 3),
+            bt_select_combo(3, 2, 3),
+        ],
+        settings: Settings::default(),
+    }
+}
+
+/// Hold `Fn` (2, 4), press the key (`x`, `y`) twice: selects BLE profile `profile`.
+fn bt_select_combo(profile: u8, x: u8, y: u8) -> Combo {
+    Combo {
+        keys: vec![
+            ComboKey { ident: ComboKeyIdent::Coord { x: 2, y: 4 }, count: 0 },
+            ComboKey { ident: ComboKeyIdent::Coord { x, y }, count: 2 },
+        ],
+        action: ComboAction::BtSelect(profile)
     }
 }

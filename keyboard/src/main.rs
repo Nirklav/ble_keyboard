@@ -14,6 +14,7 @@ mod services;
 
 use std::num::NonZeroU32;
 use std::rc::Rc;
+use std::time::Instant;
 
 use embedded_hal::spi::MODE_0;
 use esp_idf_svc::hal::delay::Delay;
@@ -31,12 +32,13 @@ use esp_idf_svc::hal::spi::SpiDriverConfig;
 use esp_idf_svc::hal::task::notification::Notification;
 use esp_idf_svc::hal::units::*;
 use esp_idf_svc::log::EspLogger;
+use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use log::info;
+use protocol::keymap::KeyId;
 use crate::bt::ble_mouse_keyboard::BleMouseKeyboard;
 use crate::display::Display;
 use crate::i2c_bus::SharedI2c;
 use crate::joystick::Joystick;
-use crate::layout::Keymap;
 use crate::key_matrix::KeyMatrix;
 use crate::sc::SpecialCombinations;
 use crate::services::Services;
@@ -49,8 +51,8 @@ const HEIGHT: usize = 5;
 /// Held at power-on, ignores the saved config: `Escape`.
 const BOOT_KEY: (usize, usize) = (0, 0);
 
-const IDLE_DELAY_TICKS: TickType = TickType::new_millis(1000);
-const DEEP_SLEEP_DISCONNECTED_TICKS: TickType = TickType::new_millis(30_000);
+const IDLE_DELAY_TICKS: TickType = TickType::new_millis(15 * 1000);
+const DEEP_SLEEP_DISCONNECTED_TICKS: TickType = TickType::new_millis(1 * 60 * 1000);
 const DEEP_SLEEP_INACTIVE_TICKS: TickType = TickType::new_millis(5 * 60 * 1000);
 
 fn main() {
@@ -64,7 +66,7 @@ fn main() {
 fn main_body() -> anyhow::Result<()> {
     storage::mount_vfs("/spiflash", "storage")?;
 
-    let (display, mut key_matrix, notification, mut joystick) = peripherals(Keymap::from_config(&layout::default_config()))?;
+    let (display, mut key_matrix, notification, mut joystick) = peripherals()?;
 
     // Escape also wakes the keyboard up from deep sleep, that's not a request to bypass.
     let bypass = !woke_from_deep_sleep() && key_matrix.is_pressed(BOOT_KEY.0, BOOT_KEY.1)?;
@@ -72,9 +74,9 @@ fn main_body() -> anyhow::Result<()> {
     if let Err(e) = config.validate_for(WIDTH as u8, HEIGHT as u8) {
         panic!("config is invalid: {}", e);
     }
-    key_matrix.set_keymap(Keymap::from_config(&config));
-    
-    let keyboard = BleMouseKeyboard::new(WIDTH as u8, HEIGHT as u8, config.to_bytes(), notification.notifier())?;
+
+    let nvs = EspDefaultNvsPartition::take()?;
+    let keyboard = BleMouseKeyboard::new(WIDTH as u8, HEIGHT as u8, config.to_bytes(), notification.notifier(), nvs)?;
     let delay = Delay::new_default();
 
     let mut special_combinations = SpecialCombinations::from_config(&config.combos);
@@ -82,23 +84,44 @@ fn main_body() -> anyhow::Result<()> {
 
     svc.display.show_text(source.message().unwrap_or("Welcome!"))?;
 
+    // While a key is held the loop runs every `DELAY_MS`, that's what lets a tap-hold key become a hold
+    // without further events; the keyboard waits for activity only once all keys are up and the keymap is idle.
     const DELAY_MS: u32 = 8;
+    let start = Instant::now();
     loop {
-        let mut all_up = !svc.key_matrix.register(|kc| {
-            if let (true, Some(action)) = (kc.state, kc.reg_as) {
-                layout::press(&action, &mut svc.keyboard);
-            }
-            special_combinations.changed(&kc);
-        })?;
+        // Wraps after 49 days, the keymap compares the times with wrapping.
+        let now = start.elapsed().as_millis() as u32;
+        let keymap = &mut svc.keymap;
+        let mut all_up = !svc.key_matrix.register(|x, y, pressed| keymap.event(KeyId::Matrix { x, y }, pressed, now))?;
 
         if let Some(joystick) = &mut joystick {
-            all_up &= !joystick.poll(svc.key_matrix.active_layout(), &mut svc.keyboard, |kc| special_combinations.changed(&kc));
+            all_up &= !joystick.poll(&mut svc.keyboard, |button, pressed| keymap.event(KeyId::Joystick(button), pressed, now));
+        }
+
+        keymap.tick(now);
+        keymap.frame();
+        for action in keymap.report() {
+            layout::press(action, &mut svc.keyboard);
+        }
+
+        for change in keymap.take_changes() {
+            special_combinations.changed(&change);
+        }
+
+        if keymap.take_layers_changed() {
+            let name = &keymap.layout(keymap.top_layer()).name;
+            info!("Layers changed, on top: {}", name);
+            svc.display.show_text(name)?;
         }
 
         svc.keyboard.flush();
+        // After the report: a profile switch releases the keys on the old host and drops it.
+        while let Some(command) = svc.keymap.take_bt_command() {
+            svc.bt_command(command)?;
+        }
         special_combinations.try_apply(&mut svc)?;
 
-        if all_up {
+        if all_up && svc.keymap.is_idle() {
             config::apply_changes(&mut svc, &mut special_combinations)?;
             wait_for_activity(&notification, &mut svc, &mut joystick, &mut special_combinations)?;
         } else {
@@ -134,7 +157,8 @@ fn wait_for_activity<const W: usize, const H: usize>(
     special_combinations.reset();
     svc.keyboard.set_idle()?;
 
-    let deep_sleep_timeout = if svc.keyboard.connected() {
+    // A connection not accepted (yet) is dropped soon, it doesn't keep the keyboard awake.
+    let deep_sleep_timeout = if svc.keyboard.host_connected() {
         DEEP_SLEEP_INACTIVE_TICKS
     } else {
         DEEP_SLEEP_DISCONNECTED_TICKS
@@ -160,7 +184,7 @@ fn woke_from_deep_sleep() -> bool {
     unsafe { esp_idf_sys::esp_reset_reason() == esp_idf_sys::esp_reset_reason_t_ESP_RST_DEEPSLEEP }
 }
 
-fn peripherals(keymap: Keymap) -> anyhow::Result<(Display, KeyMatrix<WIDTH, HEIGHT>, Rc<Notification>, Option<Joystick>)> {
+fn peripherals() -> anyhow::Result<(Display, KeyMatrix<WIDTH, HEIGHT>, Rc<Notification>, Option<Joystick>)> {
     let peripherals = Peripherals::take()?;
 
     let spi = peripherals.spi2;
@@ -183,7 +207,7 @@ fn peripherals(keymap: Keymap) -> anyhow::Result<(Display, KeyMatrix<WIDTH, HEIG
     let display = Display::new(i2c.clone())?;
     let ext = new_extension(spi_driver, ext_cs)?;
     let mut joystick = Joystick::new(i2c, joystick_irq);
-    let mut key_matrix = KeyMatrix::new(ext, ext_irq, [0, 1, 2, 3, 4, 5, 6, 7, 14, 15], [8, 9, 10, 11, 12], keymap)?;
+    let mut key_matrix = KeyMatrix::new(ext, ext_irq, [0, 1, 2, 3, 4, 5, 6, 7, 14, 15], [8, 9, 10, 11, 12])?;
 
     let pins = wakeup_pins(&key_matrix, &joystick);
     prepare_deep_sleep(&pins);

@@ -3,8 +3,8 @@
 use desktop::config_file;
 use protocol::ble::{self, Info};
 use protocol::config::{
-    Combo, ComboAction, ComboKey, ComboKeyIdent, Config, JoystickButtons, KeyAction, Layout, MAX_COMBO_KEYS,
-    MAX_COMBOS, MAX_LAYOUT_NAME_LEN, MAX_LAYOUTS,
+    Combo, ComboAction, ComboKey, ComboKeyIdent, Config, JoystickButton, JoystickButtons, KeyAction, Layout,
+    MAX_COMBO_KEYS, MAX_COMBOS, MAX_LAYOUT_NAME_LEN, MAX_LAYOUTS,
 };
 use protocol::keys::{Key, KeyMod, MediaKey, MouseKey};
 
@@ -37,24 +37,45 @@ pub enum ActionKind {
     Key,
     KeyWithMod,
     Mod,
+    ModTap,
     Media,
     MouseKey,
     MouseTravel,
     MouseScroll,
     Fn,
+    Momentary,
+    Toggle,
+    To,
+    LayerTap,
+    BtSelect,
+    BtNext,
+    BtPrev,
+    BtClear,
+    Transparent,
     None,
 }
 
 impl ActionKind {
-    pub const ALL: [ActionKind; 9] = [
+    /// In the order the editor offers them: keys, mouse, layers, BLE profiles, nothing.
+    pub const ALL: [ActionKind; 19] = [
         ActionKind::Key,
         ActionKind::KeyWithMod,
         ActionKind::Mod,
+        ActionKind::ModTap,
         ActionKind::Media,
         ActionKind::MouseKey,
         ActionKind::MouseTravel,
         ActionKind::MouseScroll,
         ActionKind::Fn,
+        ActionKind::Momentary,
+        ActionKind::Toggle,
+        ActionKind::To,
+        ActionKind::LayerTap,
+        ActionKind::BtSelect,
+        ActionKind::BtNext,
+        ActionKind::BtPrev,
+        ActionKind::BtClear,
+        ActionKind::Transparent,
         ActionKind::None,
     ];
 
@@ -69,6 +90,16 @@ impl ActionKind {
             KeyAction::MouseScroll { .. } => ActionKind::MouseScroll,
             KeyAction::Fn { .. } => ActionKind::Fn,
             KeyAction::None => ActionKind::None,
+            KeyAction::Transparent => ActionKind::Transparent,
+            KeyAction::Momentary(_) => ActionKind::Momentary,
+            KeyAction::Toggle(_) => ActionKind::Toggle,
+            KeyAction::To(_) => ActionKind::To,
+            KeyAction::ModTap { .. } => ActionKind::ModTap,
+            KeyAction::LayerTap { .. } => ActionKind::LayerTap,
+            KeyAction::BtSelect(_) => ActionKind::BtSelect,
+            KeyAction::BtNext => ActionKind::BtNext,
+            KeyAction::BtPrev => ActionKind::BtPrev,
+            KeyAction::BtClear => ActionKind::BtClear,
         }
     }
 
@@ -82,20 +113,35 @@ impl ActionKind {
             ActionKind::MouseTravel => "Mouse travel",
             ActionKind::MouseScroll => "Mouse scroll",
             ActionKind::Fn => "Fn (layer key)",
+            ActionKind::Momentary => "Layer while held (MO)",
+            ActionKind::Toggle => "Toggle layer (TG)",
+            ActionKind::To => "Switch to layer (TO)",
+            ActionKind::ModTap => "Mod-tap: key / modifiers",
+            ActionKind::LayerTap => "Layer-tap: key / layer (LT)",
+            ActionKind::BtSelect => "BLE profile: select",
+            ActionKind::BtNext => "BLE profile: next",
+            ActionKind::BtPrev => "BLE profile: previous",
+            ActionKind::BtClear => "BLE profile: forget host",
+            ActionKind::Transparent => "Transparent",
             ActionKind::None => "None",
         }
     }
 
-    /// An action of this kind made from `from`, keeping its key and modifiers where possible.
+    /// An action of this kind made from `from`, keeping its key, modifiers and layout where possible.
     pub fn convert(self, from: &KeyAction) -> KeyAction {
         let key = match *from {
-            KeyAction::Key(key) | KeyAction::KeyWithMod(key, _) => key,
+            KeyAction::Key(key)
+            | KeyAction::KeyWithMod(key, _)
+            | KeyAction::ModTap { tap: key, .. }
+            | KeyAction::LayerTap { tap: key, .. } => key,
             _ => Key::A,
         };
         let mods = match *from {
-            KeyAction::KeyWithMod(_, mods) | KeyAction::Mod(mods) if !mods.is_empty() => mods,
+            KeyAction::KeyWithMod(_, mods) | KeyAction::Mod(mods) | KeyAction::ModTap { mods, .. }
+                if !mods.is_empty() => mods,
             _ => KeyMod::LeftShift,
         };
+        let layer = from.layers().next().unwrap_or(0);
         match self {
             ActionKind::Key => KeyAction::Key(key),
             ActionKind::KeyWithMod => KeyAction::KeyWithMod(key, mods),
@@ -104,7 +150,17 @@ impl ActionKind {
             ActionKind::MouseKey => KeyAction::MouseKey(MouseKey::Left),
             ActionKind::MouseTravel => KeyAction::MouseTravel { dx: 0, dy: -10 },
             ActionKind::MouseScroll => KeyAction::MouseScroll { dy: 10 },
-            ActionKind::Fn => KeyAction::Fn { temporary: 0, permanent: 0 },
+            ActionKind::Fn => KeyAction::Fn { temporary: layer, permanent: layer },
+            ActionKind::Momentary => KeyAction::Momentary(layer),
+            ActionKind::Toggle => KeyAction::Toggle(layer),
+            ActionKind::To => KeyAction::To(layer),
+            ActionKind::ModTap => KeyAction::ModTap { mods, tap: key },
+            ActionKind::LayerTap => KeyAction::LayerTap { layer, tap: key },
+            ActionKind::BtSelect => KeyAction::BtSelect(from.bt_profile().unwrap_or(0)),
+            ActionKind::BtNext => KeyAction::BtNext,
+            ActionKind::BtPrev => KeyAction::BtPrev,
+            ActionKind::BtClear => KeyAction::BtClear,
+            ActionKind::Transparent => KeyAction::Transparent,
             ActionKind::None => KeyAction::None,
         }
     }
@@ -153,24 +209,29 @@ pub fn duplicate_layout(config: &mut Config, index: usize) -> Result<usize, Stri
     add_layout(config, layout)
 }
 
-/// What points to layout `index`: Fn keys, `SetLayout` combos and combo keys matching such Fn keys.
+/// What points to layout `index`: layer keys and joystick buttons (Fn, MO, TG, TO, LT), `SetLayout` combos
+/// and combo keys matching such layer keys.
 pub fn layout_references(config: &Config, index: usize) -> Vec<String> {
-    let refers = |action: &KeyAction| {
-        matches!(*action, KeyAction::Fn { temporary, permanent }
-            if temporary as usize == index || permanent as usize == index)
-    };
+    let refers = |action: &KeyAction| action.layers().any(|layer| layer as usize == index);
+    let kind = |action: &KeyAction| if matches!(action, KeyAction::Fn { .. }) { "Fn" } else { "Layer" };
 
     let mut references = Vec::new();
     for (l, layout) in config.layouts.iter().enumerate() {
         if l == index {
-            // Fn keys of the removed layout go away with it.
+            // Layer keys of the removed layout go away with it.
             continue;
         }
         for (y, row) in layout.rows.iter().enumerate() {
             for (x, action) in row.iter().enumerate() {
                 if refers(action) {
-                    references.push(format!("Fn key ({x}, {y}) of layout {l} \"{}\"", layout.name));
+                    references.push(format!("{} key ({x}, {y}) of layout {l} \"{}\"", kind(action), layout.name));
                 }
+            }
+        }
+        for button in JoystickButton::ALL {
+            if refers(layout.joystick.get(button)) {
+                let button = button.name().to_lowercase();
+                references.push(format!("joystick {button} button of layout {l} \"{}\"", layout.name));
             }
         }
     }
@@ -179,7 +240,7 @@ pub fn layout_references(config: &Config, index: usize) -> Vec<String> {
             references.push(format!("combo {c}: SetLayout({index})"));
         }
         if combo.keys.iter().any(|k| matches!(&k.ident, ComboKeyIdent::Action(action) if refers(action))) {
-            references.push(format!("combo {c}: key matching an Fn key"));
+            references.push(format!("combo {c}: key matching a layer key"));
         }
     }
     references
@@ -206,7 +267,7 @@ pub fn remove_layout(config: &mut Config, index: usize) -> Result<(), String> {
     Ok(())
 }
 
-/// Keeps the Fn keys and combos pointing to the same layouts.
+/// Keeps the layer keys and combos pointing to the same layouts.
 pub fn swap_layouts(config: &mut Config, a: usize, b: usize) {
     config.layouts.swap(a, b);
     let (a, b) = (a as u8, b as u8);
@@ -217,16 +278,17 @@ pub fn swap_layouts(config: &mut Config, a: usize, b: usize) {
     });
 }
 
-/// Applies `map` to every layout index: Fn keys, `SetLayout` combos, combo keys matching Fn keys.
+/// Applies `map` to every layout index: layer keys and joystick buttons, `SetLayout` combos,
+/// combo keys matching layer keys.
 fn remap_layout_indices(config: &mut Config, map: impl Fn(u8) -> u8) {
-    let remap = |action: &mut KeyAction| {
-        if let KeyAction::Fn { temporary, permanent } = action {
-            *temporary = map(*temporary);
-            *permanent = map(*permanent);
+    let remap = |action: &mut KeyAction| action.map_layers(&map);
+    for layout in &mut config.layouts {
+        for action in layout.rows.iter_mut().flatten() {
+            remap(action);
         }
-    };
-    for action in config.layouts.iter_mut().flat_map(|l| l.rows.iter_mut()).flat_map(|r| r.iter_mut()) {
-        remap(action);
+        for button in JoystickButton::ALL {
+            remap(layout.joystick.get_mut(button));
+        }
     }
     for combo in &mut config.combos {
         if let ComboAction::SetLayout(index) = &mut combo.action {
@@ -334,6 +396,10 @@ mod tests {
         for kind in ActionKind::ALL {
             assert_eq!(ActionKind::of(&kind.convert(&from)), kind);
         }
+        let from = KeyAction::ModTap { mods: KeyMod::LeftAlt, tap: Key::F };
+        assert_eq!(ActionKind::KeyWithMod.convert(&from), KeyAction::KeyWithMod(Key::F, KeyMod::LeftAlt));
+        assert_eq!(ActionKind::LayerTap.convert(&from), KeyAction::LayerTap { layer: 0, tap: Key::F });
+        assert_eq!(ActionKind::Toggle.convert(&KeyAction::Momentary(2)), KeyAction::Toggle(2));
     }
 
     #[test]
@@ -378,7 +444,24 @@ mod tests {
         config.combos[1].keys[0].ident = ComboKeyIdent::Action(KeyAction::Fn { temporary: 1, permanent: 2 });
         let references = layout_references(&config, 2);
         assert!(references.contains(&"combo 0: SetLayout(2)".to_string()), "{references:?}");
-        assert!(references.contains(&"combo 1: key matching an Fn key".to_string()), "{references:?}");
+        assert!(references.contains(&"combo 1: key matching a layer key".to_string()), "{references:?}");
+    }
+
+    #[test]
+    fn layer_actions_are_references_and_remapped() {
+        let mut config = example();
+        config.layouts[1].rows[0][0] = KeyAction::Momentary(2);
+        config.layouts[0].rows[0][0] = KeyAction::LayerTap { layer: 2, tap: Key::Escape };
+        config.layouts[0].joystick.stick = KeyAction::Toggle(2);
+        let references = layout_references(&config, 2);
+        assert!(references.contains(&"Layer key (0, 0) of layout 1 \"FUNCTION\"".to_string()), "{references:?}");
+        assert!(references.contains(&"joystick stick button of layout 0 \"MAIN\"".to_string()), "{references:?}");
+
+        swap_layouts(&mut config, 1, 2);
+        assert_eq!(config.layouts[2].rows[0][0], KeyAction::Momentary(1));
+        assert_eq!(config.layouts[0].rows[0][0], KeyAction::LayerTap { layer: 1, tap: Key::Escape });
+        assert_eq!(config.layouts[0].joystick.stick, KeyAction::Toggle(1));
+        config.validate_for(10, 5).unwrap();
     }
 
     #[test]

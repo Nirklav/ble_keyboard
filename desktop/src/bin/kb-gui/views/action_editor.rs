@@ -8,7 +8,7 @@ use crate::app::{App, EditTarget};
 use crate::editing::{self, ActionKind};
 use crate::labels;
 use crate::theme;
-use crate::views::layout_select;
+use crate::views::{bt_profile_select, layout_select};
 
 /// Width of the editor panel.
 pub const WIDTH: f32 = 300.0;
@@ -75,14 +75,19 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
         ui.colored_label(ui.visuals().warn_fg_color, error);
         ui.add_space(theme::GAP_S);
     }
-    let allow_fn = !matches!(editor.target, EditTarget::JoystickButton { .. });
-    action_editor(ui, action, &layouts, &mut editor.search, &mut editor.scroll_to_current, allow_fn);
+    // A combo key is matched against the action after the fall-through, so it's never `Transparent`.
+    let hidden: &[ActionKind] = match editor.target {
+        EditTarget::JoystickButton { .. } => &[ActionKind::Fn],
+        EditTarget::ComboKey { .. } => &[ActionKind::Transparent],
+        _ => &[],
+    };
+    action_editor(ui, action, &layouts, &mut editor.search, &mut editor.scroll_to_current, hidden);
     if close {
         app.key_editor = None;
     }
 }
 
-/// Edits `action`: kind selector and the fields of that kind, `allow_fn` offers [`KeyAction::Fn`].
+/// Edits `action`: kind selector and the fields of that kind, the `hidden` kinds aren't offered.
 /// `scroll_to_current` scrolls the key list to the current key and is reset.
 fn action_editor(
     ui: &mut egui::Ui,
@@ -90,15 +95,22 @@ fn action_editor(
     layouts: &[String],
     search: &mut String,
     scroll_to_current: &mut bool,
-    allow_fn: bool,
+    hidden: &[ActionKind],
 ) {
     let kind = ActionKind::of(action);
     ui.horizontal(|ui| {
         ui.label("Action:");
-        // Tall enough for all the kinds, no scrolling.
-        let combo = egui::ComboBox::from_id_salt("action_kind").selected_text(kind.name()).height(f32::INFINITY);
+        // All the kinds without scrolling if the window is tall enough, otherwise down to its bottom
+        // (the selector and a margin above it); an unlimited popup would be cut off by the window.
+        // At least a few rows (22 + 2 spacing, see below), so it isn't empty near the bottom of the window.
+        let below = ui.ctx().content_rect().bottom() - ui.cursor().top() - 3.0 * ui.spacing().interact_size.y;
+        let below = below.max(5.0 * 24.0);
+        let combo = egui::ComboBox::from_id_salt("action_kind").selected_text(kind.name()).height(below);
         combo.show_ui(ui, |ui| {
-            for other in ActionKind::ALL.into_iter().filter(|&kind| allow_fn || kind != ActionKind::Fn) {
+            // Compact rows like the key list, so all the kinds fit under the selector.
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.spacing_mut().interact_size.y = 22.0;
+            for other in ActionKind::ALL.into_iter().filter(|kind| !hidden.contains(kind)) {
                 if ui.selectable_label(other == kind, other.name()).clicked() && other != kind {
                     *action = other.convert(action);
                 }
@@ -110,11 +122,15 @@ fn action_editor(
     match action {
         KeyAction::Key(key) => key_picker(ui, key, search, scroll_to_current),
         KeyAction::KeyWithMod(key, mods) => {
+            ui.label("Modifiers:");
             mods_editor(ui, mods);
             ui.add_space(theme::GAP_S);
             key_picker(ui, key, search, scroll_to_current);
         }
-        KeyAction::Mod(mods) => mods_editor(ui, mods),
+        KeyAction::Mod(mods) => {
+            ui.label("Modifiers:");
+            mods_editor(ui, mods);
+        }
         KeyAction::Media(media) => {
             for key in MediaKey::ALL {
                 ui.radio_value(media, key, key.name());
@@ -161,7 +177,86 @@ fn action_editor(
         KeyAction::None => {
             ui.weak("The key does nothing.");
         }
+        KeyAction::Transparent => {
+            ui.weak("Does what this key does in the next active layer below; nothing in the base layer.");
+        }
+        KeyAction::Momentary(layer) => {
+            layer_row(ui, "Layout:", "momentary_layer", layer, layouts);
+            ui.weak("The layout is on top of the active ones while the key is held.");
+        }
+        KeyAction::Toggle(layer) => {
+            layer_row(ui, "Layout:", "toggle_layer", layer, layouts);
+            ui.weak("A press puts the layout on top of the active ones, the next press turns it off.");
+        }
+        KeyAction::To(layer) => {
+            layer_row(ui, "Layout:", "to_layer", layer, layouts);
+            ui.weak("A press makes the layout the base one and turns the other layers off.");
+        }
+        KeyAction::ModTap { mods, tap } => {
+            ui.weak(TAP_HOLD_HINT);
+            ui.add_space(theme::GAP_S);
+            ui.label("Hold:");
+            mods_editor(ui, mods);
+            if mods.is_empty() {
+                // The config with it is rejected, see `ActionError::ModTapWithoutMods`.
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    "Pick at least one modifier: without one the hold does nothing and the taps are delayed.",
+                );
+            }
+            ui.add_space(theme::GAP_S);
+            ui.label("Tap:");
+            key_picker(ui, tap, search, scroll_to_current);
+        }
+        KeyAction::LayerTap { layer, tap } => {
+            ui.weak(TAP_HOLD_HINT);
+            ui.add_space(theme::GAP_S);
+            layer_row(ui, "Hold:", "layer_tap_layer", layer, layouts);
+            ui.add_space(theme::GAP_S);
+            ui.label("Tap:");
+            key_picker(ui, tap, search, scroll_to_current);
+        }
+        KeyAction::BtSelect(profile) => {
+            ui.horizontal(|ui| {
+                ui.label("Profile:");
+                bt_profile_select(ui, "bt_select_profile", profile);
+            });
+            ui.weak(BT_HINT);
+        }
+        KeyAction::BtNext => {
+            ui.weak("A press switches to the next BLE profile, after the last one to the first.");
+            ui.add_space(theme::GAP_S);
+            ui.weak(BT_HINT);
+        }
+        KeyAction::BtPrev => {
+            ui.weak("A press switches to the previous BLE profile, before the first one to the last.");
+            ui.add_space(theme::GAP_S);
+            ui.weak(BT_HINT);
+        }
+        KeyAction::BtClear => {
+            ui.weak(
+                "A press forgets the host of the current BLE profile, the profile waits for a new host to pair. \
+                The old host has to remove the keyboard before it can pair again.",
+            );
+        }
     }
+}
+
+/// How the BLE profiles work, see `keyboard/src/bt/profiles.rs`.
+const BT_HINT: &str = "Each profile remembers one host. Switching drops the current host and connects to the \
+    host of the profile; a profile without a host waits for a new one to pair. A host bound to one profile can't \
+    pair with another one until its profile is cleared. The display shows e.g. BT 2 or BT 2 pair.";
+
+/// How a tap-hold key decides, see [`protocol::keymap`].
+const TAP_HOLD_HINT: &str = "Hold: held past the tapping term, or another key pressed and released meanwhile. \
+    The timing is in the overview settings.";
+
+/// `label` and a layout selector in one row.
+fn layer_row(ui: &mut egui::Ui, label: &str, id_salt: &str, layer: &mut u8, layouts: &[String]) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        layout_select(ui, id_salt, layer, layouts);
+    });
 }
 
 /// Searchable list of all keys in groups, takes the rest of the panel height.
@@ -206,8 +301,8 @@ fn key_picker(ui: &mut egui::Ui, key: &mut Key, search: &mut String, scroll_to_c
     *scroll_to_current = false;
 }
 
+/// Modifier checkboxes.
 fn mods_editor(ui: &mut egui::Ui, mods: &mut KeyMod) {
-    ui.label("Modifiers:");
     egui::Grid::new("mods").show(ui, |ui| {
         for (i, (modifier, name)) in labels::MODIFIERS.iter().enumerate() {
             let mut on = mods.contains(*modifier);
