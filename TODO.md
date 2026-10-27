@@ -11,7 +11,7 @@
   in `Config::settings`.
 - [ ] **Firmware update over BLE (OTA).** ESP-IDF OTA partitions, upload from the desktop app over the config service
   (chunks + CRC already exist in `protocol`).
-- [ ] **Display status.** Permanently show the current layer and BLE profile at the lowest brightness,
+- [x] **Display status.** Permanently show the current layer and BLE profile at the lowest brightness,
   pop-up text stays as is.
 - [ ] **Key usage statistics.** Count presses per key on the keyboard, read them over the config service,
   show a heatmap in kb-gui.

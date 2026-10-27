@@ -35,6 +35,12 @@ impl<const W: usize, const H: usize> Services<W, H> {
         }
     }
 
+    /// Shows the top layer and the active BLE profile once there is no pop-up text.
+    pub fn update_status(&self) -> anyhow::Result<()> {
+        let layer = &self.keymap.layout(self.keymap.top_layer()).name;
+        self.display.set_status(layer, self.keyboard.profile().index)
+    }
+
     /// Runs a BLE profile command of a key or a combo and shows the profile, e.g. `BT 2 pair`.
     pub fn bt_command(&mut self, command: BtCommand) -> anyhow::Result<()> {
         info!("BT command: {:?}", command);
@@ -49,7 +55,7 @@ impl<const W: usize, const H: usize> Services<W, H> {
                 return self.display.show_text("BT clear all");
             },
         };
-        // At most 12 characters of the 10x20 font.
+        // At most 18 characters of the display font.
         let number = state.index + 1;
         let text = match (cleared, state.bound) {
             (true, _) => format!("BT {number} clear"),

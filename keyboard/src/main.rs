@@ -33,7 +33,7 @@ use esp_idf_svc::hal::task::notification::Notification;
 use esp_idf_svc::hal::units::*;
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
-use log::info;
+use log::{error, info};
 use protocol::keymap::KeyId;
 use crate::bt::ble_mouse_keyboard::BleMouseKeyboard;
 use crate::display::Display;
@@ -104,8 +104,13 @@ fn main_body() -> anyhow::Result<()> {
             layout::press(action, &mut svc.keyboard);
         }
 
+        let mut changed = false;
         for change in keymap.take_changes() {
             special_combinations.changed(&change);
+            changed = true;
+        }
+        if changed {
+            svc.display.wake()?;
         }
 
         if keymap.take_layers_changed() {
@@ -120,9 +125,12 @@ fn main_body() -> anyhow::Result<()> {
             svc.bt_command(command)?;
         }
         special_combinations.try_apply(&mut svc)?;
+        svc.update_status()?;
 
         if all_up && svc.keymap.is_idle() {
             config::apply_changes(&mut svc, &mut special_combinations)?;
+            // A new config may have another layout on top.
+            svc.update_status()?;
             wait_for_activity(&notification, &mut svc, &mut joystick, &mut special_combinations)?;
         } else {
             delay.delay_ms(DELAY_MS);
@@ -170,6 +178,10 @@ fn wait_for_activity<const W: usize, const H: usize>(
     while notification.wait(deep_sleep_timeout).is_none() {
         if !svc.keyboard.config_service().session_active() {
             info!("entering deep sleep");
+            // The display is not worth staying awake for.
+            if let Err(e) = svc.display.turn_off() {
+                error!("display off before deep sleep: {:?}", e);
+            }
             enter_deep_sleep(&wakeup_pins(&svc.key_matrix, joystick));
         }
         info!("deep sleep postponed, the config app is connected");

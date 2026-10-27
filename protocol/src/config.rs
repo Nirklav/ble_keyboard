@@ -32,7 +32,8 @@ pub const MAX_COMBOS: usize = 16;
 
 pub const MAX_COMBO_KEYS: usize = 8;
 
-/// Max length of a layout name in characters: the 128 px wide display with the 10x20 font fits 12.
+/// Max length of a layout name in characters: the 128 px wide display status shows it in the 7x14 font
+/// beside the BLE profile.
 pub const MAX_LAYOUT_NAME_LEN: usize = 12;
 
 /// Number of BLE host profiles, see [`KeyAction::BtSelect`]. Each one remembers one host;

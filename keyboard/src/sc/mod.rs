@@ -25,7 +25,7 @@ impl ScAction {
     }
 
     fn on_progress<const W: usize, const H: usize>(&mut self, combination: &[ScKey], svc: &mut Services<W, H>) -> anyhow::Result<()> {
-        // Destructive ones count the presses down; at most 12 characters with the number.
+        // Destructive ones count the presses down; at most 18 characters with the number.
         let label = match self.action {
             ComboAction::Unpair => "Unpair",
             ComboAction::ResetConfig => "Reset",
