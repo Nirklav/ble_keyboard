@@ -43,7 +43,6 @@ server {
     add_header Cache-Control "no-cache";
   }
   location / {
-    try_files $uri =404;
     add_header Cache-Control "public, max-age=31536000, immutable";
   }
 }
