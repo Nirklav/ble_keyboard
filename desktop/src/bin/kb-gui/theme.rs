@@ -13,6 +13,10 @@ pub const GAP_XL: f32 = 24.0;
 /// Corner radius of buttons, fields and cards.
 pub const RADIUS: u8 = 6;
 
+/// Widest the content gets: the default 10x5 key grid with the key editor beside it.
+/// A wider window (a maximized one, a browser tab) gets empty sides instead of the content at its edges.
+pub const MAX_WIDTH: f32 = 1200.0;
+
 /// Main action and selection.
 pub const ACCENT: Color32 = Color32::from_rgb(47, 111, 214);
 /// Outline of a selected key.
@@ -78,6 +82,19 @@ pub fn apply(ctx: &egui::Context) {
             widget.corner_radius = CornerRadius::same(RADIUS);
         }
     });
+}
+
+/// Middle part of `rect`, at most [`MAX_WIDTH`] wide: the column every panel lines its content up to.
+pub fn column(rect: egui::Rect) -> egui::Rect {
+    let width = rect.width().min(MAX_WIDTH);
+    let left = rect.center().x - width / 2.0;
+    egui::Rect::from_x_y_ranges(left..=left + width, rect.y_range())
+}
+
+/// Runs `add` in the [`column`] of the space left in `ui`.
+pub fn centered<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let rect = column(ui.available_rect_before_wrap());
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(*ui.layout()), add).inner
 }
 
 /// The main action of a screen.

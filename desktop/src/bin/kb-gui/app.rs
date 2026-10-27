@@ -497,6 +497,46 @@ impl App {
         });
     }
 
+    /// `screen` in the [`theme::column`], with the key editor on its right when `editing`.
+    /// The screen keeps its left edge when the editor opens; the empty sides of a wide window still scroll it.
+    fn editor_screen(&mut self, ui: &mut egui::Ui, screen: Screen, editing: bool) {
+        let rect = ui.available_rect_before_wrap();
+        let column = theme::column(rect);
+        let mut scroll = rect;
+        if editing {
+            // Before the screen, so it shows the key just clicked on the grid on the next frame.
+            let x = column.right() - views::action_editor::WIDTH;
+            let editor = egui::Rect::from_x_y_ranges(x..=column.right(), rect.y_range());
+            ui.scope_builder(egui::UiBuilder::new().max_rect(editor), |ui| {
+                let frame = egui::Frame::group(ui.style()).inner_margin(theme::GAP_L);
+                frame.show(ui, |ui| {
+                    ui.set_min_size(ui.available_size());
+                    views::action_editor::panel(self, ui);
+                });
+            });
+            self.fix_selection();
+            scroll.set_right(x - theme::GAP_L);
+        }
+        let margin = column.left() - rect.left();
+        let width = scroll.right().min(column.right()) - column.left();
+        ui.scope_builder(egui::UiBuilder::new().max_rect(scroll), |ui| {
+            egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+                let content = ui.max_rect();
+                let content = egui::Rect::from_x_y_ranges(
+                    content.left() + margin..=content.left() + margin + width,
+                    content.y_range(),
+                );
+                ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| match screen {
+                    Screen::Start => {}
+                    Screen::Overview => views::overview::show(self, ui),
+                    Screen::Layout(index) => views::layout::show(self, ui, index),
+                    Screen::Combos => views::combos::list(self, ui),
+                    Screen::Combo(index) => views::combos::show(self, ui, index),
+                });
+            });
+        });
+    }
+
     fn dialogs(&mut self, ctx: &egui::Context) {
         let Some(dialog) = &self.dialog else { return };
         let mut close = false;
@@ -573,31 +613,13 @@ impl eframe::App for App {
             // Above the editor panel: the header buttons need the whole window width.
             let margin = egui::Margin::symmetric(8, theme::GAP_S as i8);
             let frame = egui::Frame::side_top_panel(ui.style()).inner_margin(margin);
-            egui::Panel::top("header").frame(frame).show(ui, |ui| views::header(self, ui));
-            egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui, &validation));
+            egui::Panel::top("header").frame(frame).show(ui, |ui| theme::centered(ui, |ui| views::header(self, ui)));
+            egui::Panel::bottom("status").show(ui, |ui| theme::centered(ui, |ui| self.status_bar(ui, &validation)));
         }
-        // Side panels go before the central one.
         let editing = self.key_editor.as_ref().map(|e| e.target);
-        if editing.is_some() {
-            let frame = egui::Frame::side_top_panel(ui.style()).inner_margin(theme::GAP_L);
-            egui::Panel::right("key_editor")
-                .frame(frame)
-                .resizable(false)
-                .exact_size(views::action_editor::WIDTH)
-                .show(ui, |ui| views::action_editor::panel(self, ui));
-            self.fix_selection();
-        }
         egui::CentralPanel::default_margins().show(ui, |ui| match self.screen {
             Screen::Start => views::start::show(self, ui),
-            screen => {
-                egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| match screen {
-                    Screen::Start => {}
-                    Screen::Overview => views::overview::show(self, ui),
-                    Screen::Layout(index) => views::layout::show(self, ui, index),
-                    Screen::Combos => views::combos::list(self, ui),
-                    Screen::Combo(index) => views::combos::show(self, ui, index),
-                });
-            }
+            screen => self.editor_screen(ui, screen, editing.is_some()),
         });
 
         self.fix_selection();
