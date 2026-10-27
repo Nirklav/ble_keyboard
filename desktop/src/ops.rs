@@ -1,12 +1,12 @@
 //! Config operations on a connected keyboard, shared by the CLI and the GUI.
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use protocol::ble::{self, Info, Request, Response};
+use protocol::hid::{self, Info, Request, Response};
 use protocol::config::{self, Config};
 use protocol::crc::crc32;
 
 use crate::config_file;
-use crate::transport::Device;
+use crate::link::Link;
 
 /// Progress of [`write_config`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,16 +20,16 @@ pub enum WriteProgress {
 /// Fails if the firmware speaks a different protocol version.
 pub fn check_protocol(info: &Info) -> Result<()> {
     ensure!(
-        info.protocol_version == ble::PROTOCOL_VERSION,
+        info.protocol_version == hid::PROTOCOL_VERSION,
         "keyboard protocol version {} differs from the app one {}, update the firmware or the app",
         info.protocol_version,
-        ble::PROTOCOL_VERSION
+        hid::PROTOCOL_VERSION
     );
     Ok(())
 }
 
 /// Reads, decodes and validates the keyboard config, an older version is upgraded to the app one.
-pub async fn read_config(device: &mut Device, info: &Info) -> Result<Config> {
+pub async fn read_config(device: &mut impl Link, info: &Info) -> Result<Config> {
     check_protocol(info)?;
     ensure!(
         (config::OLDEST_CONFIG_VERSION..=config::CONFIG_VERSION).contains(&info.config_version),
@@ -46,7 +46,7 @@ pub async fn read_config(device: &mut Device, info: &Info) -> Result<Config> {
     Ok(config)
 }
 
-async fn read_config_bytes(device: &mut Device) -> Result<Vec<u8>> {
+async fn read_config_bytes(device: &mut impl Link) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     let mut expected_len = None;
     loop {
@@ -56,7 +56,7 @@ async fn read_config_bytes(device: &mut Device) -> Result<Vec<u8>> {
             bail!("unexpected response to ReadConfig: {response:?}");
         };
         ensure!(chunk_offset == offset, "asked for offset {offset}, got {chunk_offset}");
-        ensure!(total_len as usize <= ble::MAX_CONFIG_SIZE, "config of {total_len} bytes is too large");
+        ensure!(total_len as usize <= hid::MAX_CONFIG_SIZE, "config of {total_len} bytes is too large");
         if *expected_len.get_or_insert(total_len) != total_len {
             bail!("config changed while reading, try again");
         }
@@ -72,7 +72,7 @@ async fn read_config_bytes(device: &mut Device) -> Result<Vec<u8>> {
 
 /// Validates `config` against the keyboard first. Returns the number of bytes sent.
 pub async fn write_config(
-    device: &mut Device,
+    device: &mut impl Link,
     info: &Info,
     config: &Config,
     mut progress: impl FnMut(WriteProgress),
@@ -93,13 +93,13 @@ pub async fn write_config(
     ensure!(config.combos.len() <= info.max_combos as usize, "keyboard supports at most {} combos", info.max_combos);
 
     let bytes = config.to_bytes();
-    ensure!(bytes.len() <= ble::MAX_CONFIG_SIZE, "config is {} bytes, max is {}", bytes.len(), ble::MAX_CONFIG_SIZE);
+    ensure!(bytes.len() <= hid::MAX_CONFIG_SIZE, "config is {} bytes, max is {}", bytes.len(), hid::MAX_CONFIG_SIZE);
     let chunk_size = device.chunk_size();
-    ensure!(chunk_size > 0, "MTU {} is too small", device.mtu());
+    ensure!(chunk_size > 0, "the connection MTU is too small for config chunks");
 
     let total = bytes.len();
     device.request_ok(&Request::WriteBegin { len: total as u32, crc32: crc32(&bytes) }).await?;
-    for (offset, chunk) in ble::chunks(&bytes, chunk_size) {
+    for (offset, chunk) in hid::chunks(&bytes, chunk_size) {
         device.request_ok(&Request::WriteChunk { offset, data: chunk.to_vec() }).await?;
         progress(WriteProgress::Sent { done: offset as usize + chunk.len(), total });
     }
@@ -109,7 +109,7 @@ pub async fn write_config(
 }
 
 /// Restores the factory config on the keyboard.
-pub async fn reset_config(device: &mut Device, info: &Info) -> Result<()> {
+pub async fn reset_config(device: &mut impl Link, info: &Info) -> Result<()> {
     check_protocol(info)?;
     device.request_ok(&Request::ResetToDefault).await
 }

@@ -1,0 +1,3 @@
+# The browser build of kb-gui uses the WebHID bindings of web-sys, which are unstable.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg=web_sys_unstable_apis"]

@@ -1,4 +1,4 @@
-//! `kb`: reads and writes the keyboard config over Bluetooth LE.
+//! `kb`: reads and writes the keyboard config over HID (the keyboard connected over Bluetooth LE).
 
 mod commands;
 
@@ -8,22 +8,14 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
-use desktop::transport::Options;
+use desktop::link::Options;
 
 #[derive(Debug, Parser)]
-#[command(name = "kb", version, about = "Keyboard config over Bluetooth LE")]
+#[command(name = "kb", version, about = "Keyboard config over HID")]
 struct Cli {
-    /// Keyboard name (case-insensitive substring), used when the keyboard isn't found by its config service.
-    #[arg(long, global = true, default_value = "Nirklav Keyboard")]
-    name: String,
-
-    /// Timeout in seconds for discovery and for every request.
+    /// Timeout in seconds for every request.
     #[arg(long, global = true, default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..))]
     timeout: u64,
-
-    /// ATT MTU used to size config chunks; default is the negotiated one.
-    #[arg(long, global = true, value_parser = clap::value_parser!(u16).range(23..=517))]
-    mtu: Option<u16>,
 
     #[command(subcommand)]
     command: Command,
@@ -50,12 +42,14 @@ enum Command {
         /// TOML config file.
         file: PathBuf,
     },
+    /// Prints the Linux udev rule that gives the user access to the keyboard, and how to install it.
+    UdevRule,
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    let options = Options { name: cli.name, timeout: Duration::from_secs(cli.timeout), mtu: cli.mtu.map(usize::from) };
+    let options = Options { timeout: Duration::from_secs(cli.timeout) };
 
     let result = match &cli.command {
         Command::Info => commands::info(&options).await,
@@ -63,6 +57,10 @@ async fn main() -> ExitCode {
         Command::Push { file } => commands::push(&options, file).await,
         Command::Reset => commands::reset(&options).await,
         Command::Check { file } => commands::check(file),
+        Command::UdevRule => {
+            commands::udev_rule();
+            Ok(())
+        }
     };
 
     match result {

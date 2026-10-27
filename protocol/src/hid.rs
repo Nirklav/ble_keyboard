@@ -1,20 +1,20 @@
-//! BLE GATT config service: the desktop app (GATT client) reads and writes the
-//! keyboard [`Config`](crate::config::Config) over the HID connection that the OS already has.
+//! Keyboard config protocol over HID: the desktop and web apps read and write the keyboard
+//! [`Config`](crate::config::Config) through a vendor-defined collection of the keyboard's HID report map.
+//! The OS exposes it as an ordinary HID device whenever the keyboard is connected (over BLE: HID over GATT),
+//! so the apps (hidapi, WebHID) find the keyboard without any Bluetooth discovery.
 //!
-//! The service ([`SERVICE_UUID`]) has three characteristics, all need an encrypted
-//! (bonded) link:
+//! The collection ([`USAGE_PAGE`] / [`USAGE`]) has one input and one output report with
+//! [`REPORT_ID`], both [`REPORT_LEN`] bytes (the report ID not counted):
+//! - output report: a postcard encoded [`Request`], written by the app;
+//! - input report: the postcard encoded [`Response`].
 //!
-//! | Characteristic        | Properties                | Content                                    |
-//! | --------------------- | ------------------------- | ------------------------------------------ |
-//! | [`INFO_UUID`]         | read                      | postcard encoded [`Info`]                  |
-//! | [`CONTROL_UUID`]      | write with response       | postcard encoded [`Request`], one per write |
-//! | [`RESPONSE_UUID`]     | notify                    | postcard encoded [`Response`], one per notification |
+//! A report carries one message as `[len, message (len bytes), zero padding]`, see [`encode`] / [`decode`].
+//! Over BLE a report is one write / notification, so the connection's ATT MTU must be at least [`MIN_MTU`];
+//! the hosts negotiate more than that.
 //!
-//! Every [`Request`] is answered by exactly one [`Response`] notification, the client
-//! subscribes to [`RESPONSE_UUID`] first and sends the next request only after the
-//! response to the previous one arrived. A write and a notification carry at most
-//! `MTU - 3` bytes, so configs are transferred in chunks of [`chunk_payload_size`] bytes.
-//! All numbers in the messages are offsets/lengths in bytes of the postcard encoded config.
+//! Every [`Request`] is answered by exactly one [`Response`], the app sends the next request only after
+//! the response to the previous one arrived. Configs are transferred in chunks of at most [`CHUNK_SIZE`]
+//! bytes. All numbers in the messages are offsets/lengths in bytes of the postcard encoded config.
 //!
 //! Write flow (`bytes = config.to_bytes()`):
 //! 1. [`Request::WriteBegin`] with `len = bytes.len()` and `crc32 = crc32(&bytes)` → [`Response::Ok`].
@@ -29,7 +29,7 @@
 //! same in all chunks.
 //!
 //! Any failed request is answered with [`Response::Error`]; a failed write step aborts the
-//! transfer, the client starts again from [`Request::WriteBegin`].
+//! transfer, the app starts again from [`Request::WriteBegin`].
 //! [`Request::ResetToDefault`] replaces the config with the factory one → [`Response::Ok`].
 //!
 //! Session: while the app is connected it sends [`Request::Ping`] every [`PING_INTERVAL`] and
@@ -49,46 +49,61 @@ pub const PING_INTERVAL: core::time::Duration = core::time::Duration::from_secs(
 /// The keyboard ends a session this long after the last request: a few missed pings.
 pub const SESSION_TIMEOUT: core::time::Duration = core::time::Duration::from_secs(20);
 
-/// Config service UUID.
-pub const SERVICE_UUID: u128 = 0x0da8123c_a800_4512_893d_e4857a5ae081;
-/// [`SERVICE_UUID`] as a string, for `uuid128!`.
-pub const SERVICE_UUID_STR: &str = "0da8123c-a800-4512-893d-e4857a5ae081";
+/// USB vendor ID in the PnP ID of the keyboard: pid.codes, the shared VID of open source hardware.
+pub const VENDOR_ID: u16 = 0x1209;
+/// Product ID in the PnP ID: from the pid.codes test range (`0x0001..=0x0010`), only for private use.
+pub const PRODUCT_ID: u16 = 0x0001;
 
-/// Info characteristic UUID (read).
-pub const INFO_UUID: u128 = 0xa6addb6d_7f16_46f4_87d4_73fbdfc3dcd8;
-/// [`INFO_UUID`] as a string.
-pub const INFO_UUID_STR: &str = "a6addb6d-7f16-46f4-87d4-73fbdfc3dcd8";
+/// Vendor-defined usage page of the config collection.
+pub const USAGE_PAGE: u16 = 0xFF4B;
+/// Usage of the config collection.
+pub const USAGE: u16 = 0x01;
 
-/// Control characteristic UUID (write with response).
-pub const CONTROL_UUID: u128 = 0xaf1ee8b8_de69_41da_9f7b_d96ea59095af;
-/// [`CONTROL_UUID`] as a string.
-pub const CONTROL_UUID_STR: &str = "af1ee8b8-de69-41da-9f7b-d96ea59095af";
+/// Report ID of the config input and output reports.
+pub const REPORT_ID: u8 = 0x04;
 
-/// Response characteristic UUID (notify).
-pub const RESPONSE_UUID: u128 = 0xac4b8720_b9cf_49a8_9241_30f90a5ccb7b;
-/// [`RESPONSE_UUID`] as a string.
-pub const RESPONSE_UUID_STR: &str = "ac4b8720-b9cf-49a8-9241-30f90a5ccb7b";
+/// Length of a config report without the report ID.
+pub const REPORT_LEN: usize = 64;
 
-/// Max length of an encoded config the keyboard accepts.
-pub const MAX_CONFIG_SIZE: usize = 8 * 1024;
-
-/// ATT header of a write / notification (opcode + handle).
-pub const ATT_HEADER: usize = 3;
-
-/// Default ATT MTU before the exchange.
-pub const DEFAULT_MTU: usize = 23;
+/// Max length of a message in a report: the rest after the length byte.
+pub const MAX_MESSAGE_LEN: usize = REPORT_LEN - 1;
 
 /// Max postcard overhead of [`Request::WriteChunk`] / [`Response::ConfigChunk`] around the data:
 /// variant tag (1) + two `u32` varints (5 + 5) + data length varint (2, for data < 16 KiB).
 pub const CHUNK_OVERHEAD: usize = 1 + 5 + 5 + 2;
 
-/// Max number of config bytes per [`Request::WriteChunk`] / [`Response::ConfigChunk`],
-/// so that the encoded message fits a write / notification with this ATT `mtu`.
-pub const fn chunk_payload_size(mtu: usize) -> usize {
-    mtu.saturating_sub(ATT_HEADER + CHUNK_OVERHEAD)
+/// Max number of config bytes per [`Request::WriteChunk`] / [`Response::ConfigChunk`], so that the
+/// message fits a report.
+pub const CHUNK_SIZE: usize = MAX_MESSAGE_LEN - CHUNK_OVERHEAD;
+
+/// ATT header of a BLE write / notification (opcode + handle).
+const ATT_HEADER: usize = 3;
+
+/// Min ATT MTU for a report to fit one BLE write / notification.
+pub const MIN_MTU: usize = REPORT_LEN + ATT_HEADER;
+
+/// Max length of an encoded config the keyboard accepts.
+pub const MAX_CONFIG_SIZE: usize = 8 * 1024;
+
+/// Report with `message`, `None` if it's longer than [`MAX_MESSAGE_LEN`].
+pub fn encode(message: &[u8]) -> Option<[u8; REPORT_LEN]> {
+    if message.len() > MAX_MESSAGE_LEN {
+        return None;
+    }
+    let mut report = [0; REPORT_LEN];
+    report[0] = message.len() as u8;
+    report[1..=message.len()].copy_from_slice(message);
+    Some(report)
 }
 
-/// Splits `bytes` into `(offset, chunk)` of at most `max_data` bytes (see [`chunk_payload_size`]).
+/// Message of `report` (without the report ID), `None` if the length byte doesn't fit it.
+/// Shorter reports are accepted as long as the message fits.
+pub fn decode(report: &[u8]) -> Option<&[u8]> {
+    let (&len, rest) = report.split_first()?;
+    rest.get(..len as usize)
+}
+
+/// Splits `bytes` into `(offset, chunk)` of at most `max_data` bytes (see [`CHUNK_SIZE`]).
 pub fn chunks(bytes: &[u8], max_data: usize) -> impl Iterator<Item = (u32, &[u8])> {
     let max_data = max_data.max(1);
     bytes.chunks(max_data).enumerate().map(move |(i, chunk)| ((i * max_data) as u32, chunk))
@@ -109,7 +124,7 @@ mod messages {
     use crate::config::Config;
     use crate::crc::crc32;
 
-    /// Content of the info characteristic.
+    /// Firmware and keyboard info, the answer to [`Request::GetInfo`].
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub struct Info {
         /// [`PROTOCOL_VERSION`](super::PROTOCOL_VERSION) of the firmware.
@@ -128,7 +143,7 @@ mod messages {
         pub firmware_version: String,
     }
 
-    /// Command written to the control characteristic.
+    /// Request of the app, sent in the output report.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub enum Request {
         /// → [`Response::Info`].
@@ -149,7 +164,7 @@ mod messages {
         End,
     }
 
-    /// Notification of the response characteristic.
+    /// Response of the keyboard to a [`Request`], sent in the input report.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub enum Response {
         Info(Info),
@@ -324,16 +339,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn uuid_strings_match() {
-        for (uuid, text) in [
-            (SERVICE_UUID, SERVICE_UUID_STR),
-            (INFO_UUID, INFO_UUID_STR),
-            (CONTROL_UUID, CONTROL_UUID_STR),
-            (RESPONSE_UUID, RESPONSE_UUID_STR),
-        ] {
-            let hex: std::string::String = text.chars().filter(|c| *c != '-').collect();
-            assert_eq!(u128::from_str_radix(&hex, 16).unwrap(), uuid);
-        }
+    fn report_roundtrip() {
+        let report = encode(&[1, 2, 3]).unwrap();
+        assert_eq!(&report[..5], &[3, 1, 2, 3, 0]);
+        assert_eq!(decode(&report), Some(&[1u8, 2, 3][..]));
+        assert_eq!(decode(&report[..4]), Some(&[1u8, 2, 3][..]));
+
+        let full = [7u8; MAX_MESSAGE_LEN];
+        assert_eq!(decode(&encode(&full).unwrap()), Some(&full[..]));
+        assert_eq!(encode(&[0; MAX_MESSAGE_LEN + 1]), None);
+    }
+
+    #[test]
+    fn decode_rejects_bad_length() {
+        assert_eq!(decode(&[]), None);
+        assert_eq!(decode(&[3, 1, 2]), None);
+        assert_eq!(decode(&[0]), Some(&[][..]));
     }
 
     #[test]
@@ -343,8 +364,6 @@ mod tests {
         assert_eq!(parts.len(), 3);
         assert_eq!(parts[2].0, 200);
         assert_eq!(parts.iter().map(|(_, c)| c.len()).sum::<usize>(), 256);
-        assert_eq!(chunk_payload_size(DEFAULT_MTU), 7);
-        assert_eq!(chunk_payload_size(2), 0);
     }
 
     #[cfg(feature = "alloc")]
@@ -356,23 +375,20 @@ mod tests {
         use crate::config::tests::sample;
         use crate::crc::crc32;
 
-        fn send(receiver: &mut ConfigReceiver, bytes: &[u8], mtu: usize) -> Result<crate::config::Config, ErrorCode> {
+        fn send(receiver: &mut ConfigReceiver, bytes: &[u8], max_data: usize) -> Result<crate::config::Config, ErrorCode> {
             receiver.begin(bytes.len() as u32, crc32(bytes))?;
-            for (offset, chunk) in chunks(bytes, chunk_payload_size(mtu)) {
+            for (offset, chunk) in chunks(bytes, max_data) {
                 receiver.chunk(offset, chunk)?;
             }
             receiver.commit()
         }
 
         #[test]
-        fn messages_fit_mtu() {
-            for mtu in [DEFAULT_MTU, 185, 247, 517] {
-                let size = chunk_payload_size(mtu);
-                let request = Request::WriteChunk { offset: u32::MAX, data: vec![0xFF; size] };
-                assert!(request.to_bytes().len() <= mtu - ATT_HEADER, "mtu {mtu}");
-                let response = Response::ConfigChunk { total_len: u32::MAX, offset: u32::MAX, data: vec![0xFF; size] };
-                assert!(response.to_bytes().len() <= mtu - ATT_HEADER, "mtu {mtu}");
-            }
+        fn chunks_fit_report() {
+            let request = Request::WriteChunk { offset: u32::MAX, data: vec![0xFF; CHUNK_SIZE] };
+            assert!(encode(&request.to_bytes()).is_some());
+            let response = Response::ConfigChunk { total_len: u32::MAX, offset: u32::MAX, data: vec![0xFF; CHUNK_SIZE] };
+            assert!(encode(&response.to_bytes()).is_some());
         }
 
         #[test]
@@ -415,7 +431,7 @@ mod tests {
         #[test]
         fn read_config_in_chunks() {
             let bytes = sample().to_bytes();
-            let max_data = chunk_payload_size(DEFAULT_MTU);
+            let max_data = CHUNK_SIZE;
             let mut received = Vec::new();
             loop {
                 let Response::ConfigChunk { total_len, offset, data } =
@@ -440,8 +456,8 @@ mod tests {
             let config = sample();
             let bytes = config.to_bytes();
             let mut receiver = ConfigReceiver::new(10, 5);
-            for mtu in [DEFAULT_MTU, 247] {
-                assert_eq!(send(&mut receiver, &bytes, mtu), Ok(config.clone()));
+            for max_data in [7, CHUNK_SIZE] {
+                assert_eq!(send(&mut receiver, &bytes, max_data), Ok(config.clone()));
                 assert!(!receiver.is_active());
             }
         }
@@ -465,7 +481,7 @@ mod tests {
             // A new begin restarts the transfer.
             receiver.begin(bytes.len() as u32, crc32(&bytes)).unwrap();
             receiver.chunk(0, &bytes[..10]).unwrap();
-            assert_eq!(send(&mut receiver, &bytes, 247), Ok(sample()));
+            assert_eq!(send(&mut receiver, &bytes, CHUNK_SIZE), Ok(sample()));
         }
 
         #[test]
@@ -495,14 +511,14 @@ mod tests {
             let mut receiver = ConfigReceiver::new(10, 5);
 
             let garbage = [0xFFu8; 16];
-            assert_eq!(send(&mut receiver, &garbage, 247), Err(ErrorCode::Invalid));
+            assert_eq!(send(&mut receiver, &garbage, CHUNK_SIZE), Err(ErrorCode::Invalid));
 
             let mut config = sample();
             config.combos[0].action = crate::config::ComboAction::SetLayout(7);
-            assert_eq!(send(&mut receiver, &config.to_bytes(), 247), Err(ErrorCode::Invalid));
+            assert_eq!(send(&mut receiver, &config.to_bytes(), CHUNK_SIZE), Err(ErrorCode::Invalid));
 
             let mut receiver = ConfigReceiver::new(12, 5);
-            assert_eq!(send(&mut receiver, &sample().to_bytes(), 247), Err(ErrorCode::Invalid));
+            assert_eq!(send(&mut receiver, &sample().to_bytes(), CHUNK_SIZE), Err(ErrorCode::Invalid));
         }
     }
 }

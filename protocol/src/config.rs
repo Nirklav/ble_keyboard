@@ -1,7 +1,7 @@
 //! Keyboard configuration: layouts (layers) and special key combinations.
 //!
 //! The same [`Config`] is used everywhere:
-//! - on the wire (BLE config service, see [`crate::ble`]) and in the firmware flash it is
+//! - on the wire (HID config reports, see [`crate::hid`]) and in the firmware flash it is
 //!   encoded with `postcard` ([`Config::to_bytes`], [`Config::from_bytes`]);
 //! - in the desktop app it is a TOML file with key names.
 //!

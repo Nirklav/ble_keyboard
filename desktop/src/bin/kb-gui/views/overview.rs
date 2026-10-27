@@ -1,7 +1,7 @@
 //! Overview: keyboard info, layouts, the way to the combos and the settings.
 
 use eframe::egui;
-use protocol::ble;
+use protocol::hid;
 use protocol::config::{CONFIG_VERSION, MAX_LAYOUTS, Settings};
 
 use crate::app::{App, Screen};
@@ -77,7 +77,7 @@ fn keyboard(app: &App, ui: &mut egui::Ui) {
     };
     let parts = [
         egui::RichText::new(format!("Firmware {}", info.firmware_version)).color(ui.visuals().weak_text_color()),
-        version("Protocol", info.protocol_version, ble::PROTOCOL_VERSION),
+        version("Protocol", info.protocol_version, hid::PROTOCOL_VERSION),
         version("Config format", info.config_version, CONFIG_VERSION),
         egui::RichText::new(format!(
             "{}×{} keys, up to {} layouts and {} combos",

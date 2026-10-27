@@ -1,33 +1,36 @@
 //! Keyboard connection off the UI thread.
 //!
-//! [`DeviceWorker`] runs a thread with a single-threaded tokio runtime that keeps the [`Device`]
-//! and runs [`Command`]s one at a time (the device can't be shared between threads anyway). Every command ends with exactly one final [`Event`]
+//! [`DeviceWorker`] runs a task that keeps the [`Device`] and runs [`Command`]s one at a time: natively
+//! on a thread with a single-threaded tokio runtime (the device can't be shared between threads anyway),
+//! in the browser on its event loop. Every command ends with exactly one final [`Event`]
 //! ([`Event::is_final`]), possibly after some [`Event::Progress`]. The UI polls the events
 //! every frame; the worker requests a repaint when it sends one.
 //!
-//! While connected, the worker pings the keyboard every [`ble::PING_INTERVAL`] so it doesn't
+//! While connected, the worker pings the keyboard every [`hid::PING_INTERVAL`] so it doesn't
 //! deep sleep; [`Command::Disconnect`] and dropping the worker end the session.
 //!
-//! A fake worker ([`DeviceWorker::spawn`] with `fake`) answers like a keyboard without Bluetooth,
+//! A fake worker ([`DeviceWorker::spawn`] with `fake`) answers like a keyboard without a real one,
 //! to look at the UI in every connection state.
 
 use std::sync::mpsc;
-use std::thread;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
-use desktop::EXAMPLE_CONFIG;
-use desktop::config_file;
+use anyhow::Result;
+use desktop::link::{Link, Options};
 use desktop::ops::{self, WriteProgress};
-use desktop::transport::{Device, Options};
+use desktop::time::{sleep, timeout};
+use desktop::{Device, EXAMPLE_CONFIG, config_file};
 use eframe::egui;
-use protocol::ble::{self, Info, Request};
+use futures::StreamExt;
+use futures::channel::mpsc as async_mpsc;
+use protocol::hid::{self, Info, Request};
 use protocol::config::Config;
-use tokio::sync::mpsc as async_mpsc;
-use tokio::time::{MissedTickBehavior, interval, sleep};
 
 /// How long dropping the worker waits for it to end the session.
+#[cfg(not(target_arch = "wasm32"))]
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
+
+type Commands = async_mpsc::UnboundedReceiver<(Options, Command)>;
 
 /// Request to the worker.
 #[derive(Debug)]
@@ -68,45 +71,54 @@ impl Event {
     }
 }
 
-/// Handle of the worker thread; dropping it stops the thread after the running command
-/// and waits a bit for it to end the session.
+/// Handle of the worker; dropping it stops the worker after the running command and (natively)
+/// waits a bit for it to end the session.
 pub struct DeviceWorker {
     /// `None` only while dropping.
     commands: Option<async_mpsc::UnboundedSender<(Options, Command)>>,
     events: mpsc::Receiver<Event>,
     /// Closed when the thread is done.
+    #[cfg(not(target_arch = "wasm32"))]
     done: mpsc::Receiver<()>,
 }
 
 impl DeviceWorker {
     /// `fake` runs [`run_fake`] instead of talking to a real keyboard.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn spawn(ctx: egui::Context, fake: bool) -> Result<DeviceWorker> {
+        use anyhow::Context;
+
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .context("can't start the Bluetooth worker")?;
-        let (commands, command_rx) = async_mpsc::unbounded_channel();
+            .context("can't start the keyboard worker")?;
+        let (commands, command_rx) = async_mpsc::unbounded();
         let (event_tx, events) = mpsc::channel();
         let sender = EventSender { events: event_tx, ctx };
         let (done_tx, done) = mpsc::channel::<()>();
-        thread::Builder::new()
-            .name("kb-ble".into())
+        std::thread::Builder::new()
+            .name("kb-device".into())
             .spawn(move || {
-                if fake {
-                    runtime.block_on(run_fake(command_rx, sender));
-                } else {
-                    runtime.block_on(run(command_rx, sender));
-                }
+                runtime.block_on(work(command_rx, sender, fake));
                 drop(done_tx);
             })
-            .context("can't start the Bluetooth worker")?;
+            .context("can't start the keyboard worker")?;
         Ok(DeviceWorker { commands: Some(commands), events, done })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn spawn(ctx: egui::Context, fake: bool) -> Result<DeviceWorker> {
+        let (commands, command_rx) = async_mpsc::unbounded();
+        let (event_tx, events) = mpsc::channel();
+        let sender = EventSender { events: event_tx, ctx };
+        wasm_bindgen_futures::spawn_local(work(command_rx, sender, fake));
+        Ok(DeviceWorker { commands: Some(commands), events })
     }
 
     pub fn send(&self, options: Options, command: Command) {
         // Fails only if the worker task is gone (it panicked), nothing to do then.
         if let Some(commands) = &self.commands {
-            let _ = commands.send((options, command));
+            let _ = commands.unbounded_send((options, command));
         }
     }
 
@@ -120,6 +132,7 @@ impl Drop for DeviceWorker {
     fn drop(&mut self) {
         // Closing the channel stops the worker, which ends the session first.
         self.commands = None;
+        #[cfg(not(target_arch = "wasm32"))]
         let _ = self.done.recv_timeout(CLOSE_TIMEOUT);
     }
 }
@@ -145,34 +158,41 @@ struct Connection {
     info: Info,
 }
 
-async fn run(mut commands: async_mpsc::UnboundedReceiver<(Options, Command)>, events: EventSender) {
+async fn work(commands: Commands, events: EventSender, fake: bool) {
+    if fake {
+        run_fake(commands, events).await;
+    } else {
+        run(commands, events).await;
+    }
+}
+
+async fn run(mut commands: Commands, events: EventSender) {
     let mut connection: Option<Connection> = None;
-    let mut ping = interval(ble::PING_INTERVAL);
-    ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
-        tokio::select! {
-            command = commands.recv() => {
-                let Some((options, command)) = command else { break };
-                let event = match execute(&mut connection, &options, command, &events).await {
-                    Ok(event) => event,
-                    Err(error) => {
-                        // The device may be in an unknown state (a timed out request, a late response).
+        // Pings when no command came for an interval: any request keeps the session alive too.
+        let command = match &mut connection {
+            Some(open) => match timeout(hid::PING_INTERVAL, commands.next()).await {
+                Some(command) => command,
+                None => {
+                    if let Err(error) = open.device.request_ok(&Request::Ping).await {
                         connection = None;
-                        Event::Failed(format!("{error:#}"))
+                        events.send(Event::Failed(format!("lost the keyboard: {error:#}")));
                     }
-                };
-                events.send(event);
-                // Any request keeps the session alive too.
-                ping.reset();
-            }
-            _ = ping.tick(), if connection.is_some() => {
-                let Some(open) = &mut connection else { continue };
-                if let Err(error) = open.device.request_ok(&Request::Ping).await {
-                    connection = None;
-                    events.send(Event::Failed(format!("lost the keyboard: {error:#}")));
+                    continue;
                 }
+            },
+            None => commands.next().await,
+        };
+        let Some((options, command)) = command else { break };
+        let event = match execute(&mut connection, &options, command, &events).await {
+            Ok(event) => event,
+            Err(error) => {
+                // The device may be in an unknown state (a timed out request, a late response).
+                connection = None;
+                Event::Failed(format!("{error:#}"))
             }
-        }
+        };
+        events.send(event);
     }
     if let Some(connection) = connection {
         connection.device.close().await;
@@ -221,8 +241,8 @@ async fn execute(
 }
 
 async fn connect(options: &Options, events: &EventSender) -> Result<Connection> {
-    events.progress(format!("Looking for \"{}\"...", options.name));
-    let device = Device::connect(options).await?;
+    events.progress("Connecting to the keyboard...");
+    let mut device = Device::connect(options).await?;
     events.progress("Reading the keyboard info...");
     let info = device.info().await?;
     events.send(Event::Connected(info.clone()));
@@ -232,18 +252,18 @@ async fn connect(options: &Options, events: &EventSender) -> Result<Connection> 
 
 /// Fake keyboard: connects, reads, writes and resets like a real one, with delays and progress,
 /// keeping the written config; starts with the example config.
-async fn run_fake(mut commands: async_mpsc::UnboundedReceiver<(Options, Command)>, events: EventSender) {
+async fn run_fake(mut commands: Commands, events: EventSender) {
     let factory = config_file::parse(EXAMPLE_CONFIG).expect("the example config is valid");
     let mut stored = factory.clone();
     let mut connected = false;
-    while let Some((options, command)) = commands.recv().await {
+    while let Some((_, command)) = commands.next().await {
         if matches!(command, Command::Disconnect) {
             connected = false;
             events.send(Event::Disconnected);
             continue;
         }
         if !connected {
-            events.progress(format!("Looking for \"{}\"...", options.name));
+            events.progress("Connecting to the keyboard...");
             sleep(Duration::from_millis(1500)).await;
             events.progress("Reading the keyboard info...");
             sleep(Duration::from_millis(300)).await;
@@ -283,7 +303,7 @@ async fn run_fake(mut commands: async_mpsc::UnboundedReceiver<(Options, Command)
 /// Info of the fake keyboard: the current versions and the default 10x5 grid.
 fn fake_info() -> Info {
     Info {
-        protocol_version: ble::PROTOCOL_VERSION,
+        protocol_version: hid::PROTOCOL_VERSION,
         config_version: protocol::config::CONFIG_VERSION,
         width: 10,
         height: 5,

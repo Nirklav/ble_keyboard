@@ -1,23 +1,22 @@
 //! Application state and the top-level frame: menu, screens, dialogs.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use desktop::EXAMPLE_CONFIG;
 use desktop::config_file;
-use desktop::transport::Options;
+use desktop::link::Options;
 use eframe::egui;
-use protocol::ble::Info;
+use protocol::hid::Info;
 use protocol::config::{Config, JoystickButton};
 
 use crate::device::{Command, DeviceWorker, Event};
 use crate::editing;
+use crate::files::{Files, Opened};
 use crate::theme;
 use crate::views;
 
-/// Default keyboard name filter, same as the CLI one.
-const DEFAULT_NAME: &str = "Nirklav Keyboard";
-/// Timeout of discovery and of every request.
+/// Timeout of every request.
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// Smallest window that fits the default 10x5 key grid and the combo editor.
 pub const MIN_SIZE: egui::Vec2 = egui::vec2(780.0, 540.0);
@@ -25,7 +24,7 @@ pub const MIN_SIZE: egui::Vec2 = egui::vec2(780.0, 540.0);
 /// Edited config and its file.
 pub struct Document {
     pub config: Config,
-    /// File the config was opened from / saved to.
+    /// File the config was opened from / saved to; in the browser only its name.
     pub path: Option<PathBuf>,
     /// Config as last opened / saved / pulled from / pushed to the keyboard.
     saved: Option<Config>,
@@ -122,10 +121,8 @@ pub enum Dialog {
 
 /// Keyboard connection state as seen by the UI.
 pub struct DeviceState {
-    /// `None` if the Bluetooth worker couldn't start.
+    /// `None` if the keyboard worker couldn't start.
     pub worker: Option<DeviceWorker>,
-    /// Keyboard name filter.
-    pub name: String,
     /// Info of the last connected keyboard.
     pub info: Option<Info>,
     pub connected: bool,
@@ -138,7 +135,7 @@ pub struct DeviceState {
 impl DeviceState {
     pub fn send(&mut self, command: Command) {
         let Some(worker) = &self.worker else { return };
-        let options = Options { name: self.name.trim().to_string(), timeout: TIMEOUT, mtu: None };
+        let options = Options { timeout: TIMEOUT };
         self.busy = Some("Starting...".to_string());
         worker.send(options, command);
     }
@@ -162,6 +159,7 @@ pub struct App {
     /// Combo key waiting for a grid click: `(combo, key)`.
     pub picking: Option<(usize, usize)>,
     pub dialog: Option<Dialog>,
+    files: Files,
     /// Config being written to the keyboard, becomes the saved one once written.
     pushing: Option<Config>,
     /// Quit was confirmed, don't ask again.
@@ -179,7 +177,6 @@ impl App {
         theme::apply(ctx);
         let mut device = DeviceState {
             worker: None,
-            name: DEFAULT_NAME.to_string(),
             info: None,
             connected: false,
             busy: None,
@@ -198,6 +195,7 @@ impl App {
             key_editor: None,
             picking: None,
             dialog: None,
+            files: Files::new(),
             pushing: None,
             quitting: false,
             title: String::new(),
@@ -246,7 +244,7 @@ impl App {
     fn run_discarding(&mut self, ctx: &egui::Context, action: Discarding) {
         match action {
             Discarding::NewFromExample => self.set_document(Document::example()),
-            Discarding::Open => self.open(),
+            Discarding::Open => self.files.open(ctx, self.doc.path.as_deref()),
             Discarding::Pull => self.device.send(Command::Pull),
             Discarding::Quit => {
                 self.quitting = true;
@@ -255,38 +253,29 @@ impl App {
         }
     }
 
-    fn open(&mut self) {
-        let Some(path) = file_dialog(self.doc.path.as_deref()).pick_file() else {
-            return;
-        };
-        match config_file::load(&path) {
-            Ok(config) => self.set_document(Document::opened(config, Some(path))),
-            Err(error) => self.message("Can't open the config", format!("{error:#}")),
+    fn handle_opened(&mut self, opened: Opened) {
+        match opened {
+            Ok((config, path)) => self.set_document(Document::opened(config, Some(path))),
+            Err(error) => self.message("Can't open the config", error),
         }
     }
 
     pub fn save(&mut self) {
-        match self.doc.path.clone() {
-            Some(path) => self.save_to(path),
-            None => self.save_as(),
-        }
+        self.save_with(false);
     }
 
     pub fn save_as(&mut self) {
-        let dialog = file_dialog(self.doc.path.as_deref()).set_file_name(
-            self.doc.path.as_ref().and_then(|p| p.file_name()).map_or("config.toml".into(), |n| n.to_string_lossy()),
-        );
-        if let Some(path) = dialog.save_file() {
-            self.save_to(path);
-        }
+        self.save_with(true);
     }
 
-    fn save_to(&mut self, path: PathBuf) {
-        match config_file::save(&path, &self.doc.config) {
-            Ok(()) => {
+    /// `ask` for the file even if the config has one.
+    fn save_with(&mut self, ask: bool) {
+        match self.files.save(self.doc.path.as_deref(), &self.doc.config, ask) {
+            Ok(Some(path)) => {
                 self.doc.saved = Some(self.doc.config.clone());
                 self.doc.path = Some(path);
             }
+            Ok(None) => {}
             Err(error) => self.message("Can't save the config", format!("{error:#}")),
         }
     }
@@ -391,6 +380,9 @@ impl App {
     }
 
     fn handle_close_request(&mut self, ctx: &egui::Context) {
+        // The browser has no close request: the page asks before unloading, see main.rs.
+        #[cfg(target_arch = "wasm32")]
+        crate::UNSAVED.set(self.doc.is_dirty());
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting && self.doc.is_dirty() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.dialog = Some(Dialog::Discard(Discarding::Quit));
@@ -568,6 +560,9 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.handle_device_events();
+        if let Some(opened) = self.files.poll() {
+            self.handle_opened(opened);
+        }
         self.handle_close_request(&ctx);
         self.handle_shortcuts(&ctx);
         // The config may have been replaced or edited outside the views.
@@ -613,14 +608,6 @@ impl eframe::App for App {
         self.dialogs(&ctx);
         self.update_title(&ctx);
         self.enforce_min_size(&ctx);
-    }
-}
-
-fn file_dialog(current: Option<&Path>) -> rfd::FileDialog {
-    let dialog = rfd::FileDialog::new().add_filter("TOML config", &["toml"]).add_filter("All files", &["*"]);
-    match current.and_then(Path::parent) {
-        Some(dir) if !dir.as_os_str().is_empty() => dialog.set_directory(dir),
-        _ => dialog,
     }
 }
 

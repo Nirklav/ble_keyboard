@@ -1,11 +1,11 @@
-//! First screen: the connect button, the ways to edit without the keyboard, the connection options.
+//! First screen: the connect button, the ways to edit without the keyboard.
 
 use eframe::egui;
 
 use crate::app::{App, Discarding};
 use crate::theme;
 
-/// Width of the column in the middle: the connect button, the other buttons and the options.
+/// Width of the column in the middle: the connect button and the other buttons.
 const WIDTH: f32 = 260.0;
 /// Height of the connect button.
 const CONNECT_HEIGHT: f32 = 48.0;
@@ -15,7 +15,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space((ui.available_height() * 0.3 - 80.0).max(0.0));
         ui.label(egui::RichText::new("Keyboard config").size(28.0).strong());
         ui.add_space(theme::GAP_XS);
-        ui.weak("Connect to the keyboard over Bluetooth to read its config.");
+        ui.weak("Connect to the keyboard (paired with this computer) to read its config.");
         ui.add_space(theme::GAP_XL);
 
         let idle = !app.device.is_busy() && app.device.worker.is_some();
@@ -32,7 +32,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ui.spinner();
             ui.label(busy);
         } else if device.worker.is_none() {
-            ui.colored_label(ui.visuals().error_fg_color, "Bluetooth worker is not running");
+            ui.colored_label(ui.visuals().error_fg_color, "Keyboard worker is not running");
         } else if let Some((true, error)) = &device.status {
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
@@ -45,8 +45,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ui.vertical(|ui| {
                 ui.set_width(WIDTH);
                 offline(app, ui, idle);
-                ui.add_space(theme::GAP_L);
-                options(app, ui, idle);
             });
         });
     });
@@ -64,13 +62,5 @@ fn offline(app: &mut App, ui: &mut egui::Ui, idle: bool) {
         if create.on_hover_text("Start from the example config, write it to the keyboard later").clicked() {
             app.discard_then(ui.ctx(), Discarding::NewFromExample);
         }
-    });
-}
-
-fn options(app: &mut App, ui: &mut egui::Ui, idle: bool) {
-    egui::CollapsingHeader::new("Connection options").show_unindented(ui, |ui| {
-        ui.label("Keyboard name:");
-        ui.add_enabled(idle, egui::TextEdit::singleline(&mut app.device.name).desired_width(f32::INFINITY))
-            .on_hover_text("Case-insensitive part of the keyboard name, used if it isn't found by its config service");
     });
 }

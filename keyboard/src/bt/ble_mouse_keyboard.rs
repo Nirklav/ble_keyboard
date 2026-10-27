@@ -49,8 +49,8 @@ const LINK_STACK_SIZE: usize = 6 * 1024;
 /// Last GATT database version the bonded hosts were told about, see [`signal_gatt_changed`].
 static GATT_DB_FILE: &str = "/spiflash/gatt_db.txt";
 /// Bump on any change of the services, characteristics or the HID report map:
-/// 1 - HID only, 2 - config service, 3 - keys up to F24.
-const GATT_DB_VERSION: &str = "3";
+/// 1 - HID only, 2 - config service, 3 - keys up to F24, 4 - HID config reports, 5 - no config service.
+const GATT_DB_VERSION: &str = "5";
 
 /// ATT MTU asked for, a 247 bytes MTU fills one data length extended LL packet.
 const PREFERRED_MTU: u16 = 247;
@@ -58,6 +58,8 @@ const PREFERRED_MTU: u16 = 247;
 const KEYBOARD_ID: u8 = 0x01;
 const MEDIA_KEYS_ID: u8 = 0x02;
 const MOUSE_ID: u8 = 0x03;
+const CONFIG_ID: u8 = protocol::hid::REPORT_ID;
+const CONFIG_REPORT_LEN: u8 = protocol::hid::REPORT_LEN as u8;
 
 const HID_REPORT_DESCRIPTOR: &[u8] = hid!(
     (USAGE_PAGE, 0x01),         // Generic Desktop Ctrls
@@ -153,6 +155,20 @@ const HID_REPORT_DESCRIPTOR: &[u8] = hid!(
     (REPORT_COUNT, 0x01),
     (HIDINPUT, 0x06),           // Data, Var, Rel
     (END_COLLECTION),
+    (END_COLLECTION),
+    // ------------------------------------------------- Config, see `protocol::hid`
+    (USAGE_PAGE, 0x4B, 0xFF),   // Vendor 0xFF4B
+    (USAGE, 0x01),
+    (COLLECTION, 0x01),         // Application
+    (REPORT_ID, CONFIG_ID),
+    (LOGICAL_MINIMUM, 0x00),
+    (LOGICAL_MAXIMUM, 0xFF, 0x00), // 255
+    (REPORT_SIZE, 0x08),
+    (REPORT_COUNT, CONFIG_REPORT_LEN),
+    (USAGE, 0x02),              // Response
+    (HIDINPUT, 0x02),           // Data,Var,Abs
+    (USAGE, 0x03),              // Request
+    (HIDOUTPUT, 0x02),          // Data,Var,Abs
     (END_COLLECTION)
 );
 
@@ -310,17 +326,19 @@ impl BleMouseKeyboard {
         let output_keyboard = hid.output_report(KEYBOARD_ID);
         let input_media_keys = hid.input_report(MEDIA_KEYS_ID);
         let input_mouse = hid.input_report(MOUSE_ID);
+        let input_config = hid.input_report(CONFIG_ID);
+        let output_config = hid.output_report(CONFIG_ID);
 
         hid.manufacturer("Nirklav");
-        hid.pnp(0x02, 0x0000, 0x0000, 0x0100);
+        // Vendor ID source 0x02: a USB vendor ID.
+        hid.pnp(0x02, protocol::hid::VENDOR_ID, protocol::hid::PRODUCT_ID, 0x0100);
         hid.hid_info(0x00, 0x01);
 
         hid.report_map(HID_REPORT_DESCRIPTOR);
 
         hid.set_battery_level(100);
 
-        // After the HID services, so their handles stay the same as in older firmware.
-        let config_service = ConfigService::register(server, width, height, current_config, wake);
+        let config_service = ConfigService::register(width, height, current_config, wake, input_config, &output_config);
         let disconnect_service = config_service.clone();
         let disconnect_profiles = profiles.clone();
         let dropping = Arc::new(AtomicBool::new(false));
@@ -923,8 +941,8 @@ fn lock(profiles: &std::sync::Mutex<Profiles>) -> MutexGuard<'_, Profiles> {
     profiles.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Bonded hosts (Windows in particular) cache the GATT services and won't see the config service
-/// added by a firmware update. Once per [`GATT_DB_VERSION`], marks Service Changed (whole handle
+/// Bonded hosts (Windows in particular) cache the GATT services and won't see services, characteristics
+/// or a report map changed by a firmware update. Once per [`GATT_DB_VERSION`], marks Service Changed (whole handle
 /// range) for every bonded host that subscribed to it: NimBLE indicates it to connected hosts and
 /// persists the flag for the others, it is sent when they reconnect.
 ///

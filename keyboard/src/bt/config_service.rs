@@ -1,4 +1,4 @@
-//! BLE config service, see [`protocol::ble`] for the GATT layout and the message flows.
+//! Config protocol over the HID config reports, see [`protocol::hid`] for the reports and the message flows.
 //!
 //! GATT callbacks run in the NimBLE host task and never touch [`Services`](crate::services::Services):
 //! they only use [`State`] behind a mutex. Requests that change the config ([`Request::WriteCommit`],
@@ -9,11 +9,11 @@ use std::num::NonZeroU32;
 use std::sync::{Arc, MutexGuard};
 use std::time::{Duration, Instant};
 
-use esp32_nimble::utilities::{mutex::Mutex, BleUuid};
-use esp32_nimble::{BLECharacteristic, BLEServer, NimbleProperties};
+use esp32_nimble::utilities::mutex::Mutex;
+use esp32_nimble::BLECharacteristic;
 use esp_idf_svc::hal::task::notification::Notifier;
 use log::{info, warn};
-use protocol::ble::{self, chunk_payload_size, ConfigReceiver, ErrorCode, Info, Request, Response};
+use protocol::hid::{self, ConfigReceiver, ErrorCode, Info, Request, Response};
 use protocol::config::{CONFIG_VERSION, MAX_COMBOS, MAX_LAYOUTS};
 
 use crate::config::Pending;
@@ -25,7 +25,8 @@ const TRANSFER_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Clone)]
 pub struct ConfigService {
     state: Arc<std::sync::Mutex<State>>,
-    response: Arc<Mutex<BLECharacteristic>>,
+    /// HID config input report, responses to the requests of the output report.
+    input: Arc<Mutex<BLECharacteristic>>,
     /// Wakes the main loop up from `wait_for_activity`.
     wake: Arc<Notifier>,
     info: Arc<Info>,
@@ -47,10 +48,17 @@ struct State {
 
 impl ConfigService {
     /// Must be called before the server starts (advertising).
-    /// `current` is the encoded active config.
-    pub fn register(server: &mut BLEServer, width: u8, height: u8, current: Vec<u8>, wake: Arc<Notifier>) -> Self {
+    /// `current` is the encoded active config, `input` / `output` are the HID config reports.
+    pub fn register(
+        width: u8,
+        height: u8,
+        current: Vec<u8>,
+        wake: Arc<Notifier>,
+        input: Arc<Mutex<BLECharacteristic>>,
+        output: &Mutex<BLECharacteristic>,
+    ) -> Self {
         let info = Info {
-            protocol_version: ble::PROTOCOL_VERSION,
+            protocol_version: hid::PROTOCOL_VERSION,
             config_version: CONFIG_VERSION,
             width,
             height,
@@ -58,23 +66,6 @@ impl ConfigService {
             max_combos: MAX_COMBOS as u8,
             firmware_version: env!("CARGO_PKG_VERSION").into(),
         };
-
-        let service = server.create_service(uuid(ble::SERVICE_UUID));
-        let mut service = service.lock();
-
-        let info_chr = service.create_characteristic(
-            uuid(ble::INFO_UUID),
-            NimbleProperties::READ | NimbleProperties::READ_ENC,
-        );
-        info_chr.lock().set_value(&info.to_bytes());
-
-        let control = service.create_characteristic(
-            uuid(ble::CONTROL_UUID),
-            NimbleProperties::WRITE | NimbleProperties::WRITE_ENC,
-        );
-
-        // Responses are only sent for requests, which need encryption, so the CCCD doesn't.
-        let response = service.create_characteristic(uuid(ble::RESPONSE_UUID), NimbleProperties::NOTIFY);
 
         let config_service = Self {
             state: Arc::new(std::sync::Mutex::new(State {
@@ -85,30 +76,43 @@ impl ConfigService {
                 last_request: None,
                 last_seen: None,
             })),
-            response,
+            input,
             wake,
             info: Arc::new(info),
         };
 
         let callback_service = config_service.clone();
-        control.lock().on_write(move |args| {
-            // The control characteristic is locked here, the response one is not.
+        output.lock().on_write(move |args| {
             let mtu = args.desc().mtu() as usize;
-            let (response, wake) = callback_service.handle(args.recv_data(), mtu);
-            if let Some(response) = response {
-                callback_service.send(&response);
+            if mtu < hid::MIN_MTU {
+                warn!("Config report over MTU {}, responses don't fit (needs {})", mtu, hid::MIN_MTU);
             }
-            if wake {
-                callback_service.wake_main_loop();
+            match hid::decode(args.recv_data()) {
+                Some(data) => callback_service.on_request(data),
+                None => {
+                    warn!("Config report: bad length {:02x?}", args.recv_data());
+                    callback_service.send(&Response::Error(ErrorCode::BadRequest));
+                },
             }
         });
 
         config_service
     }
 
+    /// Handles a request in the NimBLE task (the output report is locked, the input one is not).
+    fn on_request(&self, data: &[u8]) {
+        let (response, wake) = self.handle(data);
+        if let Some(response) = response {
+            self.send(&response);
+        }
+        if wake {
+            self.wake_main_loop();
+        }
+    }
+
     /// Handles a request in the NimBLE task; the response is `None` if it's sent later by the main loop.
     /// Returns whether to wake the main loop up: session requests don't, so the keyboard can still idle.
-    fn handle(&self, data: &[u8], mtu: usize) -> (Option<Response>, bool) {
+    fn handle(&self, data: &[u8]) -> (Option<Response>, bool) {
         let Ok(request) = Request::from_bytes(data) else {
             warn!("Config service: bad request {:02x?}", data);
             return (Some(Response::Error(ErrorCode::BadRequest)), true);
@@ -136,11 +140,11 @@ impl ConfigService {
         }
         state.last_request = Some(Instant::now());
         state.last_seen = state.last_request;
-        (self.handle_transfer(&mut state, request, mtu), true)
+        (self.handle_transfer(&mut state, request), true)
     }
 
     /// Handles a config request, see [`Self::handle`].
-    fn handle_transfer(&self, state: &mut State, request: Request, mtu: usize) -> Option<Response> {
+    fn handle_transfer(&self, state: &mut State, request: Request) -> Option<Response> {
         if state.busy && request != Request::GetInfo {
             return Some(Response::Error(ErrorCode::Busy));
         }
@@ -148,7 +152,7 @@ impl ConfigService {
         let response = match request {
             Request::GetInfo => Response::Info((*self.info).clone()),
             Request::ReadConfig { offset } => {
-                Response::config_chunk(&state.current, offset, chunk_payload_size(mtu))
+                Response::config_chunk(&state.current, offset, hid::CHUNK_SIZE)
             },
             Request::WriteBegin { len, crc32 } => {
                 info!("Config write started: {} bytes", len);
@@ -165,7 +169,7 @@ impl ConfigService {
                 Err(code) => Response::Error(code),
             },
             Request::ResetToDefault => {
-                info!("Config reset requested over BLE");
+                info!("Config reset requested");
                 state.receiver.abort();
                 state.submitted = Some(Pending::Reset);
                 state.busy = true;
@@ -180,7 +184,7 @@ impl ConfigService {
         Some(response)
     }
 
-    /// Config change submitted over BLE, to be applied by the main loop and answered with [`Self::finish`].
+    /// Config change submitted by the app, to be applied by the main loop and answered with [`Self::finish`].
     pub fn take_submitted(&self) -> Option<Pending> {
         self.lock().submitted.take()
     }
@@ -196,7 +200,7 @@ impl ConfigService {
     pub fn session_active(&self) -> bool {
         self.lock()
             .last_seen
-            .is_some_and(|t| t.elapsed() < ble::SESSION_TIMEOUT)
+            .is_some_and(|t| t.elapsed() < hid::SESSION_TIMEOUT)
     }
 
     /// Replaces the encoded active config, after any config change.
@@ -223,13 +227,17 @@ impl ConfigService {
 
     fn send(&self, response: &Response) {
         let bytes = response.to_bytes();
-        let mut characteristic = self.response.lock();
-        if characteristic.subscribed_count() == 0 {
+        // Fits a report: chunks are sized by it, other responses are small.
+        let Some(report) = hid::encode(&bytes) else {
+            warn!("Config response of {} bytes doesn't fit a report", bytes.len());
+            return;
+        };
+        let mut input = self.input.lock();
+        if input.subscribed_count() == 0 {
             warn!("Config response dropped, nobody is subscribed");
             return;
         }
-        // Fits a notification: chunks are sized by the MTU, other responses are small.
-        characteristic.set_value(&bytes).notify();
+        input.set_value(&report).notify();
     }
 
     fn wake_main_loop(&self) {
@@ -243,8 +251,4 @@ impl ConfigService {
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
-}
-
-fn uuid(uuid: u128) -> BleUuid {
-    BleUuid::from_uuid128(uuid.to_le_bytes())
 }

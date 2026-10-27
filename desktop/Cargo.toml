@@ -13,18 +13,49 @@ path = "src/bin/kb-gui/main.rs"
 
 [dependencies]
 anyhow = "1.0.104"
-btleplug = "0.13.5"
-clap = { version = "4.6.7", features = ["derive"] }
-eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "clipboard", "accesskit"] }
+eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow"] }
 futures = "0.3.34"
 protocol = { version = "0.1.0", path = "../protocol", features = ["std"] }
-rfd = "0.17.2"
 serde = "1.0.229"
-tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "time", "sync"] }
 toml = "1.1.8"
-uuid = "1.28.0"
 
-# Linux only (btleplug uses BlueZ over D-Bus): build libdbus from source, so that
-# building / testing on Linux doesn't need the libdbus-1-dev system package.
-[target.'cfg(target_os = "linux")'.dependencies]
-libdbus-sys = { version = "0.2.7", features = ["vendored"] }
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+eframe = { version = "0.37.0", default-features = false, features = ["wayland", "x11", "clipboard", "accesskit"] }
+hidapi = { version = "2.6.7", default-features = false, features = ["linux-native-basic-udev", "windows-native"] }
+rfd = "0.17.2"
+tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "time"] }
+
+# Browser build (`trunk build`, see index.html): the keyboard over WebHID. The WebHID bindings of web-sys
+# are unstable, see the rustflags in .cargo/config.toml.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+gloo-timers = { version = "0.3.0", features = ["futures"] }
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "BeforeUnloadEvent",
+    "Blob",
+    "BlobPropertyBag",
+    "Document",
+    "DomException",
+    "Element",
+    "Event",
+    "EventTarget",
+    "File",
+    "FileList",
+    "HtmlAnchorElement",
+    "HtmlCanvasElement",
+    "HtmlElement",
+    "HtmlInputElement",
+    "Hid",
+    "HidCollectionInfo",
+    "HidDevice",
+    "HidDeviceFilter",
+    "HidDeviceRequestOptions",
+    "HidInputReportEvent",
+    "Location",
+    "Navigator",
+    "Url",
+    "Window",
+] }

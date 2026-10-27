@@ -1,7 +1,7 @@
 use std::io;
 
 use log::{error, info};
-use protocol::ble::{ErrorCode, Response};
+use protocol::hid::{ErrorCode, Response};
 use protocol::config::Config;
 use protocol::keymap::Keymap;
 
@@ -97,7 +97,7 @@ pub fn apply_pending<const W: usize, const H: usize>(
     Ok(Some(stored))
 }
 
-/// Applies [`Services::pending_config`], then a change submitted over BLE and answers it.
+/// Applies [`Services::pending_config`], then a change submitted by the config app and answers it.
 /// Must be called when all keys are up.
 pub fn apply_changes<const W: usize, const H: usize>(
     svc: &mut Services<W, H>,

@@ -1,7 +1,7 @@
 //! Config edits that keep the layout indices consistent, independent of the UI.
 
 use desktop::config_file;
-use protocol::ble::{self, Info};
+use protocol::hid::{self, Info};
 use protocol::config::{
     Combo, ComboAction, ComboKey, ComboKeyIdent, Config, JoystickButton, JoystickButtons, KeyAction, Layout,
     MAX_COMBO_KEYS, MAX_COMBOS, MAX_LAYOUT_NAME_LEN, MAX_LAYOUTS,
@@ -25,8 +25,8 @@ pub fn check(config: &Config, info: Option<&Info>) -> Result<(), String> {
         }
     }
     let size = config.to_bytes().len();
-    if size > ble::MAX_CONFIG_SIZE {
-        return Err(format!("encoded config is {size} bytes, max is {}", ble::MAX_CONFIG_SIZE));
+    if size > hid::MAX_CONFIG_SIZE {
+        return Err(format!("encoded config is {size} bytes, max is {}", hid::MAX_CONFIG_SIZE));
     }
     Ok(())
 }
@@ -371,7 +371,7 @@ mod tests {
 
         let config = example();
         let info = Info {
-            protocol_version: ble::PROTOCOL_VERSION,
+            protocol_version: hid::PROTOCOL_VERSION,
             config_version: protocol::config::CONFIG_VERSION,
             width: 10,
             height: 5,
