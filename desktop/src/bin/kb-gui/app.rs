@@ -86,6 +86,8 @@ pub enum EditTarget {
     LayoutKey { layout: usize, x: usize, y: usize },
     JoystickButton { layout: usize, button: JoystickButton },
     ComboKey { combo: usize, key: usize },
+    /// Action of a chord combo, [`ComboAction::Action`](protocol::config::ComboAction::Action).
+    ComboAction { combo: usize },
 }
 
 pub struct KeyEditor {
@@ -354,6 +356,7 @@ impl App {
             EditTarget::LayoutKey { layout, x, y } => config.layouts.get(layout).and_then(|l| l.get(x, y)).is_some(),
             EditTarget::JoystickButton { layout, .. } => layout < config.layouts.len(),
             EditTarget::ComboKey { combo, key } => config.combos.get(combo).is_some_and(|c| key < c.keys.len()),
+            EditTarget::ComboAction { combo } => config.combos.get(combo).is_some_and(|c| c.is_chord()),
         });
         if !editor_valid {
             self.key_editor = None;

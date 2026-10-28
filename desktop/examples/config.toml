@@ -3,7 +3,7 @@
 # rows[y][x]: 5 rows of 10 keys per layout. Key actions:
 #   { Key = "A" }, { KeyWithMod = ["Num1", "LeftShift"] }, { Mod = "LeftCtrl | LeftAlt" },
 #   { Media = "VolumeUp" }, { MouseKey = "Left" }, { MouseTravel = { dx = 0, dy = -10 } },
-#   { MouseScroll = { dy = 10 } }, { Fn = { temporary = 1, permanent = 2 } }, "None",
+#   { MouseScroll = { dy = 2 } }, { Fn = { temporary = 1, permanent = 2 } }, "None",
 #   "Transparent", { Momentary = 1 }, { Toggle = 1 }, { To = 2 },
 #   { ModTap = { mods = "LeftCtrl", tap = "F" } }, { LayerTap = { layer = 1, tap = "Space" } },
 #   { BtSelect = 0 }, "BtNext", "BtPrev", "BtClear".
@@ -13,6 +13,11 @@
 # ModTap / LayerTap: tap sends `tap`, hold holds `mods` / the layer. A hold is a key held for
 # settings.tapping_term_ms or held while another key is pressed and released; pressed within
 # settings.require_prior_idle_ms after a typed key it's a tap (0 turns that off).
+# MouseTravel: cursor speed while held, pixels per 10 ms (10 = 1000 px/s); MouseScroll: wheel steps
+# per second, a press scrolls one step at once. Both move by the time, whatever the report rate is.
+# Other settings: debounce_ms (key contact bounce), sleep_connected_s / sleep_disconnected_s
+# (deep sleep after that many idle seconds with / without a host, 15..36000), joystick_speed (cursor
+# px/s at full deflection), joystick_ramp_ms (time to reach that speed, 0 = at once), joystick_invert_x/y.
 # BLE profiles: the keyboard remembers 4 hosts, one per profile; the display shows them as BT 1..BT 4,
 # BtSelect takes 0..3. Switching drops the current host and connects to the host of the profile, an empty
 # profile waits for a new host to pair (display: "BT 2 pair"). BtClear forgets the host of the current
@@ -25,15 +30,27 @@
 # "BtClear", "BtClearAll" (forgets all hosts); "Unpair" is the same as "BtClear".
 # Factory combos: double tap Fn: SwitchLayout; hold Fn, press Left x3: Unpair; hold Fn, double press
 # Q, Z, X, C: BT 1..BT 4 (keys that are "None" in FUNCTION, so nothing is typed on the host being left).
+# Chords: a combo with an `action = { Action = ... }` is a chord, its keys (all with count = 0) pressed
+# together within settings.combo_term_ms send the action instead of their own ones while held, e.g.
+#   keys = [{ ident = { Coord = { x = 6, y = 1 } }, count = 0 }, { ident = { Coord = { x = 7, y = 1 } }, count = 0 }]
+#   action = { Action = { Key = "Escape" } }
 # Check with `kb check examples/config.toml`, write with `kb push examples/config.toml`.
 
-version = 3
+version = 4
 width = 10
 height = 5
 
 [settings]
 tapping_term_ms = 200
 require_prior_idle_ms = 150
+combo_term_ms = 50
+debounce_ms = 5
+sleep_connected_s = 300
+sleep_disconnected_s = 60
+joystick_speed = 1800
+joystick_ramp_ms = 40
+joystick_invert_x = false
+joystick_invert_y = false
 
 [[layouts]]
 name = "MAIN"
@@ -61,8 +78,8 @@ joystick = { left = { MouseKey = "Left" }, stick = { MouseKey = "Middle" }, righ
 name = "GAME"
 rows = [
     [{ Key = "Escape" },   { Key = "Num1" },      { Key = "Num2" },                          { Key = "Num3" },    { Key = "Num4" },      { Key = "Num5" },  { Key = "Num6" },  { Key = "RightBracket" },               { Key = "Minus" },                      { Key = "Equal" }],
-    [{ Key = "Q" },        { Key = "W" },         { Key = "E" },                             { Key = "R" },       { Key = "T" },         { Key = "Y" },     { Key = "U" },     { Key = "I" },                          { Key = "O" },                          { MouseScroll = { dy = 10 } }],
-    [{ Key = "A" },        { Key = "S" },         { Key = "D" },                             { Key = "F" },       { Key = "G" },         { Key = "H" },     { Key = "J" },     { Key = "K" },                          { Key = "L" },                          { MouseScroll = { dy = -10 } }],
+    [{ Key = "Q" },        { Key = "W" },         { Key = "E" },                             { Key = "R" },       { Key = "T" },         { Key = "Y" },     { Key = "U" },     { Key = "I" },                          { Key = "O" },                          { MouseScroll = { dy = 2 } }],
+    [{ Key = "A" },        { Key = "S" },         { Key = "D" },                             { Key = "F" },       { Key = "G" },         { Key = "H" },     { Key = "J" },     { Key = "K" },                          { Key = "L" },                          { MouseScroll = { dy = -2 } }],
     [{ Key = "Z" },        { Key = "X" },         { Key = "C" },                             { Key = "V" },       { Key = "B" },         { Key = "N" },     { Key = "M" },     { MouseKey = "Left" },                  { MouseTravel = { dx = 0, dy = -10 } }, { MouseKey = "Right" }],
     [{ Mod = "LeftCtrl" }, { Mod = "LeftShift" }, { Fn = { temporary = 1, permanent = 0 } }, { Mod = "LeftAlt" }, { Key = "Backspace" }, { Key = "Space" }, { Key = "Enter" }, { MouseTravel = { dx = -10, dy = 0 } }, { MouseTravel = { dx = 0, dy = 10 } },  { MouseTravel = { dx = 10, dy = 0 } }],
 ]

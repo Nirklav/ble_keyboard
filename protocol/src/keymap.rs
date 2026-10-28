@@ -21,6 +21,18 @@
 //! - another key pressed and released meanwhile ("permissive hold"): a hold;
 //! - held for [`Settings::tapping_term_ms`]: a hold, so [`Keymap::tick`] must run while keys are held.
 //!
+//! Chords ([`ComboAction::Action`](crate::config::ComboAction::Action)): a press of a key of a chord waits in the queue too, until it's clear
+//! whether the chord is pressed:
+//! - every key of a chord pressed within [`Settings::combo_term_ms`] after the first one, nothing else pressed
+//!   and no key of the chord released meanwhile: the presses are replaced with the chord action, held by
+//!   the first key; if a longer chord starting with the same keys can still be pressed, it waits for it
+//!   till the term ends. Keys pressed before the chord may be released meanwhile (rolling typing), those
+//!   releases go before the chord action;
+//! - otherwise the first key is pressed as usual and the following events are looked at again.
+//!
+//! The chord keys are matched before the tap-hold ones, so tap-hold keys can make a chord. The chord action
+//! is released with the first key of the chord released, releasing the others then does nothing.
+//!
 //! Every change of a key reaches the host: [`Keymap::frame`] stops at a second change of the same key,
 //! so a tap is a press in one report and a release in the next, and after a press, so keys replayed
 //! from the queue are pressed in order even on hosts that sort the keys of one report.
@@ -31,7 +43,7 @@
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
-use crate::config::{Config, JoystickButton, KeyAction, Layout, Settings};
+use crate::config::{ComboKeyIdent, Config, JoystickButton, KeyAction, Layout, Settings};
 use crate::keys::{Key, KeyMod};
 
 /// Physical key.
@@ -91,6 +103,8 @@ enum Effect {
     Layer(u8),
     /// Tap-hold key waiting for a decision, see [`Undecided`].
     Undecided,
+    /// Key of a chord, the first key of the chord holds the chord action.
+    Chord(KeyId),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -120,6 +134,25 @@ enum Decision {
     Hold,
 }
 
+/// Chord of the config, [`ComboAction::Action`](crate::config::ComboAction::Action).
+#[derive(Debug, Clone)]
+struct Chord {
+    /// 2..=32 keys, at most one pressed key per ident.
+    keys: Vec<ComboKeyIdent>,
+    action: KeyAction,
+}
+
+/// What the presses at the front of the queue are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChordDecision {
+    /// A chord may still be pressed.
+    Wait,
+    /// No chord: the first press is an ordinary one.
+    None,
+    /// The presses among the first `end` events are chord `chord`, the rest are releases of other keys.
+    Fire { chord: usize, end: usize },
+}
+
 /// Change of the report: `Some` presses the action, `None` releases the key.
 #[derive(Debug, Clone, Copy)]
 struct Output {
@@ -131,6 +164,7 @@ struct Output {
 pub struct Keymap {
     layouts: Vec<Layout>,
     settings: Settings,
+    chords: Vec<Chord>,
     base: u8,
     /// Active layers above `base`, the last one is on top.
     stack: Vec<u8>,
@@ -158,6 +192,16 @@ impl Keymap {
         Self {
             layouts: config.layouts.clone(),
             settings: config.settings,
+            chords: config
+                .combos
+                .iter()
+                // Fits the bit mask of `chord_match`.
+                .filter(|combo| (2..=32).contains(&combo.keys.len()))
+                .filter_map(|combo| {
+                    let action = *combo.action.key_action()?;
+                    Some(Chord { keys: combo.keys.iter().map(|key| key.ident).collect(), action })
+                })
+                .collect(),
             base: 0,
             stack: Vec::new(),
             queue: VecDeque::new(),
@@ -263,12 +307,12 @@ impl Keymap {
     }
 
     /// Pressed keys with the actions they were pressed as, keys waiting for a tap-hold decision included
-    /// (as [`KeyAction::ModTap`] or [`KeyAction::LayerTap`]).
+    /// (as [`KeyAction::ModTap`] or [`KeyAction::LayerTap`]); every key of a chord is the chord action.
     pub fn held(&self) -> impl Iterator<Item = (KeyId, KeyAction)> + '_ {
         self.held.iter().map(|held| (held.key, held.action))
     }
 
-    /// Nothing waits: no undecided tap-hold key, no queued event, no report change.
+    /// Nothing waits: no undecided tap-hold key or chord, no queued event, no report change.
     pub fn is_idle(&self) -> bool {
         self.undecided.is_none() && self.queue.is_empty() && self.output.is_empty()
     }
@@ -283,9 +327,21 @@ impl Keymap {
                 continue;
             }
 
-            let Some(event) = self.queue.pop_front() else {
+            let Some(&event) = self.queue.front() else {
                 return;
             };
+            if event.pressed && !self.chords.is_empty() && !self.is_held(event.key) {
+                match self.decide_chord(now) {
+                    ChordDecision::Wait => return,
+                    ChordDecision::Fire { chord, end } => {
+                        self.fire_chord(chord, end);
+                        continue;
+                    }
+                    ChordDecision::None => {}
+                }
+            }
+
+            self.queue.pop_front();
             if event.pressed {
                 self.press(event);
             } else {
@@ -316,6 +372,104 @@ impl Keymap {
         (now.wrapping_sub(undecided.time) >= term).then_some(Decision::Hold)
     }
 
+    /// Looks at the presses at the front of the queue, then at the clock.
+    fn decide_chord(&self, now: u32) -> ChordDecision {
+        let term = self.settings.combo_term_ms as u32;
+        let start = self.queue[0].time;
+        // The longest complete chord so far, as (chord, end): it waits while a longer one may come.
+        let mut complete = None;
+        let mut ended = false;
+        for (index, event) in self.queue.iter().enumerate() {
+            if event.time.wrapping_sub(start) >= term {
+                ended = true;
+                break;
+            }
+            if !event.pressed {
+                // A key pressed before the chord, released while typing on: it doesn't break the chord.
+                if self.queue.iter().take(index).any(|earlier| earlier.pressed && earlier.key == event.key) {
+                    ended = true;
+                    break;
+                }
+                continue;
+            }
+            let end = index + 1;
+            match self.chord_state(end) {
+                (None, false) => {
+                    ended = true;
+                    break;
+                }
+                (Some(chord), false) => return ChordDecision::Fire { chord, end },
+                (Some(chord), true) => complete = Some((chord, end)),
+                (None, true) => {}
+            }
+        }
+        if !ended && now.wrapping_sub(start) < term {
+            return ChordDecision::Wait;
+        }
+        complete.map_or(ChordDecision::None, |(chord, end)| ChordDecision::Fire { chord, end })
+    }
+
+    /// For the presses among the first `end` queued events: a chord they make, whether a longer one may
+    /// still be pressed.
+    fn chord_state(&self, end: usize) -> (Option<usize>, bool) {
+        let mut done = None;
+        let mut pending = false;
+        for (index, chord) in self.chords.iter().enumerate() {
+            match self.chord_match(chord, end) {
+                Some(true) => done = done.or(Some(index)),
+                Some(false) => pending = true,
+                None => {}
+            }
+        }
+        (done, pending)
+    }
+
+    /// Whether the presses among the first `end` queued events are keys of `chord`, each one a different key
+    /// of it: `Some(true)` if they are all of its keys.
+    fn chord_match(&self, chord: &Chord, end: usize) -> Option<bool> {
+        let mut used = 0u32;
+        for event in self.queue.iter().take(end).filter(|event| event.pressed) {
+            let (coord, action) = (event.key.coord(), self.lookup(event.key));
+            let free = |index: usize, ident: &ComboKeyIdent, by_coord: bool| {
+                used & (1 << index) == 0
+                    && matches!(ident, ComboKeyIdent::Coord { .. }) == by_coord
+                    && ident.matches(coord, &action)
+            };
+            // The position first: an action ident taken by a key that has its own position ident in the chord
+            // could leave no ident for another key of that action.
+            let index = [true, false]
+                .into_iter()
+                .find_map(|by_coord| chord.keys.iter().enumerate().position(|(index, ident)| free(index, ident, by_coord)))?;
+            used |= 1 << index;
+        }
+        Some(used.count_ones() as usize == chord.keys.len())
+    }
+
+    /// Replaces the presses among the first `end` queued events with the action of `chord`, held by the first
+    /// key; the releases among them happened before the chord was complete, so they go first.
+    fn fire_chord(&mut self, chord: usize, end: usize) {
+        let action = self.chords[chord].action;
+        let events: Vec<Event> = self.queue.drain(..end).collect();
+        for &event in events.iter().filter(|event| !event.pressed) {
+            self.release(event);
+        }
+
+        let presses = || events.iter().filter(|event| event.pressed);
+        let (Some(&first), Some(&last)) = (presses().next(), presses().next_back()) else {
+            return;
+        };
+        for event in presses() {
+            self.changes.push(Change { key: event.key, action, pressed: true });
+            let effect = if event.key == first.key { Effect::None } else { Effect::Chord(first.key) };
+            self.held.push(Held { key: event.key, action, effect });
+        }
+        // Pressed once the chord is complete.
+        let effect = self.apply(Event { key: first.key, pressed: true, time: last.time }, action);
+        if let Some(held) = self.held.iter_mut().find(|held| held.key == first.key) {
+            held.effect = effect;
+        }
+    }
+
     fn resolve(&mut self, undecided: Undecided, decision: Decision) {
         self.undecided = None;
         let effect = match (decision, undecided.hold) {
@@ -332,13 +486,18 @@ impl Keymap {
     }
 
     fn press(&mut self, event: Event) {
-        if self.held.iter().any(|held| held.key == event.key) {
+        if self.is_held(event.key) {
             return;
         }
         let action = self.lookup(event.key);
         self.changes.push(Change { key: event.key, action, pressed: true });
+        let effect = self.apply(event, action);
+        self.held.push(Held { key: event.key, action, effect });
+    }
 
-        let effect = match action {
+    /// Starts what `action` of the pressed key does.
+    fn apply(&mut self, event: Event, action: KeyAction) -> Effect {
+        match action {
             KeyAction::Key(_) | KeyAction::KeyWithMod(..) => {
                 self.last_typed = Some(event.time);
                 self.output_press(event.key, action)
@@ -368,8 +527,7 @@ impl Keymap {
             KeyAction::BtPrev => self.bt_command(BtCommand::Prev),
             KeyAction::BtClear => self.bt_command(BtCommand::Clear),
             KeyAction::Toggle(_) | KeyAction::None | KeyAction::Transparent => Effect::None,
-        };
-        self.held.push(Held { key: event.key, action, effect });
+        }
     }
 
     fn release(&mut self, event: Event) {
@@ -380,15 +538,29 @@ impl Keymap {
         let held = self.held.remove(index);
         self.changes.push(Change { key: event.key, action: held.action, pressed: false });
 
-        match held.effect {
-            Effect::Report => self.output.push_back(Output { key: event.key, action: None }),
+        // The first key released of a chord releases the chord action, the others then do nothing.
+        let (owner, effect) = match held.effect {
+            Effect::Chord(owner) => {
+                let effect = self.held.iter_mut().find(|held| held.key == owner).map(|held| &mut held.effect);
+                (owner, effect.map_or(Effect::None, |effect| core::mem::replace(effect, Effect::None)))
+            }
+            effect => (event.key, effect),
+        };
+        for other in &mut self.held {
+            if other.effect == Effect::Chord(owner) {
+                other.effect = Effect::None;
+            }
+        }
+
+        match effect {
+            Effect::Report => self.output.push_back(Output { key: owner, action: None }),
             Effect::Layer(layer) => {
                 if let Some(index) = self.stack.iter().rposition(|&active| active == layer) {
                     self.stack.remove(index);
                 }
             }
             // `run` decides before it processes the release.
-            Effect::None | Effect::Undecided => {}
+            Effect::None | Effect::Undecided | Effect::Chord(_) => {}
         }
     }
 
@@ -411,6 +583,10 @@ impl Keymap {
     fn bt_command(&mut self, command: BtCommand) -> Effect {
         self.bt_commands.push_back(command);
         Effect::None
+    }
+
+    fn is_held(&self, key: KeyId) -> bool {
+        self.held.iter().any(|held| held.key == key)
     }
 
     fn has_layout(&self, index: u8) -> bool {
@@ -450,7 +626,7 @@ mod tests {
     use alloc::vec;
 
     use super::*;
-    use crate::config::{JoystickButtons, CONFIG_VERSION};
+    use crate::config::{Combo, ComboAction, ComboKey, JoystickButtons, CONFIG_VERSION};
 
     const A: KeyId = KeyId::Matrix { x: 0, y: 0 };
     const B: KeyId = KeyId::Matrix { x: 1, y: 0 };
@@ -470,6 +646,7 @@ mod tests {
 
     const TERM: u32 = 200;
     const IDLE: u32 = 150;
+    const COMBO_TERM: u32 = 50;
 
     fn key(key: Key) -> KeyAction {
         KeyAction::Key(key)
@@ -478,6 +655,26 @@ mod tests {
     /// Layer 0: a b c Ctrl/F LT1/Space MO1 TG2 TO2 Shift/J BT2; layer 1: 1 . 3 ... BtNext (`.` transparent);
     /// layer 2: x . . and TO0 on the TO2 key; layer 2 joystick stick is transparent.
     fn keymap() -> Keymap {
+        keymap_with(vec![])
+    }
+
+    /// [`keymap`] with chords: A+B is Esc, A+B+C is Tab, Ctrl/F+Shift/J is Enter, `1`+C is TG2.
+    fn chord_keymap() -> Keymap {
+        let coord = |key: KeyId| {
+            let (x, y) = key.coord().unwrap();
+            ComboKey { ident: ComboKeyIdent::Coord { x, y }, count: 0 }
+        };
+        let chord = |keys, action| Combo { keys, action: ComboAction::Action(action) };
+        let one = ComboKey { ident: ComboKeyIdent::Action(key(Key::Num1)), count: 0 };
+        keymap_with(vec![
+            chord(vec![coord(A), coord(B)], key(Key::Escape)),
+            chord(vec![coord(A), coord(B), coord(C)], key(Key::Tab)),
+            chord(vec![coord(CTRL_F), coord(SHIFT_J)], key(Key::Enter)),
+            chord(vec![one, coord(C)], KeyAction::Toggle(2)),
+        ])
+    }
+
+    fn keymap_with(combos: Vec<Combo>) -> Keymap {
         let base = vec![
             key(Key::A),
             key(Key::B),
@@ -512,8 +709,13 @@ mod tests {
                     ..JoystickButtons::default()
                 }),
             ],
-            combos: vec![],
-            settings: Settings { tapping_term_ms: TERM as u16, require_prior_idle_ms: IDLE as u16 },
+            combos,
+            settings: Settings {
+                tapping_term_ms: TERM as u16,
+                require_prior_idle_ms: IDLE as u16,
+                combo_term_ms: COMBO_TERM as u16,
+                ..Settings::default()
+            },
         };
         config.validate().unwrap();
         Keymap::new(&config)
@@ -529,6 +731,10 @@ mod tests {
     impl Run {
         fn new() -> Self {
             Self { keymap: keymap(), now: 1000, reports: Vec::new() }
+        }
+
+        fn chords() -> Self {
+            Self { keymap: chord_keymap(), now: 1000, reports: Vec::new() }
         }
 
         fn at(&mut self, now: u32) -> &mut Self {
@@ -850,5 +1056,118 @@ mod tests {
         assert!(!run.keymap.take_layers_changed());
         run.down(A).up(A).up(MO1).up(TG2).up(TO2).flush();
         assert_eq!(run.sent(), [vec![key(Key::A)], vec![]]);
+    }
+
+    #[test]
+    fn chord_waits_for_a_longer_one() {
+        let mut run = Run::chords();
+        run.down(A).at(1010).down(B).report();
+        assert!(run.keymap.report().next().is_none(), "A+B+C may still come");
+        assert!(!run.keymap.is_idle());
+        run.at(1000 + COMBO_TERM).report();
+        assert_eq!(run.sent(), [vec![key(Key::Escape)]]);
+        // The first key released releases the chord, the other one does nothing.
+        run.at(1100).up(B).report().at(1120).up(A).flush();
+        assert_eq!(run.sent(), [vec![key(Key::Escape)], vec![]]);
+        assert!(run.keymap.is_idle());
+        let changes: Vec<Change> = run.keymap.take_changes().collect();
+        let escape = key(Key::Escape);
+        assert_eq!(
+            changes,
+            [
+                Change { key: A, action: escape, pressed: true },
+                Change { key: B, action: escape, pressed: true },
+                Change { key: B, action: escape, pressed: false },
+                Change { key: A, action: escape, pressed: false },
+            ]
+        );
+    }
+
+    #[test]
+    fn longest_chord_fires_at_once() {
+        let mut run = Run::chords();
+        run.down(C).at(1010).down(A).at(1020).down(B).report();
+        assert_eq!(run.sent(), [vec![key(Key::Tab)]]);
+        run.at(1100).up(A).report();
+        // Pressed again alone, A is A again.
+        run.at(1300).down(A).at(1300 + COMBO_TERM).report().up(A).up(B).up(C).flush();
+        assert_eq!(run.sent(), [vec![key(Key::Tab)], vec![], vec![key(Key::A)], vec![]]);
+    }
+
+    #[test]
+    fn slow_chord_keys_are_ordinary() {
+        let mut run = Run::chords();
+        run.down(A).at(1000 + COMBO_TERM).down(B).at(1000 + 2 * COMBO_TERM).report().up(A).up(B).flush();
+        assert_eq!(run.sent(), [vec![key(Key::A)], vec![key(Key::A), key(Key::B)], vec![]]);
+    }
+
+    #[test]
+    fn other_key_or_release_breaks_a_chord() {
+        // A key of no chord: A is pressed at once, as what it was before MO1.
+        let mut run = Run::chords();
+        run.down(A).at(1010).down(MO1).report();
+        assert_eq!(run.sent(), [vec![key(Key::A)]]);
+        assert_eq!(run.keymap.top_layer(), 1);
+
+        // A tapped fast is A.
+        let mut run = Run::chords();
+        run.down(A).at(1010).up(A).flush();
+        assert_eq!(run.sent(), [vec![key(Key::A)], vec![]]);
+
+        // A, B, then A released before C: the A+B chord.
+        let mut run = Run::chords();
+        run.down(A).at(1010).down(B).at(1020).up(A).flush();
+        assert_eq!(run.sent(), [vec![key(Key::Escape)], vec![]]);
+    }
+
+    #[test]
+    fn release_of_an_earlier_key_doesnt_break_a_chord() {
+        let mut run = Run::chords();
+        // Rolling typing: the stick (middle button) is released between A and B.
+        run.down(STICK).report().at(1100).down(A).at(1110).up(STICK).at(1120).down(B).at(1100 + COMBO_TERM).flush();
+        let middle = KeyAction::MouseKey(crate::keys::MouseKey::Middle);
+        // The release and the chord press are different keys, they go in one report.
+        assert_eq!(run.sent(), [vec![middle], vec![key(Key::Escape)]]);
+        let changes: Vec<Change> = run.keymap.take_changes().collect();
+        assert_eq!(changes[1], Change { key: STICK, action: middle, pressed: false }, "the release goes first");
+        assert_eq!(changes[2], Change { key: A, action: key(Key::Escape), pressed: true });
+    }
+
+    #[test]
+    fn tap_hold_keys_make_a_chord() {
+        let mut run = Run::chords();
+        run.down(SHIFT_J).at(1020).down(CTRL_F).report().at(1000 + TERM + 10).report();
+        assert_eq!(run.sent(), [vec![key(Key::Enter)]]);
+        run.up(CTRL_F).up(SHIFT_J).flush();
+        assert_eq!(run.sent(), [vec![key(Key::Enter)], vec![]]);
+
+        // Alone it's a tap-hold key again.
+        run.at(2000).down(CTRL_F).at(2000 + TERM).report();
+        assert_eq!(run.sent(), [vec![key(Key::Enter)], vec![], vec![ctrl()]]);
+    }
+
+    #[test]
+    fn chord_key_by_position_leaves_the_action_ident_to_another_key() {
+        // A and B both type `a`, the chord is any `a` key and the A position: A pressed first is the position.
+        let mut keymap = chord_keymap();
+        keymap.layouts[0].rows[0][1] = key(Key::A);
+        let keys = vec![ComboKeyIdent::Action(key(Key::A)), ComboKeyIdent::Coord { x: 0, y: 0 }];
+        keymap.chords = vec![Chord { keys, action: key(Key::Escape) }];
+        let mut run = Run { keymap, now: 1000, reports: Vec::new() };
+        run.down(A).at(1010).down(B).report();
+        assert_eq!(run.sent(), [vec![key(Key::Escape)]]);
+    }
+
+    #[test]
+    fn chord_key_matched_by_action_in_the_current_layer() {
+        let mut run = Run::chords();
+        // A is `1` in layer 1: `1`+C toggles layer 2, once A+B+C can't come any more.
+        run.down(MO1).down(A).at(1010).down(C);
+        assert!(!run.keymap.take_layers_changed());
+        run.at(1000 + COMBO_TERM);
+        assert!(run.keymap.take_layers_changed());
+        run.up(A).up(C).up(MO1).flush();
+        assert_eq!(run.keymap.top_layer(), 2);
+        assert!(run.sent().is_empty());
     }
 }

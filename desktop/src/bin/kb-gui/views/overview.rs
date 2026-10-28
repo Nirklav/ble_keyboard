@@ -1,5 +1,7 @@
 //! Overview: keyboard info, layouts, the way to the combos and the settings.
 
+use std::ops::RangeInclusive;
+
 use eframe::egui;
 use protocol::hid;
 use protocol::config::{CONFIG_VERSION, MAX_LAYOUTS, Settings};
@@ -21,7 +23,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     ui.add_space(theme::GAP_XS);
     let count = app.doc.config.combos.len();
     let subtitle = format!("{count} configured + factory reset");
-    if nav_button(ui, NAV_SIZE, "Special combos", &subtitle).clicked() {
+    if nav_button(ui, NAV_SIZE, "Combos and chords", &subtitle).clicked() {
         app.go(Screen::Combos);
     }
     ui.add_space(theme::GAP_XL);
@@ -31,32 +33,59 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     settings(app, ui);
 }
 
-/// Timing of the mod-tap and layer-tap keys.
+/// Timing of the keys, sleep and the joystick cursor.
 fn settings(app: &mut App, ui: &mut egui::Ui) {
     let settings = &mut app.doc.config.settings;
     egui::Grid::new("settings").num_columns(3).spacing([theme::GAP_M, theme::GAP_S]).show(ui, |ui| {
-        ui.label("Tapping term");
-        let term = egui::DragValue::new(&mut settings.tapping_term_ms).range(Settings::TAPPING_TERM_MS).suffix(" ms");
-        ui.add(term);
-        ui.weak("A mod-tap or layer-tap key held longer is a hold.");
-        ui.end_row();
+        group(ui, "Keys");
+        let hint = "A mod-tap or layer-tap key held longer is a hold.";
+        number(ui, "Tapping term", &mut settings.tapping_term_ms, Settings::TAPPING_TERM_MS, " ms", hint);
+        let hint = "Pressed this soon after a typed key, it's a tap at once; 0 turns this off.";
+        number(ui, "Prior idle", &mut settings.require_prior_idle_ms, Settings::REQUIRE_PRIOR_IDLE_MS, " ms", hint);
+        let hint = "The keys of a chord must all be pressed within this time.";
+        number(ui, "Combo term", &mut settings.combo_term_ms, Settings::COMBO_TERM_MS, " ms", hint);
+        let hint = "A key change is ignored this long after the previous one: contact bounce.";
+        number(ui, "Debounce", &mut settings.debounce_ms, Settings::DEBOUNCE_MS, " ms", hint);
 
-        ui.label("Prior idle");
-        let idle = egui::DragValue::new(&mut settings.require_prior_idle_ms)
-            .range(Settings::REQUIRE_PRIOR_IDLE_MS)
-            .suffix(" ms");
-        ui.add(idle);
-        ui.weak("Pressed this soon after a typed key, it's a tap at once; 0 turns this off.");
+        group(ui, "Sleep");
+        let hint = "Deep sleep after this long without activity while a host is connected.";
+        number(ui, "Connected", &mut settings.sleep_connected_s, Settings::SLEEP_S, " s", hint);
+        let hint = "The same while no host is connected.";
+        number(ui, "Disconnected", &mut settings.sleep_disconnected_s, Settings::SLEEP_S, " s", hint);
+
+        group(ui, "Joystick");
+        let hint = "Cursor speed at full deflection.";
+        number(ui, "Speed", &mut settings.joystick_speed, Settings::JOYSTICK_SPEED, " px/s", hint);
+        let hint = "Time to reach the speed of the deflection, 0 is at once.";
+        number(ui, "Ramp", &mut settings.joystick_ramp_ms, Settings::JOYSTICK_RAMP_MS, " ms", hint);
+        ui.label("Invert");
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut settings.joystick_invert_x, "X");
+            ui.checkbox(&mut settings.joystick_invert_y, "Y");
+        });
+        ui.weak("Moves the cursor the other way along the axis.");
         ui.end_row();
     });
     if *settings != Settings::default() {
         ui.add_space(theme::GAP_XS);
-        let defaults = Settings::default();
-        let hover = format!("{} ms and {} ms", defaults.tapping_term_ms, defaults.require_prior_idle_ms);
-        if ui.button("Reset to defaults").on_hover_text(hover).clicked() {
-            *settings = defaults;
+        if ui.button("Reset to defaults").on_hover_text("Every setting to its default value").clicked() {
+            *settings = Settings::default();
         }
     }
+}
+
+/// Group heading row of the settings grid.
+fn group(ui: &mut egui::Ui, name: &str) {
+    ui.strong(name);
+    ui.end_row();
+}
+
+/// Settings grid row of a number in `range`.
+fn number(ui: &mut egui::Ui, name: &str, value: &mut u16, range: RangeInclusive<u16>, suffix: &str, hint: &str) {
+    ui.label(name);
+    ui.add(egui::DragValue::new(value).range(range).suffix(suffix));
+    ui.weak(hint);
+    ui.end_row();
 }
 
 /// Info of the connected keyboard in one line, nothing offline.

@@ -1,8 +1,10 @@
-//! Key action editor: a side panel editing one layout key, joystick button or combo key matched by action.
+//! Key action editor: a side panel editing one layout key, joystick button, combo key matched by action
+//! or chord action.
 
 use eframe::egui;
-use protocol::config::{ComboKeyIdent, KeyAction};
+use protocol::config::{ComboAction, ComboKeyIdent, KeyAction};
 use protocol::keys::{Key, KeyMod, MediaKey};
+use protocol::motion::{Velocity, TRAVEL_UNIT_MS};
 
 use crate::app::{App, EditTarget};
 use crate::editing::{self, ActionKind};
@@ -44,13 +46,21 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
             let ComboKeyIdent::Action(action) = ident else { unreachable!() };
             (place, action, None)
         }
+        EditTarget::ComboAction { combo } => {
+            let place = format!("Combo {}, chord action", combo + 1);
+            // Not a chord any more: the editor is closed at the end of the frame, the action is kept.
+            let ComboAction::Action(action) = &mut config.combos[combo].action else {
+                return;
+            };
+            (place, action, None)
+        }
     };
 
     let mut close = ui.input(|i| i.key_pressed(egui::Key::Escape));
     ui.horizontal(|ui| {
         let title = match labels::action_label(action) {
             label if label.is_empty() => match editor.target {
-                EditTarget::ComboKey { .. } => "No action".to_string(),
+                EditTarget::ComboKey { .. } | EditTarget::ComboAction { .. } => "No action".to_string(),
                 _ => "Empty key".to_string(),
             },
             label => label,
@@ -67,9 +77,16 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     ui.separator();
     ui.add_space(theme::GAP_XS);
 
-    if matches!(editor.target, EditTarget::ComboKey { .. }) {
-        ui.weak("The combo key matches any key or joystick button registered as this action in the current layout.");
-        ui.add_space(theme::GAP_S);
+    match editor.target {
+        EditTarget::ComboKey { .. } => {
+            ui.weak("The combo key matches any key or joystick button registered as this action in the current layout.");
+            ui.add_space(theme::GAP_S);
+        }
+        EditTarget::ComboAction { .. } => {
+            ui.weak("The chord keys pressed together do this action while held, instead of their own ones.");
+            ui.add_space(theme::GAP_S);
+        }
+        _ => {}
     }
     if let (Some(error), KeyAction::Fn { .. }) = (&fn_error, &action) {
         ui.colored_label(ui.visuals().warn_fg_color, error);
@@ -79,6 +96,10 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     let hidden: &[ActionKind] = match editor.target {
         EditTarget::JoystickButton { .. } => &[ActionKind::Fn],
         EditTarget::ComboKey { .. } => &[ActionKind::Transparent],
+        // See `ValidationError::ChordActionKind`.
+        EditTarget::ComboAction { .. } => {
+            &[ActionKind::Fn, ActionKind::Transparent, ActionKind::ModTap, ActionKind::LayerTap]
+        }
         _ => &[],
     };
     action_editor(ui, action, &layouts, &mut editor.search, &mut editor.scroll_to_current, hidden);
@@ -155,14 +176,18 @@ fn action_editor(
                 ui.add(egui::DragValue::new(dy).range(i8::MIN..=i8::MAX));
                 ui.end_row();
             });
-            ui.weak("Cursor move per report while held; negative dy is up.");
+            let speed = Velocity::of(&KeyAction::MouseTravel { dx: *dx, dy: *dy });
+            ui.weak(format!(
+                "Cursor speed while held: pixels per {TRAVEL_UNIT_MS} ms, ({}, {}) px/s; negative dy is up.",
+                speed.x, speed.y
+            ));
         }
         KeyAction::MouseScroll { dy } => {
             ui.horizontal(|ui| {
                 ui.label("Up (dy):");
                 ui.add(egui::DragValue::new(dy).range(i8::MIN..=i8::MAX));
             });
-            ui.weak("Wheel scroll per report while held; positive is up.");
+            ui.weak("A press scrolls one step, held it scrolls this many steps per second; positive is up.");
         }
         KeyAction::Fn { temporary, permanent } => {
             egui::Grid::new("fn_layouts").num_columns(2).show(ui, |ui| {

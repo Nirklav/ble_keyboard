@@ -1,5 +1,7 @@
 use protocol::config::{Combo, ComboAction, ComboKey, ComboKeyIdent, Config, JoystickButtons, KeyAction, Settings, CONFIG_VERSION};
 
+use protocol::motion::Velocity;
+
 use crate::bt::{Key, KeyMod, MouseKey};
 use crate::bt::ble_mouse_keyboard::BleMouseKeyboard;
 
@@ -27,9 +29,10 @@ macro_rules! f {
     };
 }
 
-/// Adds the held key to the reports. Layer, tap-hold and BLE profile actions are resolved by
-/// [`protocol::keymap::Keymap`] and never reach the report, they do nothing here.
-pub fn press(action: &KeyAction, keyboard: &mut BleMouseKeyboard) {
+/// Adds the held key to the reports. Mouse travel and scroll add their speed to `velocity` instead,
+/// it's turned into the report by the time, see [`protocol::motion`]. Layer, tap-hold and BLE profile
+/// actions are resolved by [`protocol::keymap::Keymap`] and never reach the report, they do nothing here.
+pub fn press(action: &KeyAction, keyboard: &mut BleMouseKeyboard, velocity: &mut Velocity) {
     match action {
         KeyAction::Key(key) => keyboard.press_key(*key),
         KeyAction::KeyWithMod(key, key_mod) => {
@@ -39,8 +42,7 @@ pub fn press(action: &KeyAction, keyboard: &mut BleMouseKeyboard) {
         KeyAction::Mod(key_mod) => keyboard.press_key_mod(*key_mod),
         KeyAction::Media(media_key) => keyboard.press_media_key(*media_key),
         KeyAction::MouseKey(mouse_key) => keyboard.press_mouse(*mouse_key),
-        KeyAction::MouseTravel { dx, dy } => keyboard.travel_mouse_cursor(*dx, *dy),
-        KeyAction::MouseScroll { dy } => keyboard.travel_mouse_wheel(*dy),
+        KeyAction::MouseTravel { .. } | KeyAction::MouseScroll { .. } => *velocity += Velocity::of(action),
         KeyAction::Fn { .. }
         | KeyAction::None
         | KeyAction::Transparent
@@ -89,8 +91,8 @@ pub fn default_config() -> Config {
                 name: "GAME".to_string(),
                 rows: vec![
                     vec![k!(Escape),   k!(Num1),      k!(Num2),      k!(Num3),    k!(Num4),      k!(Num5),  k!(Num6),  k!(RightBracket),                          k!(Minus),                                k!(Equal)],
-                    vec![k!(Q),        k!(W),         k!(E),         k!(R),       k!(T),         k!(Y),     k!(U),     k!(I),                                     k!(O),                                    KeyAction::MouseScroll { dy: 10 }],
-                    vec![k!(A),        k!(S),         k!(D),         k!(F),       k!(G),         k!(H),     k!(J),     k!(K),                                     k!(L),                                    KeyAction::MouseScroll { dy: -10 }],
+                    vec![k!(Q),        k!(W),         k!(E),         k!(R),       k!(T),         k!(Y),     k!(U),     k!(I),                                     k!(O),                                    KeyAction::MouseScroll { dy: 2 }],
+                    vec![k!(A),        k!(S),         k!(D),         k!(F),       k!(G),         k!(H),     k!(J),     k!(K),                                     k!(L),                                    KeyAction::MouseScroll { dy: -2 }],
                     vec![k!(Z),        k!(X),         k!(C),         k!(V),       k!(B),         k!(N),     k!(M),     KeyAction::MouseKey(MouseKey::Left),       KeyAction::MouseTravel { dx: 0, dy:-10 }, KeyAction::MouseKey(MouseKey::Right)],
                     vec![m!(LeftCtrl), m!(LeftShift), f!(1, 0),      m!(LeftAlt), k!(Backspace), k!(Space), k!(Enter), KeyAction::MouseTravel { dx: -10, dy: 0 }, KeyAction::MouseTravel { dx: 0, dy: 10 }, KeyAction::MouseTravel { dx: 10, dy: 0 }],
                 ],

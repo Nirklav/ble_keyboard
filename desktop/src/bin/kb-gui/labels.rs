@@ -276,14 +276,18 @@ pub fn combo_key_label(key: &ComboKey, layout: Option<&Layout>) -> String {
     with_count(combo_ident_label(key, layout), key.count)
 }
 
-/// Short combo key for a chip, e.g. `Fn 1/2 hold` or `Esc ×5`: a position is named by the action
-/// of that key in `layout`, the coordinates only if the key is empty.
+/// Short combo key for a chip, e.g. `Fn 1/2 hold` or `Esc ×5`, see [`combo_chord_key_chip`].
 pub fn combo_key_chip(key: &ComboKey, layout: Option<&Layout>) -> String {
-    let ident = match combo_coord_action(key, layout) {
+    with_count(combo_chord_key_chip(key, layout), key.count)
+}
+
+/// Short combo key without the count, as a chord key is: a position is named by the action of that key
+/// in `layout`, the coordinates only if the key is empty.
+pub fn combo_chord_key_chip(key: &ComboKey, layout: Option<&Layout>) -> String {
+    match combo_coord_action(key, layout) {
         Some((label, _)) => label,
         None => combo_ident_short(key),
-    };
-    with_count(ident, key.count)
+    }
 }
 
 /// Label of the action at the position of a [`ComboKeyIdent::Coord`] key in `layout`, with the position;
@@ -325,6 +329,8 @@ pub fn combo_action_label(action: &ComboAction, layouts: &[String]) -> String {
         ComboAction::BtPrev => "Switch to the previous BLE profile".to_string(),
         ComboAction::BtClear => "Forget the host of the current BLE profile".to_string(),
         ComboAction::BtClearAll => "Forget the hosts of all BLE profiles".to_string(),
+        ComboAction::Action(KeyAction::None) => "Chord: nothing".to_string(),
+        ComboAction::Action(action) => format!("Chord: {}", action_label(&action)),
     }
 }
 

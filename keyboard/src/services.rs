@@ -22,9 +22,10 @@ pub struct Services<const W: usize, const H: usize> {
 
 impl<const W: usize, const H: usize> Services<W, H> {
     pub fn new(keyboard: BleMouseKeyboard,
-        key_matrix: KeyMatrix<W, H>,
+        mut key_matrix: KeyMatrix<W, H>,
         display: Display,
         config: Config) -> Self {
+        key_matrix.set_debounce_ms(config.settings.debounce_ms);
         Self {
             keyboard,
             key_matrix,

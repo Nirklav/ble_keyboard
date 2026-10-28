@@ -1,5 +1,5 @@
-//! Combos: the list of special key combinations and the editor of one, keys picked on the grid
-//! or matched by action.
+//! Combos: the list of key combinations (special ones and chords) and the editor of one, keys picked
+//! on the grid or matched by action.
 
 use eframe::egui;
 use protocol::config::{
@@ -170,10 +170,34 @@ fn editor(app: &mut App, ui: &mut egui::Ui, index: usize) -> bool {
         .collect();
     let mut remove = false;
     let combo = &mut app.doc.config.combos[index];
+    let was_chord = combo.is_chord();
+    let mut edit_action = false;
     ui.horizontal(|ui| {
         ui.label("Action:");
         action_select(ui, index, &mut combo.action, &layouts);
+        if combo.is_chord() && ui.button("Edit...").clicked() {
+            edit_action = true;
+        }
     });
+    // A chord has 2+ held keys; a special combination needs presses.
+    if combo.is_chord() && !was_chord {
+        combo.keys.iter_mut().for_each(|key| key.count = 0);
+        if combo.keys.len() < 2
+            && let Ok(key) = editing::add_combo_key(combo)
+        {
+            app.picking = Some((index, key));
+        }
+        edit_action = true;
+    } else if was_chord && !combo.is_chord() && let Some(last) = combo.keys.last_mut() {
+        last.count = 1;
+    }
+    if edit_action {
+        app.key_editor = Some(KeyEditor::open(EditTarget::ComboAction { combo: index }, app.key_editor.take()));
+    }
+    let chord = combo.is_chord();
+    if chord {
+        ui.weak("A chord: the keys pressed together, within the combo term of the settings, do the action instead.");
+    }
 
     ui.add_space(theme::GAP_XS);
     let mut remove_key = None;
@@ -219,16 +243,21 @@ fn editor(app: &mut App, ui: &mut egui::Ui, index: usize) -> bool {
                 }
             }
 
-            let count = egui::DragValue::new(&mut combo_key.count)
-                .range(0..=u8::MAX)
-                .custom_formatter(|n, _| if n == 0.0 { "hold".to_string() } else { format!("×{n}") })
-                .custom_parser(|text| match text.trim() {
-                    "hold" => Some(0.0),
-                    text => text.trim_start_matches(['x', '×']).parse().ok(),
-                });
-            ui.add(count).on_hover_text("Number of presses (press + release); 0 means the key must be held");
+            if chord {
+                ui.weak("press");
+            } else {
+                let count = egui::DragValue::new(&mut combo_key.count)
+                    .range(0..=u8::MAX)
+                    .custom_formatter(|n, _| if n == 0.0 { "hold".to_string() } else { format!("×{n}") })
+                    .custom_parser(|text| match text.trim() {
+                        "hold" => Some(0.0),
+                        text => text.trim_start_matches(['x', '×']).parse().ok(),
+                    });
+                ui.add(count).on_hover_text("Number of presses (press + release); 0 means the key must be held");
+            }
 
-            if ui.add_enabled(keys > 1, egui::Button::new("×")).on_hover_text("Remove the key").clicked() {
+            let min_keys = if chord { 2 } else { 1 };
+            if ui.add_enabled(keys > min_keys, egui::Button::new("×")).on_hover_text("Remove the key").clicked() {
                 remove_key = Some(key);
             }
             ui.end_row();
@@ -258,9 +287,11 @@ fn editor(app: &mut App, ui: &mut egui::Ui, index: usize) -> bool {
     remove
 }
 
-/// Combo box of the combo action, with the layout for `SetLayout`.
+/// Combo box of the combo action, with the layout for `SetLayout`; the action of a chord is edited
+/// in the editor panel.
 fn action_select(ui: &mut egui::Ui, index: usize, action: &mut ComboAction, layouts: &[String]) {
     let kinds = [
+        (ComboAction::Action(KeyAction::None), "Chord: key action"),
         (ComboAction::SwitchLayout, "Switch layout"),
         (ComboAction::SetLayout(0), "Set layout"),
         (ComboAction::ResetConfig, "Reset config"),
@@ -274,7 +305,10 @@ fn action_select(ui: &mut egui::Ui, index: usize, action: &mut ComboAction, layo
     let same_kind = |a: &ComboAction, b: &ComboAction| std::mem::discriminant(a) == std::mem::discriminant(b);
     let current = kinds.iter().find(|(kind, _)| same_kind(kind, action)).map_or("?", |(_, name)| *name);
 
-    egui::ComboBox::from_id_salt(("combo_action", index)).selected_text(current).show_ui(ui, |ui| {
+    // All the kinds without scrolling if the window is tall enough, like the kind selector of the action editor.
+    let below = ui.ctx().content_rect().bottom() - ui.cursor().top() - 3.0 * ui.spacing().interact_size.y;
+    let combo = egui::ComboBox::from_id_salt(("combo_action", index)).selected_text(current).height(below.max(120.0));
+    combo.show_ui(ui, |ui| {
         for (kind, name) in kinds {
             if ui.selectable_label(same_kind(&kind, action), name).clicked() && !same_kind(&kind, action) {
                 *action = kind;
@@ -289,7 +323,8 @@ fn action_select(ui: &mut egui::Ui, index: usize, action: &mut ComboAction, layo
     ui.weak(labels::combo_action_label(action, layouts));
 }
 
-/// Chips of the keys of `combo`, keys named after the first layout.
+/// Chips of the keys of `combo`, keys named after the first layout; chord keys have no count.
 fn chips(config: &Config, combo: &Combo) -> Vec<String> {
-    combo.keys.iter().map(|key| labels::combo_key_chip(key, config.layouts.first())).collect()
+    let chip = if combo.is_chord() { labels::combo_chord_key_chip } else { labels::combo_key_chip };
+    combo.keys.iter().map(|key| chip(key, config.layouts.first())).collect()
 }

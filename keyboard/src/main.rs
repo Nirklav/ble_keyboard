@@ -34,7 +34,9 @@ use esp_idf_svc::hal::units::*;
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use log::{error, info};
+use protocol::config::Settings;
 use protocol::keymap::KeyId;
+use protocol::motion::{Motion, Velocity};
 use crate::bt::ble_mouse_keyboard::BleMouseKeyboard;
 use crate::display::Display;
 use crate::i2c_bus::SharedI2c;
@@ -53,9 +55,11 @@ const HEIGHT: usize = 5;
 /// Held at power-on, ignores the saved config: `Escape`.
 const BOOT_KEY: (usize, usize) = (0, 0);
 
-const IDLE_DELAY_TICKS: TickType = TickType::new_millis(15 * 1000);
-const DEEP_SLEEP_DISCONNECTED_TICKS: TickType = TickType::new_millis(1 * 60 * 1000);
-const DEEP_SLEEP_INACTIVE_TICKS: TickType = TickType::new_millis(5 * 60 * 1000);
+/// The loop goes idle after this long without activity, see [`protocol::config::Settings::SLEEP_S`].
+const IDLE_DELAY_MS: u64 = 15 * 1000;
+const IDLE_DELAY_TICKS: TickType = TickType::new_millis(IDLE_DELAY_MS);
+// The deep sleep timeouts are counted from the last activity, so they can't be shorter than the idle delay.
+const _: () = assert!(IDLE_DELAY_MS <= *Settings::SLEEP_S.start() as u64 * 1000);
 
 fn main() {
     esp_idf_sys::link_patches();
@@ -90,21 +94,28 @@ fn main_body() -> anyhow::Result<()> {
     // without further events; the keyboard waits for activity only once all keys are up and the keymap is idle.
     const DELAY_MS: u32 = 8;
     let start = Instant::now();
+    let mut motion = Motion::default();
     loop {
         // Wraps after 49 days, the keymap compares the times with wrapping.
         let now = start.elapsed().as_millis() as u32;
         let keymap = &mut svc.keymap;
         let mut all_up = !svc.key_matrix.register(|x, y, pressed| keymap.event(KeyId::Matrix { x, y }, pressed, now))?;
 
+        let mut velocity = Velocity::default();
         if let Some(joystick) = &mut joystick {
-            all_up &= !joystick.poll(&mut svc.keyboard, |button, pressed| keymap.event(KeyId::Joystick(button), pressed, now));
+            let settings = &svc.config.settings;
+            all_up &= !joystick.poll(settings, now, &mut velocity, |button, pressed| keymap.event(KeyId::Joystick(button), pressed, now));
         }
 
         keymap.tick(now);
         keymap.frame();
         for action in keymap.report() {
-            layout::press(action, &mut svc.keyboard);
+            layout::press(action, &mut svc.keyboard, &mut velocity);
         }
+        // Speeds are per second: the loop period doesn't change how fast the cursor moves.
+        let step = motion.step(velocity, now);
+        svc.keyboard.travel_mouse_cursor(step.x, step.y);
+        svc.keyboard.travel_mouse_wheel(step.wheel);
 
         let mut changed = false;
         for change in keymap.take_changes() {
@@ -168,16 +179,21 @@ fn wait_for_activity<const W: usize, const H: usize>(
     svc.keyboard.set_idle();
 
     // A connection not accepted (yet) is dropped soon, it doesn't keep the keyboard awake.
-    let deep_sleep_timeout = if svc.keyboard.host_connected() {
-        DEEP_SLEEP_INACTIVE_TICKS
+    // Counted from the last activity, the idle delay has passed already.
+    let settings = &svc.config.settings;
+    let deep_sleep_s = if svc.keyboard.host_connected() {
+        settings.sleep_connected_s
     } else {
-        DEEP_SLEEP_DISCONNECTED_TICKS
-    }
-    .into();
+        settings.sleep_disconnected_s
+    };
+    let deep_sleep_ms = deep_sleep_s as u64 * 1000;
+    // Zero at the shortest setting: the keyboard may sleep right away.
+    let mut timeout = TickType::new_millis(deep_sleep_ms.saturating_sub(IDLE_DELAY_MS)).into();
 
     // No deep sleep while the config app is connected; its pings don't wake the loop up,
-    // so the keyboard stays idle and checks again after another timeout.
-    while notification.wait(deep_sleep_timeout).is_none() {
+    // so the keyboard stays idle and checks again after the whole timeout (never zero, no busy loop).
+    while notification.wait(timeout).is_none() {
+        timeout = TickType::new_millis(deep_sleep_ms).into();
         if !svc.keyboard.config_service().session_active() {
             info!("entering deep sleep");
             // The display is not worth staying awake for.

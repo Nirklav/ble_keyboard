@@ -149,7 +149,7 @@ impl ActionKind {
             ActionKind::Media => KeyAction::Media(MediaKey::PlayPause),
             ActionKind::MouseKey => KeyAction::MouseKey(MouseKey::Left),
             ActionKind::MouseTravel => KeyAction::MouseTravel { dx: 0, dy: -10 },
-            ActionKind::MouseScroll => KeyAction::MouseScroll { dy: 10 },
+            ActionKind::MouseScroll => KeyAction::MouseScroll { dy: 2 },
             ActionKind::Fn => KeyAction::Fn { temporary: layer, permanent: layer },
             ActionKind::Momentary => KeyAction::Momentary(layer),
             ActionKind::Toggle => KeyAction::Toggle(layer),
@@ -206,8 +206,8 @@ pub fn duplicate_layout(config: &mut Config, index: usize) -> Result<usize, Stri
     add_layout(config, layout)
 }
 
-/// What points to layout `index`: layer keys and joystick buttons (Fn, MO, TG, TO, LT), `SetLayout` combos
-/// and combo keys matching such layer keys.
+/// What points to layout `index`: layer keys and joystick buttons (Fn, MO, TG, TO, LT), `SetLayout` combos,
+/// chords sending layer actions and combo keys matching layer keys.
 pub fn layout_references(config: &Config, index: usize) -> Vec<String> {
     let refers = |action: &KeyAction| action.layers().any(|layer| layer as usize == index);
     let kind = |action: &KeyAction| if matches!(action, KeyAction::Fn { .. }) { "Fn" } else { "Layer" };
@@ -235,6 +235,9 @@ pub fn layout_references(config: &Config, index: usize) -> Vec<String> {
     for (c, combo) in config.combos.iter().enumerate() {
         if combo.action == ComboAction::SetLayout(index as u8) {
             references.push(format!("combo {c}: SetLayout({index})"));
+        }
+        if combo.action.key_action().is_some_and(refers) {
+            references.push(format!("combo {c}: chord sending a layer action"));
         }
         if combo.keys.iter().any(|k| matches!(&k.ident, ComboKeyIdent::Action(action) if refers(action))) {
             references.push(format!("combo {c}: key matching a layer key"));
@@ -276,7 +279,7 @@ pub fn swap_layouts(config: &mut Config, a: usize, b: usize) {
 }
 
 /// Applies `map` to every layout index: layer keys and joystick buttons, `SetLayout` combos,
-/// combo keys matching layer keys.
+/// chord actions, combo keys matching layer keys.
 fn remap_layout_indices(config: &mut Config, map: impl Fn(u8) -> u8) {
     let remap = |action: &mut KeyAction| action.map_layers(&map);
     for layout in &mut config.layouts {
@@ -288,9 +291,7 @@ fn remap_layout_indices(config: &mut Config, map: impl Fn(u8) -> u8) {
         }
     }
     for combo in &mut config.combos {
-        if let ComboAction::SetLayout(index) = &mut combo.action {
-            *index = map(*index);
-        }
+        combo.action.map_layers(&map);
         for key in &mut combo.keys {
             if let ComboKeyIdent::Action(action) = &mut key.ident {
                 remap(action);
@@ -418,14 +419,18 @@ mod tests {
         config.layouts[0].rows[0][0] = KeyAction::LayerTap { layer: 2, tap: Key::Escape };
         config.layouts[0].joystick.stick = KeyAction::Toggle(2);
         config.combos[0].action = ComboAction::SetLayout(2);
+        config.combos[1].action = ComboAction::Action(KeyAction::To(2));
+        config.combos[1].keys.iter_mut().for_each(|key| key.count = 0);
         let references = layout_references(&config, 2);
         assert!(references.contains(&"Layer key (0, 0) of layout 1 \"FUNCTION\"".to_string()), "{references:?}");
+        assert!(references.contains(&"combo 1: chord sending a layer action".to_string()), "{references:?}");
         assert!(references.contains(&"joystick stick button of layout 0 \"MAIN\"".to_string()), "{references:?}");
 
         swap_layouts(&mut config, 1, 2);
         assert_eq!(layout_names(&config), ["MAIN", "GAME", "FUNCTION"]);
         assert_eq!(config.layouts[0].rows[4][2], KeyAction::Fn { temporary: 2, permanent: 1 });
         assert_eq!(config.combos[0].action, ComboAction::SetLayout(1));
+        assert_eq!(config.combos[1].action, ComboAction::Action(KeyAction::To(1)));
         assert_eq!(config.layouts[2].rows[0][0], KeyAction::Momentary(1));
         assert_eq!(config.layouts[0].rows[0][0], KeyAction::LayerTap { layer: 1, tap: Key::Escape });
         assert_eq!(config.layouts[0].joystick.stick, KeyAction::Toggle(1));

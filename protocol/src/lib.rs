@@ -19,3 +19,5 @@ pub mod keys;
 pub mod config;
 #[cfg(feature = "alloc")]
 pub mod keymap;
+#[cfg(feature = "alloc")]
+pub mod motion;

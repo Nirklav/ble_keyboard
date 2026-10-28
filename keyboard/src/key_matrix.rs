@@ -15,6 +15,8 @@ pub struct KeyMatrix<const W: usize, const H: usize> {
     row_pins: [u8; H],
     keys: [[Key; H]; W],
     last_scan: Instant,
+    /// [`protocol::config::Settings::debounce_ms`].
+    debounce_ms: u32,
 }
 
 impl<const W: usize, const H: usize> KeyMatrix<W, H> {
@@ -42,7 +44,13 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
             row_pins,
             keys: [[Key::default(); H]; W],
             last_scan: Instant::now(),
+            debounce_ms: protocol::config::Settings::default().debounce_ms as u32,
         })
+    }
+
+    /// A key change is ignored for `ms` after the previous one.
+    pub fn set_debounce_ms(&mut self, ms: u16) {
+        self.debounce_ms = ms as u32;
     }
 
     pub fn irq(&self) -> &PinDriver<'static, Input> {
@@ -104,7 +112,7 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
 
             for (y, row) in self.row_pins.iter().enumerate() {
                 let pressed = !map_err!(self.ext.read(*row));
-                self.keys[x][y].set(pressed, last_delay_ms);
+                self.keys[x][y].set(pressed, last_delay_ms, self.debounce_ms);
             }
 
             map_err!(self.ext.set_high(*column));
@@ -125,7 +133,7 @@ struct Key {
 }
 
 impl Key {
-    fn set(&mut self, v: bool, ms: u32) {
+    fn set(&mut self, v: bool, ms: u32, debounce_ms: u32) {
         self.debounce_left_ms = self.debounce_left_ms.saturating_sub(ms);
         if self.debounce_left_ms > 0 || self.state == v {
             return;
@@ -133,6 +141,6 @@ impl Key {
 
         self.state = v;
         self.changed = true;
-        self.debounce_left_ms = 5;
+        self.debounce_left_ms = debounce_ms;
     }
 }

@@ -7,6 +7,8 @@
 //! [settings]
 //! tapping_term_ms = 200
 //! require_prior_idle_ms = 150
+//! combo_term_ms = 50
+//! ...
 //!
 //! [[layouts]]
 //! name = "MAIN"
@@ -22,7 +24,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use protocol::config::{v1, v2, Config, ValidationError};
+use protocol::config::{v1, v2, v3, Config, ValidationError};
 use serde::{Deserialize, Serialize};
 
 /// Doesn't validate the config.
@@ -43,6 +45,7 @@ pub fn parse(text: &str) -> Result<Config> {
     Ok(match version {
         1 => toml::from_str::<v1::Config>(text)?.into(),
         2 => toml::from_str::<v2::Config>(text)?.into(),
+        3 => toml::from_str::<v3::Config>(text)?.into(),
         _ => toml::from_str(text)?,
     })
 }
@@ -60,8 +63,8 @@ pub fn format(config: &Config) -> Result<String> {
 
     writeln!(out)?;
     writeln!(out, "[settings]")?;
-    writeln!(out, "tapping_term_ms = {}", config.settings.tapping_term_ms)?;
-    writeln!(out, "require_prior_idle_ms = {}", config.settings.require_prior_idle_ms)?;
+    // One `name = value` line per field.
+    write!(out, "{}", toml::to_string(&config.settings)?)?;
 
     for layout in &config.layouts {
         writeln!(out)?;
@@ -159,7 +162,7 @@ mod tests {
     fn example_of_version(version: u16) -> String {
         let (head, rest) = EXAMPLE.split_once("[settings]").unwrap();
         let (_, layouts) = rest.split_once("[[layouts]]").unwrap();
-        format!("{head}[[layouts]]{layouts}").replace("version = 3", &format!("version = {version}"))
+        format!("{head}[[layouts]]{layouts}").replace("version = 4", &format!("version = {version}"))
     }
 
     #[test]
@@ -178,6 +181,18 @@ mod tests {
         assert_eq!(config.version, CONFIG_VERSION);
         assert_eq!(config.settings, Settings::default());
         assert_eq!(config.layouts, parse(EXAMPLE).unwrap().layouts);
+        config.validate_for(10, 5).unwrap();
+    }
+
+    #[test]
+    fn version_3_is_upgraded() {
+        let text = EXAMPLE.replace("version = 4", "version = 3").replace("tapping_term_ms = 200", "tapping_term_ms = 250");
+        // Version 3 has only the tap-hold settings.
+        let new_settings = ["combo_term_ms", "debounce_ms", "sleep_", "joystick_"];
+        let text = text.lines().filter(|l| !new_settings.iter().any(|name| l.starts_with(name))).collect::<Vec<_>>().join("\n");
+        let config = parse(&text).unwrap();
+        assert_eq!(config.version, CONFIG_VERSION);
+        assert_eq!(config.settings, Settings { tapping_term_ms: 250, ..Settings::default() });
         config.validate_for(10, 5).unwrap();
     }
 

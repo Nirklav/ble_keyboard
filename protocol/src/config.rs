@@ -1,4 +1,4 @@
-//! Keyboard configuration: layouts (layers) and special key combinations.
+//! Keyboard configuration: layouts (layers) and key combinations (special ones and chords).
 //!
 //! The same [`Config`] is used everywhere:
 //! - on the wire (HID config reports, see [`crate::hid`]) and in the firmware flash it is
@@ -7,7 +7,7 @@
 //!
 //! Compatibility: enum variants are only appended (postcard encodes the variant index),
 //! any other change to the layout of these types bumps [`CONFIG_VERSION`]. The previous layouts
-//! are kept (see [`v1`], [`v2`]) and upgraded on decode, so saved configs survive a firmware update.
+//! are kept (see [`v1`], [`v2`], [`v3`]) and upgraded on decode, so saved configs survive a firmware update.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -21,7 +21,7 @@ use crate::keys::{Key, KeyMod, MediaKey, MouseKey};
 pub use crate::crc::crc32;
 
 /// Format version of [`Config`], stored in [`Config::version`].
-pub const CONFIG_VERSION: u16 = 3;
+pub const CONFIG_VERSION: u16 = 4;
 
 /// Oldest [`Config::version`] [`Config::from_bytes`] still reads (and upgrades).
 pub const OLDEST_CONFIG_VERSION: u16 = 1;
@@ -58,9 +58,10 @@ pub enum KeyAction {
     Mod(KeyMod),
     Media(MediaKey),
     MouseKey(MouseKey),
-    /// Moves the mouse cursor every report while held.
+    /// Moves the mouse cursor while held: `dx`, `dy` pixels per [`crate::motion::TRAVEL_UNIT_MS`] (10 ms),
+    /// whatever the report rate is.
     MouseTravel { dx: i8, dy: i8 },
-    /// Scrolls the mouse wheel every report while held.
+    /// Scrolls the mouse wheel while held: `dy` steps per second, positive is up.
     MouseScroll { dy: i8 },
     /// Layer key: switches to layout `temporary` while held (like [`KeyAction::Momentary`]),
     /// double tap switches to `permanent`. Indices into [`Config::layouts`]. At most one per layout.
@@ -133,7 +134,7 @@ impl KeyAction {
     }
 }
 
-/// Global key processing settings.
+/// Global settings: key processing, sleep, joystick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -143,6 +144,20 @@ pub struct Settings {
     /// A tap-hold key pressed this soon after the press of a typed key is a tap at once:
     /// no misfires while typing fast. 0 turns it off.
     pub require_prior_idle_ms: u16,
+    /// The keys of a chord ([`ComboAction::Action`]) must all be pressed within this time after the first one.
+    pub combo_term_ms: u16,
+    /// A key change is ignored for this long after the previous one: contact bounce.
+    pub debounce_ms: u16,
+    /// Deep sleep after this many seconds without activity while a host is connected.
+    pub sleep_connected_s: u16,
+    /// Deep sleep after this many seconds without activity while no host is connected.
+    pub sleep_disconnected_s: u16,
+    /// Cursor speed at full joystick deflection, in pixels per second.
+    pub joystick_speed: u16,
+    /// The cursor reaches the speed of the deflection in about this many ms, 0 is at once.
+    pub joystick_ramp_ms: u16,
+    pub joystick_invert_x: bool,
+    pub joystick_invert_y: bool,
 }
 
 impl Settings {
@@ -150,11 +165,33 @@ impl Settings {
     pub const TAPPING_TERM_MS: RangeInclusive<u16> = 50..=1000;
     /// Allowed [`Settings::require_prior_idle_ms`].
     pub const REQUIRE_PRIOR_IDLE_MS: RangeInclusive<u16> = 0..=1000;
+    /// Allowed [`Settings::combo_term_ms`].
+    pub const COMBO_TERM_MS: RangeInclusive<u16> = 10..=200;
+    /// Allowed [`Settings::debounce_ms`].
+    pub const DEBOUNCE_MS: RangeInclusive<u16> = 1..=50;
+    /// Allowed [`Settings::sleep_connected_s`] and [`Settings::sleep_disconnected_s`]: the keyboard goes idle
+    /// after 15 s, so it can't sleep sooner; up to 10 hours.
+    pub const SLEEP_S: RangeInclusive<u16> = 15..=36000;
+    /// Allowed [`Settings::joystick_speed`].
+    pub const JOYSTICK_SPEED: RangeInclusive<u16> = 100..=6000;
+    /// Allowed [`Settings::joystick_ramp_ms`].
+    pub const JOYSTICK_RAMP_MS: RangeInclusive<u16> = 0..=500;
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { tapping_term_ms: 200, require_prior_idle_ms: 150 }
+        Self {
+            tapping_term_ms: 200,
+            require_prior_idle_ms: 150,
+            combo_term_ms: 50,
+            debounce_ms: 5,
+            sleep_connected_s: 300,
+            sleep_disconnected_s: 60,
+            joystick_speed: 1800,
+            joystick_ramp_ms: 40,
+            joystick_invert_x: false,
+            joystick_invert_y: false,
+        }
     }
 }
 
@@ -258,12 +295,26 @@ impl Layout {
     }
 }
 
-/// Special key combination.
+/// Key combination: a special one or a chord.
+///
+/// A special combination watches the keys without changing what they do: once the held keys are held and
+/// the others pressed their number of times, the action runs.
+///
+/// A chord ([`ComboAction::Action`]) replaces its keys: pressed together, within [`Settings::combo_term_ms`],
+/// they do the action instead of what each of them does, see [`crate::keymap`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Combo {
-    /// Keys that make the combination, 1..=[`MAX_COMBO_KEYS`], at least one with `count > 0`.
+    /// Keys that make the combination, 1..=[`MAX_COMBO_KEYS`], at least one with `count > 0`;
+    /// a chord has at least 2 keys, all with `count == 0`.
     pub keys: Vec<ComboKey>,
     pub action: ComboAction,
+}
+
+impl Combo {
+    /// [`ComboAction::Action`]: the keys are a chord.
+    pub fn is_chord(&self) -> bool {
+        matches!(self.action, ComboAction::Action(_))
+    }
 }
 
 /// Key of a special combination.
@@ -283,6 +334,16 @@ pub enum ComboKeyIdent {
     /// after the [`KeyAction::Transparent`] fall-through, so `Transparent` never matches; a [`KeyAction::ModTap`]
     /// key is matched as the `ModTap` itself, not as its tap key.
     Action(KeyAction),
+}
+
+impl ComboKeyIdent {
+    /// Whether a key at `coord` (`None` for a joystick button) pressed as `action` is this key.
+    pub fn matches(&self, coord: Option<(u8, u8)>, action: &KeyAction) -> bool {
+        match self {
+            ComboKeyIdent::Coord { x, y } => coord == Some((*x, *y)),
+            ComboKeyIdent::Action(ident) => ident == action,
+        }
+    }
 }
 
 /// What a special combination does. New variants are only appended.
@@ -307,6 +368,28 @@ pub enum ComboAction {
     BtClear,
     /// Forgets the hosts of all BLE profiles.
     BtClearAll,
+    /// Chord: the keys pressed together do this action while they are held, instead of their own ones.
+    /// Not [`KeyAction::Fn`], [`KeyAction::Transparent`] or a tap-hold action.
+    Action(KeyAction),
+}
+
+impl ComboAction {
+    /// Key action of a chord, [`ComboAction::Action`].
+    pub fn key_action(&self) -> Option<&KeyAction> {
+        match self {
+            ComboAction::Action(action) => Some(action),
+            _ => None,
+        }
+    }
+
+    /// Like [`KeyAction::map_layers`], for every layout index the action points to.
+    pub fn map_layers(&mut self, mut map: impl FnMut(u8) -> u8) {
+        match self {
+            ComboAction::SetLayout(index) => *index = map(*index),
+            ComboAction::Action(action) => action.map_layers(map),
+            _ => {}
+        }
+    }
 }
 
 /// Factory reset built into the firmware, the config can't override it:
@@ -353,6 +436,7 @@ impl Config {
         match version {
             1 => postcard::from_bytes::<v1::Config>(bytes).map(Config::from),
             2 => postcard::from_bytes::<v2::Config>(bytes).map(Config::from),
+            3 => postcard::from_bytes::<v3::Config>(bytes).map(Config::from),
             _ => postcard::from_bytes(bytes),
         }
     }
@@ -390,6 +474,12 @@ impl Config {
         let settings = [
             ("tapping_term_ms", self.settings.tapping_term_ms, Settings::TAPPING_TERM_MS),
             ("require_prior_idle_ms", self.settings.require_prior_idle_ms, Settings::REQUIRE_PRIOR_IDLE_MS),
+            ("combo_term_ms", self.settings.combo_term_ms, Settings::COMBO_TERM_MS),
+            ("debounce_ms", self.settings.debounce_ms, Settings::DEBOUNCE_MS),
+            ("sleep_connected_s", self.settings.sleep_connected_s, Settings::SLEEP_S),
+            ("sleep_disconnected_s", self.settings.sleep_disconnected_s, Settings::SLEEP_S),
+            ("joystick_speed", self.settings.joystick_speed, Settings::JOYSTICK_SPEED),
+            ("joystick_ramp_ms", self.settings.joystick_ramp_ms, Settings::JOYSTICK_RAMP_MS),
         ];
         for (name, value, range) in settings {
             if !range.contains(&value) {
@@ -490,7 +580,22 @@ impl Config {
         if value.keys.len() > MAX_COMBO_KEYS {
             return Err(ValidationError::TooManyComboKeys { combo, count: value.keys.len(), max: MAX_COMBO_KEYS });
         }
-        if value.keys.iter().all(|key| key.count == 0) {
+        if value.is_chord() {
+            if value.keys.len() < 2 {
+                return Err(ValidationError::ChordTooFewKeys { combo });
+            }
+            if value.keys.iter().any(|key| key.count != 0) {
+                return Err(ValidationError::ChordKeyCount { combo });
+            }
+            // A key is pressed once, a chord with the same position twice would never be complete.
+            let duplicate = value.keys.iter().enumerate().any(|(index, key)| {
+                matches!(key.ident, ComboKeyIdent::Coord { .. })
+                    && value.keys[..index].iter().any(|earlier| earlier.ident == key.ident)
+            });
+            if duplicate {
+                return Err(ValidationError::ChordDuplicateKey { combo });
+            }
+        } else if value.keys.iter().all(|key| key.count == 0) {
             return Err(ValidationError::ComboWithoutPresses { combo });
         }
 
@@ -516,6 +621,12 @@ impl Config {
             }
             ComboAction::BtSelect(index) if index as usize >= BT_PROFILES => {
                 return Err(ValidationError::ComboBtProfileIndex { combo, index });
+            }
+            ComboAction::Action(
+                KeyAction::Fn { .. } | KeyAction::Transparent | KeyAction::ModTap { .. } | KeyAction::LayerTap { .. },
+            ) => return Err(ValidationError::ChordActionKind { combo }),
+            ComboAction::Action(action) => {
+                self.check_action(&action).map_err(|error| ValidationError::ChordAction { combo, error })?;
             }
             _ => {}
         }
@@ -594,6 +705,55 @@ pub mod v2 {
     }
 }
 
+/// Config of version 3: [`Settings`] of the tap-hold keys only.
+pub mod v3 {
+    use alloc::vec::Vec;
+
+    use serde::{Deserialize, Serialize};
+
+    use super::{Combo, Layout, CONFIG_VERSION};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(default)]
+    pub struct Settings {
+        pub tapping_term_ms: u16,
+        pub require_prior_idle_ms: u16,
+    }
+
+    impl Default for Settings {
+        fn default() -> Self {
+            let super::Settings { tapping_term_ms, require_prior_idle_ms, .. } = super::Settings::default();
+            Self { tapping_term_ms, require_prior_idle_ms }
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Config {
+        pub version: u16,
+        pub width: u8,
+        pub height: u8,
+        pub layouts: Vec<Layout>,
+        pub combos: Vec<Combo>,
+        #[serde(default)]
+        pub settings: Settings,
+    }
+
+    /// The new settings are the default ones.
+    impl From<Config> for super::Config {
+        fn from(config: Config) -> Self {
+            let Settings { tapping_term_ms, require_prior_idle_ms } = config.settings;
+            Self {
+                version: CONFIG_VERSION,
+                width: config.width,
+                height: config.height,
+                layouts: config.layouts,
+                combos: config.combos,
+                settings: super::Settings { tapping_term_ms, require_prior_idle_ms, ..super::Settings::default() },
+            }
+        }
+    }
+}
+
 /// Why a [`Config`] is rejected. Indices of layouts and combos are 0-based.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValidationError {
@@ -638,6 +798,16 @@ pub enum ValidationError {
     ComboTransparentKey { combo: usize },
     /// [`ComboKeyIdent::Action`] is invalid, like it would be on a key.
     ComboKey { combo: usize, error: ActionError },
+    /// A chord ([`ComboAction::Action`]) has a single key.
+    ChordTooFewKeys { combo: usize },
+    /// A key of a chord has a number of presses, chord keys are only pressed together.
+    ChordKeyCount { combo: usize },
+    /// A chord has the same key position twice, it could never be pressed.
+    ChordDuplicateKey { combo: usize },
+    /// The action of a chord is [`KeyAction::Fn`], [`KeyAction::Transparent`] or a tap-hold one.
+    ChordActionKind { combo: usize },
+    /// The action of a chord is invalid, like it would be on a key.
+    ChordAction { combo: usize, error: ActionError },
 }
 
 /// Why a [`KeyAction`] is invalid wherever it is, see [`ValidationError::Key`].
@@ -715,6 +885,16 @@ impl fmt::Display for ValidationError {
                 write!(f, "combo {combo}: a Transparent key never matches, use the key's position or action"),
             ValidationError::ComboKey { combo, error } =>
                 write!(f, "combo {combo}: key action {error}"),
+            ValidationError::ChordTooFewKeys { combo } =>
+                write!(f, "combo {combo}: a chord needs at least 2 keys"),
+            ValidationError::ChordKeyCount { combo } =>
+                write!(f, "combo {combo}: chord keys are pressed together, they can't have a number of presses"),
+            ValidationError::ChordDuplicateKey { combo } =>
+                write!(f, "combo {combo}: a chord has the same key twice, it could never be pressed"),
+            ValidationError::ChordActionKind { combo } =>
+                write!(f, "combo {combo}: a chord can't send Fn, Transparent, a mod-tap or a layer-tap"),
+            ValidationError::ChordAction { combo, error } =>
+                write!(f, "combo {combo}: chord action {error}"),
         }
     }
 }
@@ -729,7 +909,7 @@ pub(crate) mod tests {
 
     use super::*;
 
-    /// 10x5 config with 3 layouts and 2 combos, close to the firmware default.
+    /// 10x5 config with 3 layouts, special combos and a chord, close to the firmware default.
     pub(crate) fn sample() -> Config {
         let row = |action: KeyAction| vec![action; 10];
         let mut main = vec![row(KeyAction::Key(Key::A)); 5];
@@ -803,8 +983,22 @@ pub(crate) mod tests {
                     keys: vec![ComboKey { ident: ComboKeyIdent::Coord { x: 9, y: 3 }, count: 2 }],
                     action: ComboAction::BtSelect(1),
                 },
+                Combo {
+                    keys: vec![
+                        ComboKey { ident: ComboKeyIdent::Coord { x: 5, y: 1 }, count: 0 },
+                        ComboKey { ident: ComboKeyIdent::Action(KeyAction::Key(Key::A)), count: 0 },
+                    ],
+                    action: ComboAction::Action(KeyAction::KeyWithMod(Key::Z, KeyMod::LeftCtrl)),
+                },
             ],
-            settings: Settings { tapping_term_ms: 180, require_prior_idle_ms: 0 },
+            settings: Settings {
+                tapping_term_ms: 180,
+                require_prior_idle_ms: 0,
+                combo_term_ms: 40,
+                debounce_ms: 8,
+                joystick_invert_y: true,
+                ..Settings::default()
+            },
         }
     }
 
@@ -832,7 +1026,7 @@ pub(crate) mod tests {
             }
         }
         let Config { width, height, layouts, mut combos, .. } = config;
-        combos.retain(|combo| !matches!(combo.action, ComboAction::BtSelect(_)));
+        combos.retain(|combo| !matches!(combo.action, ComboAction::BtSelect(_) | ComboAction::Action(_)));
         v2::Config { version: 2, width, height, layouts, combos }
     }
 
@@ -844,6 +1038,25 @@ pub(crate) mod tests {
         assert_eq!(upgraded.settings, Settings::default());
         assert_eq!(upgraded.layouts, old.layouts);
         assert_eq!(upgraded.combos, old.combos);
+        assert_eq!(upgraded.validate_for(10, 5), Ok(()));
+    }
+
+    #[test]
+    fn version_3_is_upgraded() {
+        let config = sample();
+        let old = v3::Config {
+            version: 3,
+            width: config.width,
+            height: config.height,
+            layouts: config.layouts.clone(),
+            combos: config.combos.clone(),
+            settings: v3::Settings { tapping_term_ms: 180, require_prior_idle_ms: 0 },
+        };
+        let upgraded = Config::from_bytes(&postcard::to_allocvec(&old).unwrap()).unwrap();
+        assert_eq!(upgraded.version, CONFIG_VERSION);
+        assert_eq!(upgraded.settings, Settings { tapping_term_ms: 180, require_prior_idle_ms: 0, ..Settings::default() });
+        assert_eq!(upgraded.layouts, config.layouts);
+        assert_eq!(upgraded.combos, config.combos);
         assert_eq!(upgraded.validate_for(10, 5), Ok(()));
     }
 
@@ -860,6 +1073,7 @@ pub(crate) mod tests {
         assert_eq!(postcard::to_allocvec(&ComboAction::ResetConfig).unwrap(), [3]);
         assert_eq!(postcard::to_allocvec(&ComboAction::BtSelect(1)).unwrap(), [4, 1]);
         assert_eq!(postcard::to_allocvec(&ComboAction::BtClearAll).unwrap(), [8]);
+        assert_eq!(postcard::to_allocvec(&ComboAction::Action(KeyAction::Key(Key::A))).unwrap(), [9, 0, 4]);
     }
 
     #[test]
@@ -893,7 +1107,7 @@ pub(crate) mod tests {
     #[test]
     fn toml_handwritten() {
         let text = r#"
-            version = 3
+            version = 4
             width = 2
             height = 1
 
@@ -924,10 +1138,15 @@ pub(crate) mod tests {
             [[combos]]
             keys = [{ ident = { Action = "BtNext" }, count = 2 }]
             action = { BtSelect = 3 }
+
+            [[combos]]
+            keys = [{ ident = { Coord = { x = 0, y = 0 } }, count = 0 }, { ident = { Coord = { x = 1, y = 0 } }, count = 0 }]
+            action = { Action = { Key = "Escape" } }
         "#;
         let config: Config = toml::from_str(text).unwrap();
         assert_eq!(config.validate(), Ok(()));
         assert_eq!(config.settings, Settings { tapping_term_ms: 250, ..Settings::default() });
+        assert_eq!(config.combos[3].action, ComboAction::Action(KeyAction::Key(Key::Escape)));
         assert_eq!(
             config.layouts[1].rows[0],
             [KeyAction::Transparent, KeyAction::ModTap { mods: KeyMod::LeftCtrl, tap: Key::F }]
@@ -1043,6 +1262,30 @@ pub(crate) mod tests {
         assert_eq!(
             invalid(|c| c.combos[1].keys[0].ident = ComboKeyIdent::Action(KeyAction::Momentary(3))),
             ValidationError::ComboKey { combo: 1, error: ActionError::LayerIndex(3) }
+        );
+        assert_eq!(
+            invalid(|c| c.settings.combo_term_ms = 5),
+            ValidationError::Setting { name: "combo_term_ms", value: 5, min: 10, max: 200 }
+        );
+        assert_eq!(
+            invalid(|c| c.settings.sleep_disconnected_s = 10),
+            ValidationError::Setting { name: "sleep_disconnected_s", value: 10, min: 15, max: 36000 }
+        );
+        assert_eq!(
+            invalid(|c| c.settings.joystick_ramp_ms = 600),
+            ValidationError::Setting { name: "joystick_ramp_ms", value: 600, min: 0, max: 500 }
+        );
+        assert_eq!(invalid(|c| { c.combos[4].keys.pop(); }), ValidationError::ChordTooFewKeys { combo: 4 });
+        assert_eq!(invalid(|c| c.combos[4].keys[1].count = 2), ValidationError::ChordKeyCount { combo: 4 });
+        assert_eq!(
+            invalid(|c| c.combos[4].keys[1].ident = ComboKeyIdent::Coord { x: 5, y: 1 }),
+            ValidationError::ChordDuplicateKey { combo: 4 }
+        );
+        let tap_hold = KeyAction::LayerTap { layer: 1, tap: Key::A };
+        assert_eq!(invalid(|c| c.combos[4].action = ComboAction::Action(tap_hold)), ValidationError::ChordActionKind { combo: 4 });
+        assert_eq!(
+            invalid(|c| c.combos[4].action = ComboAction::Action(KeyAction::Momentary(3))),
+            ValidationError::ChordAction { combo: 4, error: ActionError::LayerIndex(3) }
         );
         let no_mods = KeyAction::ModTap { mods: KeyMod::empty(), tap: Key::A };
         assert_eq!(

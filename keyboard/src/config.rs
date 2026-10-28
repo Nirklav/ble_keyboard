@@ -132,6 +132,7 @@ pub fn apply_changes<const W: usize, const H: usize>(
 fn apply<const W: usize, const H: usize>(config: Config, svc: &mut Services<W, H>, special_combinations: &mut SpecialCombinations) {
     info!("Applying config");
     svc.keymap = Keymap::new(&config);
+    svc.key_matrix.set_debounce_ms(config.settings.debounce_ms);
     special_combinations.set(&config.combos);
     svc.config = config;
 }

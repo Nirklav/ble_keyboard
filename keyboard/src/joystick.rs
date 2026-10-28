@@ -1,33 +1,21 @@
 use esp_idf_svc::hal::delay::TickType;
 use esp_idf_svc::hal::gpio::{Input, PinDriver};
 use log::{info, warn};
-use protocol::config::JoystickButton;
+use protocol::config::{JoystickButton, Settings};
 use protocol::joystick::{Register, State, ADDRESS, AXIS_MAX, VERSION};
+use protocol::motion::{Ramp, Velocity};
 
-use crate::bt::ble_mouse_keyboard::BleMouseKeyboard;
 use crate::i2c_bus::SharedI2c;
 
 const TIMEOUT: TickType = TickType::new_millis(20);
-
-/// Cursor travel at full deflection, in pixels per poll.
-const MAX_SPEED: i32 = 18;
-
-/// Sub-pixel accumulator scale, so slow movement isn't lost to rounding.
-const SUB_PIXEL: i32 = 256;
-
-const INVERT_X: bool = false;
-const INVERT_Y: bool = false;
-
-/// Share of the gap to the target speed closed per poll while the stick is deflected.
-const ACCELERATION: i32 = 4;
 
 /// Joystick extension, see [`protocol::joystick`].
 /// It holds `INT` low while there is a state to read, so it's polled only then.
 pub struct Joystick {
     i2c: SharedI2c,
     irq: PinDriver<'static, Input>,
-    x: Inertia,
-    y: Inertia,
+    /// Cursor speed, ramps up while the stick is deflected.
+    speed: Ramp,
     /// Held buttons, like [`State::buttons`].
     buttons: u8,
 }
@@ -42,8 +30,7 @@ impl Joystick {
                 Some(Self {
                     i2c,
                     irq,
-                    x: Inertia::default(),
-                    y: Inertia::default(),
+                    speed: Ramp::default(),
                     buttons: 0,
                 })
             },
@@ -66,35 +53,38 @@ impl Joystick {
         &mut self.irq
     }
 
-    /// Moves the cursor if `INT` is asserted, passes every button that went down or up to `button_change`,
+    /// Reads the state if `INT` is asserted: adds the cursor speed to `velocity` as the joystick `settings`
+    /// say at `now` ms, passes every button that went down or up to `button_change`,
     /// like [`KeyMatrix::register`](crate::key_matrix::KeyMatrix::register).
     /// Returns `true` while the joystick is in use, so the keyboard must not go idle.
-    pub fn poll<F>(&mut self, keyboard: &mut BleMouseKeyboard, mut button_change: F) -> bool
+    pub fn poll<F>(&mut self, settings: &Settings, now: u32, velocity: &mut Velocity, mut button_change: F) -> bool
         where F: FnMut(JoystickButton, bool) {
         // `INT` is released: nothing is pressed and the last state is read.
         if self.irq.is_high() {
             self.buttons(0, &mut button_change);
+            self.speed.reset();
             return false;
         }
 
         // Keeps the held buttons on a failure, otherwise the host would see them released.
-        if let Err(e) = self.register(keyboard, &mut button_change) {
+        if let Err(e) = self.register(settings, now, velocity, &mut button_change) {
             warn!("joystick read failed: {:?}", e);
         }
         true
     }
 
-    fn register(&mut self, keyboard: &mut BleMouseKeyboard, button_change: &mut impl FnMut(JoystickButton, bool)) -> anyhow::Result<()> {
+    fn register(&mut self, settings: &Settings, now: u32, velocity: &mut Velocity, button_change: &mut impl FnMut(JoystickButton, bool)) -> anyhow::Result<()> {
         let mut bytes = [0; State::SIZE];
         self.i2c.write_read(ADDRESS, &[Register::State as u8], &mut bytes, TIMEOUT.ticks())?;
         let state = State::decode(&bytes);
 
         self.buttons(state.buttons, button_change);
 
-        let (x, y) = target_speed(state.x, state.y);
-        let dx = self.x.travel(if INVERT_X { -x } else { x });
-        let dy = self.y.travel(if INVERT_Y { -y } else { y });
-        keyboard.travel_mouse_cursor(dx, dy);
+        let (x, y) = target_speed(state.x, state.y, settings.joystick_speed as i32);
+        let x = if settings.joystick_invert_x { -x } else { x };
+        let y = if settings.joystick_invert_y { -y } else { y };
+        let (x, y) = self.speed.follow((x, y), settings.joystick_ramp_ms, now);
+        *velocity += Velocity { x, y, wheel: 0 };
 
         Ok(())
     }
@@ -112,10 +102,10 @@ impl Joystick {
     }
 }
 
-/// Converts the stick deflection to the cursor speed, in sub-pixels per poll.
+/// Converts the stick deflection to the cursor speed in pixels per second, `max_speed` at full deflection.
 /// Quadratic on the deflection length, so small deflections are precise. The length
 /// is clamped to [`AXIS_MAX`], so the speed is the same in any direction, diagonals included.
-fn target_speed(x: i16, y: i16) -> (i32, i32) {
+fn target_speed(x: i16, y: i16, max_speed: i32) -> (i32, i32) {
     let (x, y) = (x as f32, y as f32);
     let length = (x * x + y * y).sqrt();
     if length == 0.0 {
@@ -123,34 +113,6 @@ fn target_speed(x: i16, y: i16) -> (i32, i32) {
     }
 
     let deflection = (length / AXIS_MAX as f32).min(1.0);
-    let speed = deflection * deflection * (MAX_SPEED * SUB_PIXEL) as f32;
+    let speed = deflection * deflection * max_speed as f32;
     ((x / length * speed) as i32, (y / length * speed) as i32)
-}
-
-/// Cursor speed along one axis, in sub-pixels per poll.
-/// It ramps up while the stick is deflected and drops to zero on release.
-#[derive(Default)]
-struct Inertia {
-    speed: i32,
-    remainder: i32,
-}
-
-impl Inertia {
-    /// Moves towards the `target` speed, returns the pixels to travel this poll.
-    fn travel(&mut self, target: i32) -> i8 {
-        if target == 0 {
-            self.speed = 0;
-            self.remainder = 0;
-            return 0;
-        }
-
-        let step = (target - self.speed) / ACCELERATION;
-        // Without this, a slow target would never be reached because of the rounding.
-        self.speed = if step == 0 { target } else { self.speed + step };
-
-        self.remainder += self.speed;
-        let pixels = self.remainder / SUB_PIXEL;
-        self.remainder -= pixels * SUB_PIXEL;
-        pixels.clamp(i8::MIN as i32, i8::MAX as i32) as i8
-    }
 }

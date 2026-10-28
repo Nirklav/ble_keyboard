@@ -35,7 +35,8 @@ impl ScAction {
             | ComboAction::SetLayout(_)
             | ComboAction::BtSelect(_)
             | ComboAction::BtNext
-            | ComboAction::BtPrev => return Ok(())
+            | ComboAction::BtPrev
+            | ComboAction::Action(_) => return Ok(())
         };
 
         let left = combination.iter()
@@ -79,6 +80,8 @@ impl ScAction {
                 svc.pending_config = Some(Pending::Reset);
                 svc.display.show_text("Reset")?;
             }
+            // Chords are the keymap's, they aren't special combinations.
+            ComboAction::Action(_) => {}
         }
         Ok(())
     }
@@ -111,11 +114,7 @@ impl SpecialCombination {
         let mut any_matched = false;
 
         for sc_key in &mut self.combination {
-            let matched = match &sc_key.ident {
-                ComboKeyIdent::Coord { x, y } => coord == Some((*x, *y)),
-                ComboKeyIdent::Action(ka) => action == *ka,
-            };
-            if !matched {
+            if !sc_key.ident.matches(coord, &action) {
                 continue;
             }
             any_matched = true;
@@ -179,7 +178,7 @@ impl SpecialCombination {
 }
 
 /// Runs every combination against the same key changes.
-/// The recovery combination always follows the configured ones.
+/// The recovery combination always follows the configured ones; chords are left to the keymap.
 pub struct SpecialCombinations {
     combinations: Vec<SpecialCombination>,
     /// Pressed keys, as their presses came.
@@ -189,6 +188,7 @@ pub struct SpecialCombinations {
 impl SpecialCombinations {
     pub fn from_config(combos: &[Combo]) -> Self {
         let combinations = combos.iter()
+            .filter(|combo| !combo.is_chord())
             .chain(std::iter::once(&recovery_combo()))
             .map(SpecialCombination::from_config)
             .collect();
