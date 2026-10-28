@@ -49,14 +49,6 @@
 				"problemMatcher": ["$rustc"]
 			},
 			{
-				"label": "joystick: build app.bin",
-				"type": "shell",
-				"command": "cargo objcopy --release -- -O binary app.bin",
-				"options": { "cwd": "${workspaceFolder:joystick}" },
-				"group": "build",
-				"problemMatcher": ["$rustc"]
-			},
-			{
 				"label": "desktop + protocol: test",
 				"type": "shell",
 				"command": "cargo test",
@@ -72,12 +64,12 @@
 			{
 				"type": "lldb",
 				"request": "launch",
-				"name": "desktop: debug",
+				"name": "kb-gui: debug",
 				"cargo": {
-					"args": ["build", "--bin=desktop", "--package=desktop"],
-					"filter": { "name": "desktop", "kind": "bin" }
+					"args": ["build", "--bin=kb-gui", "--package=desktop"],
+					"filter": { "name": "kb-gui", "kind": "bin" }
 				},
-				"args": [],
+				"args": ["--offline"],
 				"cwd": "${workspaceFolder:root}"
 			}
 		]

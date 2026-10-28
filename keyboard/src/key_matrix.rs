@@ -40,7 +40,7 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
             delay: Delay::new(5),
             column_pins,
             row_pins,
-            keys: [[Key::new(); H]; W],
+            keys: [[Key::default(); H]; W],
             last_scan: Instant::now(),
         })
     }
@@ -117,36 +117,17 @@ impl<const W: usize, const H: usize> KeyMatrix<W, H> {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 struct Key {
-    pub state: bool,
+    state: bool,
     changed: bool,
     debounce_left_ms: u32
 }
 
 impl Key {
-    pub fn new() -> Self {
-        Key {
-            state: false,
-            changed: false,
-            debounce_left_ms: 0,
-        }
-    }
-
-    pub fn set(&mut self, v: bool, ms: u32) {
-        if self.debounce_left_ms > 0 {
-            if self.debounce_left_ms < ms {
-                self.debounce_left_ms = 0;
-            } else {
-                self.debounce_left_ms -= ms;
-            }
-        }
-
-        if self.debounce_left_ms > 0 {
-            return;
-        }
-
-        if self.state == v {
+    fn set(&mut self, v: bool, ms: u32) {
+        self.debounce_left_ms = self.debounce_left_ms.saturating_sub(ms);
+        if self.debounce_left_ms > 0 || self.state == v {
             return;
         }
 

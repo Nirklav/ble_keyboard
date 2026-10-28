@@ -94,12 +94,9 @@ pub async fn write_config(
 
     let bytes = config.to_bytes();
     ensure!(bytes.len() <= hid::MAX_CONFIG_SIZE, "config is {} bytes, max is {}", bytes.len(), hid::MAX_CONFIG_SIZE);
-    let chunk_size = device.chunk_size();
-    ensure!(chunk_size > 0, "the connection MTU is too small for config chunks");
-
     let total = bytes.len();
     device.request_ok(&Request::WriteBegin { len: total as u32, crc32: crc32(&bytes) }).await?;
-    for (offset, chunk) in hid::chunks(&bytes, chunk_size) {
+    for (offset, chunk) in hid::chunks(&bytes, hid::CHUNK_SIZE) {
         device.request_ok(&Request::WriteChunk { offset, data: chunk.to_vec() }).await?;
         progress(WriteProgress::Sent { done: offset as usize + chunk.len(), total });
     }

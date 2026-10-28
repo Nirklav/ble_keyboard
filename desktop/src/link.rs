@@ -24,9 +24,6 @@ pub trait Link {
     /// Sends `request` and waits for its response, no retries.
     async fn request_once(&mut self, request: &Request) -> Result<Response>;
 
-    /// Max number of config bytes per chunk.
-    fn chunk_size(&self) -> usize;
-
     /// Ends the session (the keyboard may sleep again); keeps the OS connection.
     async fn close(self)
     where

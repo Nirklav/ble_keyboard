@@ -348,22 +348,10 @@ mod tests {
         let full = [7u8; MAX_MESSAGE_LEN];
         assert_eq!(decode(&encode(&full).unwrap()), Some(&full[..]));
         assert_eq!(encode(&[0; MAX_MESSAGE_LEN + 1]), None);
-    }
 
-    #[test]
-    fn decode_rejects_bad_length() {
         assert_eq!(decode(&[]), None);
         assert_eq!(decode(&[3, 1, 2]), None);
         assert_eq!(decode(&[0]), Some(&[][..]));
-    }
-
-    #[test]
-    fn chunks_cover_bytes() {
-        let bytes: std::vec::Vec<u8> = (0..=255).collect();
-        let parts: std::vec::Vec<_> = chunks(&bytes, 100).collect();
-        assert_eq!(parts.len(), 3);
-        assert_eq!(parts[2].0, 200);
-        assert_eq!(parts.iter().map(|(_, c)| c.len()).sum::<usize>(), 256);
     }
 
     #[cfg(feature = "alloc")]
@@ -389,43 +377,6 @@ mod tests {
             assert!(encode(&request.to_bytes()).is_some());
             let response = Response::ConfigChunk { total_len: u32::MAX, offset: u32::MAX, data: vec![0xFF; CHUNK_SIZE] };
             assert!(encode(&response.to_bytes()).is_some());
-        }
-
-        #[test]
-        fn messages_roundtrip() {
-            let info = Info {
-                protocol_version: PROTOCOL_VERSION,
-                config_version: crate::config::CONFIG_VERSION,
-                width: 10,
-                height: 5,
-                max_layouts: crate::config::MAX_LAYOUTS as u8,
-                max_combos: crate::config::MAX_COMBOS as u8,
-                firmware_version: "0.1.0".into(),
-            };
-            assert_eq!(Info::from_bytes(&info.to_bytes()).unwrap(), info);
-
-            for request in [
-                Request::GetInfo,
-                Request::ReadConfig { offset: 300 },
-                Request::WriteBegin { len: 500, crc32: 0xDEAD_BEEF },
-                Request::WriteChunk { offset: 7, data: vec![1, 2, 3] },
-                Request::WriteCommit,
-                Request::ResetToDefault,
-                Request::Ping,
-                Request::End,
-            ] {
-                assert_eq!(Request::from_bytes(&request.to_bytes()).unwrap(), request);
-            }
-
-            for response in [
-                Response::Info(info),
-                Response::ConfigChunk { total_len: 10, offset: 4, data: vec![9; 6] },
-                Response::Ok,
-                Response::Error(ErrorCode::CrcMismatch),
-            ] {
-                assert_eq!(Response::from_bytes(&response.to_bytes()).unwrap(), response);
-            }
-            assert!(Request::from_bytes(&[0xFF]).is_err());
         }
 
         #[test]

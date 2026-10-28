@@ -13,8 +13,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use futures::StreamExt;
 use futures::channel::mpsc;
-use protocol::hid::{Request, Response};
-use protocol::hid;
+use protocol::hid::{self, Request, Response};
 use wasm_bindgen::prelude::*;
 use web_sys::{HidDevice, HidDeviceFilter, HidDeviceRequestOptions, HidInputReportEvent};
 
@@ -84,10 +83,6 @@ impl Device {
 }
 
 impl Link for Device {
-    fn chunk_size(&self) -> usize {
-        hid::CHUNK_SIZE
-    }
-
     async fn request_once(&mut self, request: &Request) -> Result<Response> {
         let mut report = encode(request)?;
 

@@ -1,21 +1,23 @@
-use std::ffi::c_int;
+use std::ffi::{c_int, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use esp32_nimble::{BLEAdvertisementData, BLEAdvertising, BLEHIDDevice, hid::*};
+use anyhow::bail;
+use esp32_nimble::enums::{AuthReq, OwnAddrType, SecurityIOCap};
+use esp32_nimble::{BLEAdvertisementData, BLEAdvertising, BLEDevice, BLEHIDDevice, hid::*};
 use esp32_nimble::utilities::BleUuid;
 use esp32_nimble::{utilities::mutex::Mutex, BLECharacteristic, BLEServer};
 use esp_idf_svc::hal::task::notification::Notifier;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
+use log::info;
 use zerocopy::IntoBytes;
 
 use crate::bt::config_service::ConfigService;
 use crate::bt::conn_params::ConnParams;
 use crate::bt::profiles::{self, ProfileState, Profiles, Verdict};
-
-use super::*;
+use crate::bt::{Key, KeyMod, KeyReport, MediaKey, MediaKeyReport, MouseKey, MouseReport};
 
 /// IRK sent to the hosts when they pair. The keyboard doesn't use resolvable addresses (see
 /// [`crate::bt::profiles`]), so it only has to stay the same.
@@ -172,12 +174,10 @@ const HID_REPORT_DESCRIPTOR: &[u8] = hid!(
     (END_COLLECTION)
 );
 
-#[allow(unused)]
 pub struct BleMouseKeyboard {
     server: &'static mut BLEServer,
     
     input_keyboard: Arc<Mutex<BLECharacteristic>>,
-    output_keyboard: Arc<Mutex<BLECharacteristic>>,
     input_media_keys: Arc<Mutex<BLECharacteristic>>,
     input_mouse: Arc<Mutex<BLECharacteristic>>,
 
@@ -204,7 +204,6 @@ pub struct BleMouseKeyboard {
     sent_mouse_buttons: u8,
 }
 
-#[allow(unused)]
 impl BleMouseKeyboard {
     /// `width` x `height` keys, `current_config` is the encoded active config,
     /// `wake` wakes the main loop up on config requests. The BLE profiles are saved in `nvs`.
@@ -258,9 +257,11 @@ impl BleMouseKeyboard {
             // Also for a connection dropped below, in case dropping it fails.
             connect_link.connected(handle, &connect_accepted, encrypted);
 
-            {
-                let mut ble_advertising = BLEDevice::take().get_advertising().lock();
-                ble_advertising.stop();
+            // Already stopped if the connection came from advertising.
+            if let Err(e) = BLEDevice::take().get_advertising().lock().stop() {
+                if e.code() != esp_idf_sys::BLE_HS_EALREADY {
+                    log::warn!("Failed to stop advertising: {:?}", e);
+                }
             }
 
             let peer: esp_idf_sys::ble_addr_t = desc.id_address().into();
@@ -323,7 +324,8 @@ impl BleMouseKeyboard {
 
         let mut hid = BLEHIDDevice::new(server);
         let input_keyboard = hid.input_report(KEYBOARD_ID);
-        let output_keyboard = hid.output_report(KEYBOARD_ID);
+        // The LED report, nothing reads it.
+        hid.output_report(KEYBOARD_ID);
         let input_media_keys = hid.input_report(MEDIA_KEYS_ID);
         let input_mouse = hid.input_report(MOUSE_ID);
         let input_config = hid.input_report(CONFIG_ID);
@@ -379,7 +381,6 @@ impl BleMouseKeyboard {
         Ok(Self {
             server,
             input_keyboard,
-            output_keyboard,
             input_media_keys,
             input_mouse,
             config_service,
@@ -442,38 +443,30 @@ impl BleMouseKeyboard {
 
     /// Idle connection parameters (slave latency) for the host. Not for a connection that isn't accepted
     /// yet: it may be pairing, and a connection update would block its encryption (see `on_connect`).
-    pub fn set_idle(&mut self) -> anyhow::Result<()> {
-        // Before the check: a host accepted after it gets the idle params, see `on_authentication_complete`.
-        self.link.set_idle(true);
-        if !self.host_connected() {
-            return Ok(());
-        }
-        self.set_conn_params(ConnParams::IDLE)
+    pub fn set_idle(&mut self) {
+        self.set_conn_params(true);
     }
 
     /// Active connection parameters for the host, see [`Self::set_idle`].
-    pub fn set_active(&mut self) -> anyhow::Result<()>  {
-        self.link.set_idle(false);
-        if !self.host_connected() {
-            return Ok(());
-        }
-        self.set_conn_params(ConnParams::ACTIVE)
+    pub fn set_active(&mut self) {
+        self.set_conn_params(false);
     }
 
-    fn set_conn_params(&mut self, params: ConnParams) -> anyhow::Result<()> {
+    fn set_conn_params(&mut self, idle: bool) {
+        // Before the check: a host accepted after it gets the idle params, see `on_authentication_complete`.
+        self.link.set_idle(idle);
+        if !self.host_connected() {
+            return;
+        }
+        let params = if idle { ConnParams::IDLE } else { ConnParams::ACTIVE };
         if let Some(desc) = self.server.connections().next() {
             self.link.request_conn_params(desc.conn_handle(), params);
         }
-        Ok(())
     }
 
     pub fn press_key(&mut self, key: Key) {
-        let keys = &mut self.key_report.keys;
-        for i in 0..keys.len() {
-            if keys[i] == 0 {
-                keys[i] = key as u8;
-                break;
-            }
+        if let Some(slot) = self.key_report.keys.iter_mut().find(|slot| **slot == 0) {
+            *slot = key.usage();
         }
     }
 
@@ -554,10 +547,9 @@ impl BleMouseKeyboard {
     }
 
     /// Forgets the hosts of all profiles.
-    pub fn clear_all_profiles(&mut self) -> ProfileState {
-        let state = lock(&self.profiles).clear_all();
+    pub fn clear_all_profiles(&mut self) {
+        lock(&self.profiles).clear_all();
         self.reconnect();
-        state
     }
 
     fn switched(&mut self, selected: Option<ProfileState>) -> ProfileState {
@@ -599,12 +591,7 @@ impl BleMouseKeyboard {
             }
             self.dropping.store(false, Ordering::Release);
         }
-        self.restart_advertising();
-    }
-
-    /// Advertises on the address of the active profile, unless connected: a connection advertises again
-    /// from its disconnect callback.
-    fn restart_advertising(&mut self) {
+        // Unless connected: a connection advertises again from its disconnect callback.
         advertise(&self.profiles, &self.link);
     }
 

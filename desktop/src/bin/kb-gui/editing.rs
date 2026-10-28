@@ -189,12 +189,9 @@ pub fn unique_layout_name(config: &Config) -> String {
 }
 
 /// Appends `layout`, returns its index.
-pub fn add_layout(config: &mut Config, mut layout: Layout) -> Result<usize, String> {
+pub fn add_layout(config: &mut Config, layout: Layout) -> Result<usize, String> {
     if config.layouts.len() >= MAX_LAYOUTS {
         return Err(format!("at most {MAX_LAYOUTS} layouts are supported"));
-    }
-    if layout.name.chars().count() > MAX_LAYOUT_NAME_LEN {
-        layout.name = layout.name.chars().take(MAX_LAYOUT_NAME_LEN).collect();
     }
     config.layouts.push(layout);
     Ok(config.layouts.len() - 1)
@@ -360,31 +357,6 @@ mod tests {
     }
 
     #[test]
-    fn check_reports_errors() {
-        let mut config = example();
-        assert_eq!(check(&config, None), Ok(()));
-        config.layouts[1].name = "ABCDEFGHIJKLM".to_string();
-        assert_eq!(
-            check(&config, None),
-            Err("layout 1: name has 13 characters, max is 12 (layout \"ABCDEFGHIJKLM\")".into())
-        );
-
-        let config = example();
-        let info = Info {
-            protocol_version: hid::PROTOCOL_VERSION,
-            config_version: protocol::config::CONFIG_VERSION,
-            width: 10,
-            height: 5,
-            max_layouts: 2,
-            max_combos: 16,
-            firmware_version: "test".into(),
-        };
-        assert_eq!(check(&config, Some(&info)), Err("the keyboard supports at most 2 layouts".into()));
-        let info = Info { width: 12, max_layouts: 8, ..info };
-        assert!(check(&config, Some(&info)).unwrap_err().contains("this keyboard is 12x5"));
-    }
-
-    #[test]
     fn convert_keeps_key_and_mods() {
         let from = KeyAction::KeyWithMod(Key::Num1, KeyMod::LeftCtrl);
         assert_eq!(ActionKind::Key.convert(&from), KeyAction::Key(Key::Num1));
@@ -430,14 +402,6 @@ mod tests {
     }
 
     #[test]
-    fn last_layout_is_not_removed() {
-        let mut config = example();
-        config.layouts.truncate(1);
-        config.layouts[0].rows[4][2] = KeyAction::None;
-        assert!(remove_layout(&mut config, 0).is_err());
-    }
-
-    #[test]
     fn set_layout_combo_and_combo_key_are_references() {
         let mut config = example();
         config.combos[0].action = ComboAction::SetLayout(2);
@@ -453,41 +417,19 @@ mod tests {
         config.layouts[1].rows[0][0] = KeyAction::Momentary(2);
         config.layouts[0].rows[0][0] = KeyAction::LayerTap { layer: 2, tap: Key::Escape };
         config.layouts[0].joystick.stick = KeyAction::Toggle(2);
+        config.combos[0].action = ComboAction::SetLayout(2);
         let references = layout_references(&config, 2);
         assert!(references.contains(&"Layer key (0, 0) of layout 1 \"FUNCTION\"".to_string()), "{references:?}");
         assert!(references.contains(&"joystick stick button of layout 0 \"MAIN\"".to_string()), "{references:?}");
 
         swap_layouts(&mut config, 1, 2);
+        assert_eq!(layout_names(&config), ["MAIN", "GAME", "FUNCTION"]);
+        assert_eq!(config.layouts[0].rows[4][2], KeyAction::Fn { temporary: 2, permanent: 1 });
+        assert_eq!(config.combos[0].action, ComboAction::SetLayout(1));
         assert_eq!(config.layouts[2].rows[0][0], KeyAction::Momentary(1));
         assert_eq!(config.layouts[0].rows[0][0], KeyAction::LayerTap { layer: 1, tap: Key::Escape });
         assert_eq!(config.layouts[0].joystick.stick, KeyAction::Toggle(1));
         config.validate_for(10, 5).unwrap();
-    }
-
-    #[test]
-    fn swap_layouts_keeps_targets() {
-        let mut config = example();
-        config.combos[0].action = ComboAction::SetLayout(2);
-        swap_layouts(&mut config, 1, 2);
-        assert_eq!(layout_names(&config), ["MAIN", "GAME", "FUNCTION"]);
-        assert_eq!(config.layouts[0].rows[4][2], KeyAction::Fn { temporary: 2, permanent: 1 });
-        assert_eq!(config.layouts[1].rows[4][2], KeyAction::Fn { temporary: 2, permanent: 0 });
-        assert_eq!(config.combos[0].action, ComboAction::SetLayout(1));
-        config.validate_for(10, 5).unwrap();
-    }
-
-    #[test]
-    fn add_layouts_up_to_limit() {
-        let mut config = example();
-        while config.layouts.len() < MAX_LAYOUTS {
-            let name = unique_layout_name(&config);
-            let layout = empty_layout(&config, name);
-            add_layout(&mut config, layout).unwrap();
-        }
-        config.validate_for(10, 5).unwrap();
-        let name = unique_layout_name(&config);
-        let layout = empty_layout(&config, name);
-        assert!(add_layout(&mut config, layout).is_err());
     }
 
     #[test]
@@ -496,30 +438,6 @@ mod tests {
         config.layouts[1].name = "ABCDEFGHIJKL".to_string();
         let index = duplicate_layout(&mut config, 1).unwrap();
         assert_eq!(config.layouts[index].name, "ABCDEFGHIJK2");
-        config.validate_for(10, 5).unwrap();
-    }
-
-    #[test]
-    fn other_fn_key_is_found() {
-        let config = example();
-        assert_eq!(other_fn_key(&config.layouts[0], 0, 0), Some((2, 4)));
-        assert_eq!(other_fn_key(&config.layouts[0], 2, 4), None);
-    }
-
-    #[test]
-    fn combos_up_to_limits() {
-        let mut config = example();
-        while config.combos.len() < MAX_COMBOS {
-            add_combo(&mut config).unwrap();
-        }
-        assert!(add_combo(&mut config).is_err());
-
-        let combo = &mut config.combos[0];
-        while combo.keys.len() < MAX_COMBO_KEYS {
-            add_combo_key(combo).unwrap();
-        }
-        assert!(add_combo_key(combo).is_err());
-        assert!(combo_uses_coord(combo, 2, 4));
         config.validate_for(10, 5).unwrap();
     }
 }

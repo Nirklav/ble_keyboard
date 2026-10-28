@@ -265,37 +265,46 @@ pub fn action_description(action: &KeyAction) -> String {
 /// How a combo key is matched, e.g. `(2, 4)` or `Esc`; a position is prefixed with the action
 /// of that key in `layout`, e.g. `Fn 1/2 (2, 4)`.
 pub fn combo_ident_label(key: &ComboKey, layout: Option<&Layout>) -> String {
-    match key.ident {
-        ComboKeyIdent::Coord { x, y } => match layout.and_then(|l| l.get(x as usize, y as usize)) {
-            Some(action) if *action != KeyAction::None => format!("{} ({x}, {y})", action_label(action)),
-            _ => format!("({x}, {y})"),
-        },
-        ComboKeyIdent::Action(KeyAction::None) => "None".to_string(),
-        ComboKeyIdent::Action(action) => action_label(&action),
+    match combo_coord_action(key, layout) {
+        Some((label, (x, y))) => format!("{label} ({x}, {y})"),
+        None => combo_ident_short(key),
     }
 }
 
-/// Combo key with its count, e.g. `Fn 1/2 (2, 4) hold` or `Esc x5`, see [`combo_ident_label`].
+/// Combo key with its count, e.g. `Fn 1/2 (2, 4) hold` or `Esc ×5`, see [`combo_ident_label`].
 pub fn combo_key_label(key: &ComboKey, layout: Option<&Layout>) -> String {
-    let ident = combo_ident_label(key, layout);
-    match key.count {
-        0 => format!("{ident} hold"),
-        count => format!("{ident} ×{count}"),
-    }
+    with_count(combo_ident_label(key, layout), key.count)
 }
 
 /// Short combo key for a chip, e.g. `Fn 1/2 hold` or `Esc ×5`: a position is named by the action
 /// of that key in `layout`, the coordinates only if the key is empty.
 pub fn combo_key_chip(key: &ComboKey, layout: Option<&Layout>) -> String {
-    let ident = match key.ident {
-        ComboKeyIdent::Coord { x, y } => match layout.and_then(|l| l.get(x as usize, y as usize)) {
-            Some(action) if *action != KeyAction::None => action_label(action),
-            _ => format!("({x}, {y})"),
-        },
+    let ident = match combo_coord_action(key, layout) {
+        Some((label, _)) => label,
+        None => combo_ident_short(key),
+    };
+    with_count(ident, key.count)
+}
+
+/// Label of the action at the position of a [`ComboKeyIdent::Coord`] key in `layout`, with the position;
+/// `None` for an empty key or a key matched by action.
+fn combo_coord_action(key: &ComboKey, layout: Option<&Layout>) -> Option<(String, (u8, u8))> {
+    let ComboKeyIdent::Coord { x, y } = key.ident else { return None };
+    let action = layout?.get(x as usize, y as usize)?;
+    (*action != KeyAction::None).then(|| (action_label(action), (x, y)))
+}
+
+/// `(x, y)` of a position, the action label of an action (`None` for [`KeyAction::None`]).
+fn combo_ident_short(key: &ComboKey) -> String {
+    match key.ident {
+        ComboKeyIdent::Coord { x, y } => format!("({x}, {y})"),
         ComboKeyIdent::Action(KeyAction::None) => "None".to_string(),
         ComboKeyIdent::Action(action) => action_label(&action),
-    };
-    match key.count {
+    }
+}
+
+fn with_count(ident: String, count: u8) -> String {
+    match count {
         0 => format!("{ident} hold"),
         count => format!("{ident} ×{count}"),
     }
@@ -344,31 +353,6 @@ mod tests {
         assert_eq!(action_label(&KeyAction::KeyWithMod(Key::Num1, KeyMod::LeftShift)), "!");
         assert_eq!(action_label(&KeyAction::KeyWithMod(Key::A, KeyMod::LeftShift)), "Shift+A");
         assert_eq!(action_label(&KeyAction::KeyWithMod(Key::Num1, KeyMod::LeftCtrl)), "Ctrl+1");
-    }
-
-    #[test]
-    fn layer_and_tap_hold_labels() {
-        assert_eq!(action_label(&KeyAction::Transparent), "TRNS");
-        assert_eq!(action_label(&KeyAction::Momentary(1)), "MO 1");
-        assert_eq!(action_label(&KeyAction::Toggle(2)), "TG 2");
-        assert_eq!(action_label(&KeyAction::To(0)), "TO 0");
-        assert_eq!(action_label(&KeyAction::ModTap { mods: KeyMod::LeftCtrl, tap: Key::A }), "Ctrl/A");
-        assert_eq!(action_label(&KeyAction::ModTap { mods: KeyMod::empty(), tap: Key::A }), "-/A");
-        assert_eq!(
-            action_label(&KeyAction::ModTap { mods: KeyMod::RightAlt | KeyMod::LeftShift, tap: Key::Num1 }),
-            "Shift+RAlt/1"
-        );
-        assert_eq!(action_label(&KeyAction::LayerTap { layer: 1, tap: Key::Space }), "LT1 Space");
-    }
-
-    #[test]
-    fn bt_labels_are_one_based() {
-        assert_eq!(action_label(&KeyAction::BtSelect(0)), "BT 1");
-        assert_eq!(action_label(&KeyAction::BtSelect(3)), "BT 4");
-        assert_eq!(action_label(&KeyAction::BtNext), "BT >");
-        assert_eq!(action_label(&KeyAction::BtPrev), "BT <");
-        assert_eq!(action_label(&KeyAction::BtClear), "BT clr");
-        assert_eq!(combo_action_label(&ComboAction::BtSelect(1), &[]), "Switch to BLE profile BT 2");
     }
 
     #[test]

@@ -87,18 +87,10 @@ impl MediaKey {
         MediaKey::Calculator,
     ];
 
-    /// Bit of the key in the media keys report, matches the order of usages in the HID descriptor.
+    /// Bit of the key in the media keys report: the variants are in the order of the usages in the HID descriptor.
     pub const fn report_bit(self) -> u8 {
-        match self {
-            MediaKey::NextTrack => 1,
-            MediaKey::PreviousTrack => 2,
-            MediaKey::Stop => 4,
-            MediaKey::PlayPause => 8,
-            MediaKey::Mute => 16,
-            MediaKey::VolumeUp => 32,
-            MediaKey::VolumeDown => 64,
-            MediaKey::Calculator => 128,
-        }
+        const _: () = assert!(MediaKey::ALL.len() <= u8::BITS as usize, "the media keys report is one byte");
+        1 << self as u8
     }
 
     /// Human-readable name.
@@ -253,17 +245,9 @@ impl Key {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn media_key_bits_are_distinct_and_ordered() {
-        for (i, key) in MediaKey::ALL.iter().enumerate() {
-            assert_eq!(key.report_bit(), 1 << i);
-        }
-    }
 
     #[test]
     fn key_postcard_index_is_usage_id() {

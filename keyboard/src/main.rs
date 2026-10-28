@@ -42,6 +42,8 @@ use crate::joystick::Joystick;
 use crate::key_matrix::KeyMatrix;
 use crate::sc::SpecialCombinations;
 use crate::services::Services;
+// Not used directly: its timer queue is what esp-idf-svc's embassy time driver links against.
+use embassy_time as _;
 
 type Mcp23s17 = mcp23s17::Mcp23s17<SpiDeviceDriver<'static, Rc<SpiDriver<'static>>>>;
 
@@ -163,7 +165,7 @@ fn wait_for_activity<const W: usize, const H: usize>(
 
     info!("idle");
     special_combinations.reset();
-    svc.keyboard.set_idle()?;
+    svc.keyboard.set_idle();
 
     // A connection not accepted (yet) is dropped soon, it doesn't keep the keyboard awake.
     let deep_sleep_timeout = if svc.keyboard.host_connected() {
@@ -187,7 +189,7 @@ fn wait_for_activity<const W: usize, const H: usize>(
         info!("deep sleep postponed, the config app is connected");
     }
 
-    svc.keyboard.set_active()?;
+    svc.keyboard.set_active();
     info!("active");
     Ok(())
 }

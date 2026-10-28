@@ -10,9 +10,7 @@
 #   gui.sh stop                  stop the app
 #   gui.sh log                   print the app's stdout / stderr
 #
-# Ubuntu 20.04 lacks libraries winit needs (libxkbcommon, libEGL, libXcursor, ...). Install them with
-#   sudo apt install libxkbcommon0 libxkbcommon-x11-0 libxcursor1 libegl1 libegl-mesa0 libwayland-cursor0 libwayland-egl1
-# otherwise `start` downloads the packages and unpacks them into target/kb-gui/libs (no root needed).
+# Needs the libraries winit loads: sudo apt install libxkbcommon-x11-0 libxcursor1 libegl1
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -22,26 +20,6 @@ mkdir -p "$state"
 
 window() {
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$ps1" "$@" | tr -d '\r'
-}
-
-libs_env() {
-    local lib missing=
-    for lib in libxkbcommon.so.0 libxkbcommon-x11.so.0 libXcursor.so.1 libEGL.so.1; do
-        ldconfig -p | grep -q "$lib" || missing=1
-    done
-    [[ -n "$missing" ]] || return 0
-    local libs="$state/libs"
-    if [[ ! -e "$libs/.done" ]]; then
-        echo "system libraries missing, unpacking them into $libs" >&2
-        local debs="$state/debs"
-        rm -rf "$debs" "$libs" && mkdir -p "$debs" "$libs"
-        (cd "$debs" && apt-get download -q libxkbcommon0 libxkbcommon-x11-0 libxcb-xkb1 libxcursor1 \
-            libegl1 libegl-mesa0 libgbm1 libwayland-cursor0 libwayland-egl1 libwayland-server0 >&2)
-        for deb in "$debs"/*.deb; do dpkg -x "$deb" "$libs"; done
-        touch "$libs/.done"
-    fi
-    export LD_LIBRARY_PATH="$libs/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-    export __EGL_VENDOR_LIBRARY_DIRS="$libs/usr/share/glvnd/egl_vendor.d"
 }
 
 stop() {
@@ -56,7 +34,6 @@ start)
     shift
     stop
     cargo build --manifest-path "$root/desktop/Cargo.toml" --bin kb-gui >&2
-    libs_env
     nohup "$root/target/debug/kb-gui" "$@" >"$state/log" 2>&1 &
     echo $! >"$state/pid"
     for _ in $(seq 1 40); do

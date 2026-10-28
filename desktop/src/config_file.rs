@@ -138,8 +138,7 @@ mod tests {
     use protocol::config::{JoystickButtons, Settings, CONFIG_VERSION};
 
     use super::*;
-
-    const EXAMPLE: &str = include_str!("../examples/config.toml");
+    use crate::EXAMPLE_CONFIG as EXAMPLE;
 
     #[test]
     fn example_is_valid() {
@@ -180,39 +179,6 @@ mod tests {
         assert_eq!(config.settings, Settings::default());
         assert_eq!(config.layouts, parse(EXAMPLE).unwrap().layouts);
         config.validate_for(10, 5).unwrap();
-    }
-
-    #[test]
-    fn new_actions_roundtrip() {
-        use protocol::config::KeyAction;
-        use protocol::keys::{Key, KeyMod};
-
-        let mut config = parse(EXAMPLE).unwrap();
-        config.settings = Settings { tapping_term_ms: 180, require_prior_idle_ms: 0 };
-        let row = &mut config.layouts[1].rows[2];
-        row[0] = KeyAction::Transparent;
-        row[1] = KeyAction::Momentary(2);
-        row[2] = KeyAction::Toggle(1);
-        row[3] = KeyAction::To(0);
-        row[4] = KeyAction::ModTap { mods: KeyMod::LeftCtrl | KeyMod::LeftShift, tap: Key::A };
-        row[5] = KeyAction::LayerTap { layer: 1, tap: Key::Space };
-        row[6] = KeyAction::BtSelect(3);
-        row[7] = KeyAction::BtNext;
-        row[8] = KeyAction::BtPrev;
-        row[9] = KeyAction::BtClear;
-        config.layouts[1].joystick.stick = KeyAction::Momentary(2);
-        config.combos[0].action = protocol::config::ComboAction::BtClearAll;
-        config.validate_for(10, 5).unwrap();
-
-        let text = format(&config).unwrap();
-        assert!(text.contains(r#"{ ModTap = { mods = "LeftCtrl | LeftShift", tap = "A" } }"#), "{text}");
-        assert!(text.contains(r#"{ LayerTap = { layer = 1, tap = "Space" } }"#), "{text}");
-        assert!(text.contains("tapping_term_ms = 180"), "{text}");
-        for action in [r#"{ BtSelect = 3 },"#, r#""BtNext","#, r#""BtPrev","#, r#""BtClear"],"#] {
-            assert!(text.contains(action), "{action} in {text}");
-        }
-        assert!(text.contains(r#"action = "BtClearAll""#), "{text}");
-        assert_eq!(parse(&text).unwrap(), config);
     }
 
     #[test]

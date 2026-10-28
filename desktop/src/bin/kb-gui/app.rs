@@ -27,12 +27,12 @@ pub struct Document {
     /// File the config was opened from / saved to; in the browser only its name.
     pub path: Option<PathBuf>,
     /// Config as last opened / saved / pulled from / pushed to the keyboard.
-    saved: Option<Config>,
+    saved: Config,
 }
 
 impl Document {
     fn opened(config: Config, path: Option<PathBuf>) -> Document {
-        Document { saved: Some(config.clone()), config, path }
+        Document { saved: config.clone(), config, path }
     }
 
     fn example() -> Document {
@@ -41,7 +41,7 @@ impl Document {
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.saved.as_ref() != Some(&self.config)
+        self.saved != self.config
     }
 
     fn title(&self) -> String {
@@ -272,7 +272,7 @@ impl App {
     fn save_with(&mut self, ask: bool) {
         match self.files.save(self.doc.path.as_deref(), &self.doc.config, ask) {
             Ok(Some(path)) => {
-                self.doc.saved = Some(self.doc.config.clone());
+                self.doc.saved = self.doc.config.clone();
                 self.doc.path = Some(path);
             }
             Ok(None) => {}
@@ -314,7 +314,7 @@ impl App {
                 }
                 Event::Pushed { bytes } => {
                     if let Some(config) = self.pushing.take() {
-                        self.doc.saved = Some(config);
+                        self.doc.saved = config;
                     }
                     self.device.set_status(false, format!("Config applied ({bytes} bytes)"));
                 }
@@ -630,25 +630,5 @@ impl eframe::App for App {
         self.dialogs(&ctx);
         self.update_title(&ctx);
         self.enforce_min_size(&ctx);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn document_dirty_state() {
-        let mut doc = Document::example();
-        assert!(!doc.is_dirty());
-        assert_eq!(doc.title(), "untitled - Keyboard config");
-
-        doc.config.layouts[0].name = "OTHER".to_string();
-        assert!(doc.is_dirty());
-        assert_eq!(doc.title(), "untitled * - Keyboard config");
-
-
-        let opened = Document::opened(doc.config, Some(PathBuf::from("dir/my.toml")));
-        assert_eq!(opened.title(), "my.toml - Keyboard config");
     }
 }

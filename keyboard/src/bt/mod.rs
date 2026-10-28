@@ -1,8 +1,3 @@
-use std::ffi::c_void;
-
-use anyhow::bail;
-use esp32_nimble::{enums::{AuthReq, OwnAddrType, SecurityIOCap}, BLEDevice};
-use log::info;
 use zerocopy_derive::{Immutable, IntoBytes};
 
 pub use protocol::keys::{Key, KeyMod, MediaKey, MouseKey};
@@ -12,7 +7,6 @@ pub mod config_service;
 pub mod profiles;
 mod conn_params;
 
-#[allow(unused)]
 #[repr(packed)]
 #[derive(Default, IntoBytes, Immutable)]
 struct MouseReport {
@@ -23,7 +17,6 @@ struct MouseReport {
     h_wheel: i8
 }
 
-#[allow(unused)]
 #[repr(packed)]
 #[derive(Clone, Copy, PartialEq, Default, IntoBytes, Immutable)]
 struct KeyReport {
@@ -32,7 +25,6 @@ struct KeyReport {
     keys: [u8; 6],
 }
 
-#[allow(unused)]
 #[repr(packed)]
 #[derive(Clone, Copy, PartialEq, Default, IntoBytes, Immutable)]
 struct MediaKeyReport {

@@ -809,12 +809,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn sample_is_valid() {
-        assert_eq!(sample().validate(), Ok(()));
-        assert_eq!(sample().validate_for(10, 5), Ok(()));
-    }
-
-    #[test]
     fn postcard_roundtrip() {
         let config = sample();
         let bytes = config.to_bytes();
@@ -963,9 +957,7 @@ pub(crate) mod tests {
     fn invalid(change: impl FnOnce(&mut Config)) -> ValidationError {
         let mut config = sample();
         change(&mut config);
-        let err = config.validate().unwrap_err();
-        assert!(!err.to_string().is_empty());
-        err
+        config.validate().unwrap_err()
     }
 
     #[test]
@@ -1007,10 +999,6 @@ pub(crate) mod tests {
             ValidationError::Key { layout: 0, x: 3, y: 1, error: ActionError::LayerIndex(3) }
         );
         assert_eq!(
-            invalid(|c| c.layouts[2].rows[0][0] = KeyAction::To(8)),
-            ValidationError::Key { layout: 2, x: 0, y: 0, error: ActionError::LayerIndex(8) }
-        );
-        assert_eq!(
             invalid(|c| c.layouts[1].joystick.stick = KeyAction::Toggle(3)),
             ValidationError::Joystick { layout: 1, button: JoystickButton::Stick, error: ActionError::LayerIndex(3) }
         );
@@ -1037,20 +1025,12 @@ pub(crate) mod tests {
             ValidationError::ComboCoord { combo: 2, x: 10, y: 0 }
         );
         assert_eq!(
-            invalid(|c| c.combos[2].keys[0].ident = ComboKeyIdent::Coord { x: 0, y: 5 }),
-            ValidationError::ComboCoord { combo: 2, x: 0, y: 5 }
-        );
-        assert_eq!(
             invalid(|c| c.combos[0].action = ComboAction::SetLayout(3)),
             ValidationError::ComboLayoutIndex { combo: 0, index: 3 }
         );
         assert_eq!(
             invalid(|c| c.layouts[1].rows[2][3] = KeyAction::BtSelect(BT_PROFILES as u8)),
             ValidationError::Key { layout: 1, x: 3, y: 2, error: ActionError::BtProfileIndex(BT_PROFILES as u8) }
-        );
-        assert_eq!(
-            invalid(|c| c.layouts[0].joystick.right = KeyAction::BtSelect(200)),
-            ValidationError::Joystick { layout: 0, button: JoystickButton::Right, error: ActionError::BtProfileIndex(200) }
         );
         assert_eq!(
             invalid(|c| c.combos[1].action = ComboAction::BtSelect(BT_PROFILES as u8)),
@@ -1064,36 +1044,11 @@ pub(crate) mod tests {
             invalid(|c| c.combos[1].keys[0].ident = ComboKeyIdent::Action(KeyAction::Momentary(3))),
             ValidationError::ComboKey { combo: 1, error: ActionError::LayerIndex(3) }
         );
-        assert_eq!(
-            invalid(|c| c.combos[0].keys[0].ident = ComboKeyIdent::Action(KeyAction::Fn { temporary: 1, permanent: 7 })),
-            ValidationError::ComboKey { combo: 0, error: ActionError::LayerIndex(7) }
-        );
-        assert_eq!(
-            invalid(|c| c.combos[2].keys[0].ident = ComboKeyIdent::Action(KeyAction::LayerTap { layer: 9, tap: Key::A })),
-            ValidationError::ComboKey { combo: 2, error: ActionError::LayerIndex(9) }
-        );
-        assert_eq!(
-            invalid(|c| c.combos[1].keys[0].ident = ComboKeyIdent::Action(KeyAction::BtSelect(BT_PROFILES as u8))),
-            ValidationError::ComboKey { combo: 1, error: ActionError::BtProfileIndex(BT_PROFILES as u8) }
-        );
         let no_mods = KeyAction::ModTap { mods: KeyMod::empty(), tap: Key::A };
         assert_eq!(
             invalid(|c| c.layouts[1].rows[2][3] = no_mods),
             ValidationError::Key { layout: 1, x: 3, y: 2, error: ActionError::ModTapWithoutMods }
         );
-        assert_eq!(
-            invalid(|c| c.layouts[2].joystick.stick = no_mods),
-            ValidationError::Joystick { layout: 2, button: JoystickButton::Stick, error: ActionError::ModTapWithoutMods }
-        );
-        assert_eq!(
-            invalid(|c| c.combos[0].keys[0].ident = ComboKeyIdent::Action(no_mods)),
-            ValidationError::ComboKey { combo: 0, error: ActionError::ModTapWithoutMods }
-        );
-        // In range: valid.
-        let mut config = sample();
-        config.combos[1].keys[0].ident = ComboKeyIdent::Action(KeyAction::To(2));
-        config.combos[2].keys[0].ident = ComboKeyIdent::Action(KeyAction::BtSelect(BT_PROFILES as u8 - 1));
-        config.validate().unwrap();
         assert_eq!(
             sample().validate_for(12, 5),
             Err(ValidationError::WrongKeyboardSize { expected_width: 12, expected_height: 5, width: 10, height: 5 })

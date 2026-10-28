@@ -64,11 +64,6 @@ pub fn load(width: u8, height: u8, bypass: bool) -> (Config, Source) {
     }
 }
 
-/// Active config encoded with postcard.
-pub fn current_bytes<const W: usize, const H: usize>(svc: &Services<W, H>) -> Vec<u8> {
-    svc.config.to_bytes()
-}
-
 /// Applies [`Services::pending_config`], must be called when all keys are up.
 /// Returns `None` if nothing was pending, otherwise whether the change reached the flash;
 /// the config is applied in either case.
@@ -104,7 +99,7 @@ pub fn apply_changes<const W: usize, const H: usize>(
     special_combinations: &mut SpecialCombinations,
 ) -> anyhow::Result<()> {
     if apply_pending(svc, special_combinations)?.is_some() {
-        svc.keyboard.config_service().set_current(current_bytes(svc));
+        svc.keyboard.config_service().set_current(svc.config.to_bytes());
     }
 
     let Some(pending) = svc.keyboard.config_service().take_submitted() else {
@@ -117,7 +112,7 @@ pub fn apply_changes<const W: usize, const H: usize>(
 
     svc.pending_config = Some(pending);
     let stored = apply_pending(svc, special_combinations);
-    svc.keyboard.config_service().set_current(current_bytes(svc));
+    svc.keyboard.config_service().set_current(svc.config.to_bytes());
 
     let response = match &stored {
         Ok(Some(Ok(()))) => Response::Ok,

@@ -32,5 +32,4 @@ desktop/scripts/gui.sh log              # app stdout / stderr, e.g. after a cras
   so keep sessions short and `stop` the app when done.
 - `type` switches the window's input language to English while typing and restores it afterwards.
 - `start` rebuilds the binary; restart after code changes.
-- If system libraries (libxkbcommon, libEGL, ...) are missing, `start` unpacks them into
-  `target/kb-gui/libs` on first run; `sudo apt install` from the script header removes the need.
+- If the app exits at start with missing libxkbcommon / libEGL, install them (see the script header).

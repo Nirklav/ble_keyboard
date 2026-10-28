@@ -13,11 +13,6 @@ panic-halt = "*"
 embedded-hal = "0.2"
 protocol = { path = "../protocol" }
 
-# Optional dependencies, when stm32f0xx-hal will implement the embedded-hal 1.0
-#embedded-hal = "1.0"
-#embedded-hal-bus = "0.3"
-#ssd1306 = "0.10.0"
-
 [profile.release]
 codegen-units = 1
 debug = false

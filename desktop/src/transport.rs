@@ -56,10 +56,6 @@ impl Device {
 }
 
 impl Link for Device {
-    fn chunk_size(&self) -> usize {
-        hid::CHUNK_SIZE
-    }
-
     async fn request_once(&mut self, request: &Request) -> Result<Response> {
         let report = encode(request)?;
         let mut output = [0; 1 + hid::REPORT_LEN];

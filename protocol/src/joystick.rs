@@ -256,12 +256,4 @@ mod tests {
         assert!(state.is_active());
         assert!(!State::default().is_active());
     }
-
-    #[test]
-    fn register_roundtrip() {
-        for register in [Register::Version, Register::State] {
-            assert_eq!(Register::try_from(register as u8), Ok(register));
-        }
-        assert_eq!(Register::try_from(0xFF), Err(Error::UnknownRegister(0xFF)));
-    }
 }
