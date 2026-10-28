@@ -127,11 +127,6 @@ impl KeyAction {
             _ => None,
         }
     }
-
-    /// [`KeyAction::ModTap`] with no modifiers: its hold would do nothing, yet it delays the taps.
-    pub fn is_mod_tap_without_mods(&self) -> bool {
-        matches!(self, KeyAction::ModTap { mods, .. } if mods.is_empty())
-    }
 }
 
 /// Global settings: key processing, sleep, joystick.
@@ -225,7 +220,7 @@ pub enum JoystickButton {
 }
 
 impl JoystickButton {
-    /// In the order they are shown, [`JoystickButton::index`] is the position here.
+    /// In the order they are shown.
     pub const ALL: [JoystickButton; 3] = [JoystickButton::Left, JoystickButton::Stick, JoystickButton::Right];
 
     pub fn name(self) -> &'static str {
@@ -243,11 +238,6 @@ impl JoystickButton {
             JoystickButton::Stick => crate::joystick::BUTTON_STICK,
             JoystickButton::Right => crate::joystick::BUTTON_RIGHT,
         }
-    }
-
-    /// Position in [`JoystickButton::ALL`].
-    pub fn index(self) -> usize {
-        self as usize
     }
 }
 
@@ -567,7 +557,8 @@ impl Config {
         if let Some(index) = action.bt_profile().filter(|&index| index as usize >= BT_PROFILES) {
             return Err(ActionError::BtProfileIndex(index));
         }
-        if action.is_mod_tap_without_mods() {
+        // Its hold would do nothing, yet it delays the taps.
+        if matches!(action, KeyAction::ModTap { mods, .. } if mods.is_empty()) {
             return Err(ActionError::ModTapWithoutMods);
         }
         Ok(())

@@ -158,30 +158,26 @@ mod tests {
         assert_eq!(text, body.trim_start());
     }
 
-    /// The example as an older version without `[settings]`.
-    fn example_of_version(version: u16) -> String {
+    #[test]
+    fn old_versions_are_upgraded() {
+        // Versions 1 and 2 have no `[settings]`, version 1 no joystick buttons either.
         let (head, rest) = EXAMPLE.split_once("[settings]").unwrap();
         let (_, layouts) = rest.split_once("[[layouts]]").unwrap();
-        format!("{head}[[layouts]]{layouts}").replace("version = 4", &format!("version = {version}"))
-    }
-
-    #[test]
-    fn version_1_is_upgraded() {
-        let text = example_of_version(1).replace("joystick = ", "# joystick = ");
-        let config = parse(&text).unwrap();
-        assert_eq!(config.version, CONFIG_VERSION);
-        assert!(config.layouts.iter().all(|l| l.joystick == JoystickButtons::default()));
-        assert_eq!(config.settings, Settings::default());
-        config.validate_for(10, 5).unwrap();
-    }
-
-    #[test]
-    fn version_2_is_upgraded() {
-        let config = parse(&example_of_version(2)).unwrap();
-        assert_eq!(config.version, CONFIG_VERSION);
-        assert_eq!(config.settings, Settings::default());
-        assert_eq!(config.layouts, parse(EXAMPLE).unwrap().layouts);
-        config.validate_for(10, 5).unwrap();
+        let without_settings = format!("{head}[[layouts]]{layouts}");
+        let version_2 = without_settings.replace("version = 4", "version = 2");
+        let version_1 = without_settings.replace("version = 4", "version = 1").replace("joystick = ", "# joystick = ");
+        let example = parse(EXAMPLE).unwrap();
+        for (text, has_joystick) in [(version_1, false), (version_2, true)] {
+            let config = parse(&text).unwrap();
+            assert_eq!(config.version, CONFIG_VERSION);
+            assert_eq!(config.settings, Settings::default());
+            let mut expected = example.layouts.clone();
+            if !has_joystick {
+                expected.iter_mut().for_each(|layout| layout.joystick = JoystickButtons::default());
+            }
+            assert_eq!(config.layouts, expected);
+            config.validate_for(10, 5).unwrap();
+        }
     }
 
     #[test]

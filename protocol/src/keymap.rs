@@ -306,12 +306,6 @@ impl Keymap {
         self.changes.drain(..)
     }
 
-    /// Pressed keys with the actions they were pressed as, keys waiting for a tap-hold decision included
-    /// (as [`KeyAction::ModTap`] or [`KeyAction::LayerTap`]); every key of a chord is the chord action.
-    pub fn held(&self) -> impl Iterator<Item = (KeyId, KeyAction)> + '_ {
-        self.held.iter().map(|held| (held.key, held.action))
-    }
-
     /// Nothing waits: no undecided tap-hold key or chord, no queued event, no report change.
     pub fn is_idle(&self) -> bool {
         self.undecided.is_none() && self.queue.is_empty() && self.output.is_empty()
@@ -983,7 +977,7 @@ mod tests {
     }
 
     #[test]
-    fn changes_and_held_keys() {
+    fn changes_have_the_pressed_action() {
         let mut run = Run::new();
         run.down(MO1).down(A).up(A);
         let changes: Vec<Change> = run.keymap.take_changes().collect();
@@ -995,7 +989,6 @@ mod tests {
                 Change { key: A, action: key(Key::Num1), pressed: false },
             ]
         );
-        assert_eq!(run.keymap.held().collect::<Vec<_>>(), [(MO1, KeyAction::Momentary(1))]);
         assert_eq!(run.keymap.take_changes().count(), 0);
     }
 

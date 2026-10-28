@@ -1,35 +1,10 @@
 //! Config edits that keep the layout indices consistent, independent of the UI.
 
-use desktop::config_file;
-use protocol::hid::{self, Info};
 use protocol::config::{
     Combo, ComboAction, ComboKey, ComboKeyIdent, Config, JoystickButton, JoystickButtons, KeyAction, Layout,
     MAX_COMBO_KEYS, MAX_COMBOS, MAX_LAYOUT_NAME_LEN, MAX_LAYOUTS,
 };
 use protocol::keys::{Key, KeyMod, MediaKey, MouseKey};
-
-/// Keyboard size used for validation while no keyboard is connected.
-pub const DEFAULT_SIZE: (u8, u8) = (10, 5);
-
-/// Checks what blocks a push: validity for the keyboard size, the keyboard limits, the encoded size.
-/// `info` is the connected keyboard, if any.
-pub fn check(config: &Config, info: Option<&Info>) -> Result<(), String> {
-    let (width, height) = info.map_or(DEFAULT_SIZE, |info| (info.width, info.height));
-    config.validate_for(width, height).map_err(|e| config_file::describe(&e, config))?;
-    if let Some(info) = info {
-        if config.layouts.len() > info.max_layouts as usize {
-            return Err(format!("the keyboard supports at most {} layouts", info.max_layouts));
-        }
-        if config.combos.len() > info.max_combos as usize {
-            return Err(format!("the keyboard supports at most {} combos", info.max_combos));
-        }
-    }
-    let size = config.to_bytes().len();
-    if size > hid::MAX_CONFIG_SIZE {
-        return Err(format!("encoded config is {size} bytes, max is {}", hid::MAX_CONFIG_SIZE));
-    }
-    Ok(())
-}
 
 /// Kind of [`KeyAction`], what the action editor switches between.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -403,16 +378,6 @@ mod tests {
     }
 
     #[test]
-    fn set_layout_combo_and_combo_key_are_references() {
-        let mut config = example();
-        config.combos[0].action = ComboAction::SetLayout(2);
-        config.combos[1].keys[0].ident = ComboKeyIdent::Action(KeyAction::Fn { temporary: 1, permanent: 2 });
-        let references = layout_references(&config, 2);
-        assert!(references.contains(&"combo 0: SetLayout(2)".to_string()), "{references:?}");
-        assert!(references.contains(&"combo 1: key matching a layer key".to_string()), "{references:?}");
-    }
-
-    #[test]
     fn layer_actions_are_references_and_remapped() {
         let mut config = example();
         config.layouts[1].rows[0][0] = KeyAction::Momentary(2);
@@ -421,10 +386,13 @@ mod tests {
         config.combos[0].action = ComboAction::SetLayout(2);
         config.combos[1].action = ComboAction::Action(KeyAction::To(2));
         config.combos[1].keys.iter_mut().for_each(|key| key.count = 0);
+        config.combos[2].keys[1].ident = ComboKeyIdent::Action(KeyAction::Momentary(2));
         let references = layout_references(&config, 2);
         assert!(references.contains(&"Layer key (0, 0) of layout 1 \"FUNCTION\"".to_string()), "{references:?}");
         assert!(references.contains(&"combo 1: chord sending a layer action".to_string()), "{references:?}");
         assert!(references.contains(&"joystick stick button of layout 0 \"MAIN\"".to_string()), "{references:?}");
+        assert!(references.contains(&"combo 0: SetLayout(2)".to_string()), "{references:?}");
+        assert!(references.contains(&"combo 2: key matching a layer key".to_string()), "{references:?}");
 
         swap_layouts(&mut config, 1, 2);
         assert_eq!(layout_names(&config), ["MAIN", "GAME", "FUNCTION"]);
@@ -434,6 +402,7 @@ mod tests {
         assert_eq!(config.layouts[2].rows[0][0], KeyAction::Momentary(1));
         assert_eq!(config.layouts[0].rows[0][0], KeyAction::LayerTap { layer: 1, tap: Key::Escape });
         assert_eq!(config.layouts[0].joystick.stick, KeyAction::Toggle(1));
+        assert_eq!(config.combos[2].keys[1].ident, ComboKeyIdent::Action(KeyAction::Momentary(1)));
         config.validate_for(10, 5).unwrap();
     }
 

@@ -190,9 +190,6 @@ pub fn mouse_label(buttons: MouseKey) -> String {
     if names.is_empty() { "Mouse -".to_string() } else { format!("Mouse {}", names.join("+")) }
 }
 
-/// Short label of [`KeyAction::Transparent`]; ASCII, the default fonts have no triangle.
-pub const TRANSPARENT_LABEL: &str = "TRNS";
-
 /// Short label of an action for a key button, empty for [`KeyAction::None`].
 pub fn action_label(action: &KeyAction) -> String {
     match *action {
@@ -209,7 +206,8 @@ pub fn action_label(action: &KeyAction) -> String {
         KeyAction::MouseScroll { dy } => format!("Scroll {dy:+}"),
         KeyAction::Fn { temporary, permanent } => format!("Fn {temporary}/{permanent}"),
         KeyAction::None => String::new(),
-        KeyAction::Transparent => TRANSPARENT_LABEL.to_string(),
+        // ASCII, the default fonts have no triangle.
+        KeyAction::Transparent => "TRNS".to_string(),
         KeyAction::Momentary(layer) => format!("MO {layer}"),
         KeyAction::Toggle(layer) => format!("TG {layer}"),
         KeyAction::To(layer) => format!("TO {layer}"),

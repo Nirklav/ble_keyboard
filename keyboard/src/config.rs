@@ -1,5 +1,3 @@
-use std::io;
-
 use log::{error, info};
 use protocol::hid::{ErrorCode, Response};
 use protocol::config::Config;
@@ -64,42 +62,14 @@ pub fn load(width: u8, height: u8, bypass: bool) -> (Config, Source) {
     }
 }
 
-/// Applies [`Services::pending_config`], must be called when all keys are up.
-/// Returns `None` if nothing was pending, otherwise whether the change reached the flash;
-/// the config is applied in either case.
-pub fn apply_pending<const W: usize, const H: usize>(
-    svc: &mut Services<W, H>,
-    special_combinations: &mut SpecialCombinations,
-) -> anyhow::Result<Option<io::Result<()>>> {
-    let Some(pending) = svc.pending_config.take() else {
-        return Ok(None);
-    };
-
-    let (config, stored) = match pending {
-        Pending::Apply(config) => {
-            let stored = config_store::save(&config);
-            (config, stored)
-        },
-        Pending::Reset => (default_config(), config_store::remove_saved()),
-    };
-
-    apply(config, svc, special_combinations);
-
-    if let Err(e) = &stored {
-        error!("Failed to store config: {}", e);
-        svc.display.show_text("Failed")?;
-    }
-    Ok(Some(stored))
-}
-
-/// Applies [`Services::pending_config`], then a change submitted by the config app and answers it.
+/// Applies [`Services::pending_config`] (a combo's), then a change submitted by the config app and answers it.
 /// Must be called when all keys are up.
 pub fn apply_changes<const W: usize, const H: usize>(
     svc: &mut Services<W, H>,
     special_combinations: &mut SpecialCombinations,
 ) -> anyhow::Result<()> {
-    if apply_pending(svc, special_combinations)?.is_some() {
-        svc.keyboard.config_service().set_current(svc.config.to_bytes());
+    if let Some(pending) = svc.pending_config.take() {
+        apply_pending(pending, svc, special_combinations)?;
     }
 
     let Some(pending) = svc.keyboard.config_service().take_submitted() else {
@@ -109,24 +79,39 @@ pub fn apply_changes<const W: usize, const H: usize>(
         Pending::Apply(_) => "Updated",
         Pending::Reset => "Reset",
     };
-
-    svc.pending_config = Some(pending);
-    let stored = apply_pending(svc, special_combinations);
-    svc.keyboard.config_service().set_current(svc.config.to_bytes());
-
-    let response = match &stored {
-        Ok(Some(Ok(()))) => Response::Ok,
-        // The config is applied, but it's lost on reboot.
-        _ => Response::Error(ErrorCode::Storage),
-    };
-    let ok = response == Response::Ok;
+    let stored = apply_pending(pending, svc, special_combinations);
+    // The config is applied either way, but it's lost on reboot unless stored.
+    let response = if matches!(stored, Ok(true)) { Response::Ok } else { Response::Error(ErrorCode::Storage) };
     svc.keyboard.config_service().finish(response);
 
-    stored?;
-    if ok {
+    if stored? {
         svc.display.show_text(message)?;
     }
     Ok(())
+}
+
+/// Applies `pending` and returns whether the change reached the flash; the config is applied in either case.
+fn apply_pending<const W: usize, const H: usize>(
+    pending: Pending,
+    svc: &mut Services<W, H>,
+    special_combinations: &mut SpecialCombinations,
+) -> anyhow::Result<bool> {
+    let (config, stored) = match pending {
+        Pending::Apply(config) => {
+            let stored = config_store::save(&config);
+            (config, stored)
+        },
+        Pending::Reset => (default_config(), config_store::remove_saved()),
+    };
+
+    apply(config, svc, special_combinations);
+    svc.keyboard.config_service().set_current(svc.config.to_bytes());
+
+    if let Err(e) = &stored {
+        error!("Failed to store config: {}", e);
+        svc.display.show_text("Failed")?;
+    }
+    Ok(stored.is_ok())
 }
 
 fn apply<const W: usize, const H: usize>(config: Config, svc: &mut Services<W, H>, special_combinations: &mut SpecialCombinations) {

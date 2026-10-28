@@ -6,12 +6,12 @@ use std::time::Duration;
 use desktop::EXAMPLE_CONFIG;
 use desktop::config_file;
 use desktop::link::Options;
+use desktop::ops;
 use eframe::egui;
 use protocol::hid::Info;
 use protocol::config::{Config, JoystickButton};
 
 use crate::device::{Command, DeviceWorker, Event};
-use crate::editing;
 use crate::files::{Files, Opened};
 use crate::theme;
 use crate::views;
@@ -208,7 +208,7 @@ impl App {
     /// Validation result of the edited config for the connected (or the default) keyboard.
     pub fn validation(&self) -> Result<(), String> {
         let info = if self.device.connected { self.device.info.as_ref() } else { None };
-        editing::check(&self.doc.config, info)
+        ops::check(&self.doc.config, info)
     }
 
     /// Also goes back to the overview.
@@ -418,10 +418,9 @@ impl App {
     pub fn header_actions(&mut self, ui: &mut egui::Ui) {
         let idle = !self.device.is_busy() && self.device.worker.is_some();
         let valid = self.validation().is_ok();
-        let connected = self.device.connected;
-        // Offline the main action is connecting, without reading: the edited config is written after that.
+        // Offline the only keyboard action is connecting, without reading: the edited config is written after that.
         let size = egui::vec2(0.0, 30.0);
-        if connected {
+        if self.device.connected {
             let push = ui
                 .add_enabled(idle && valid, theme::primary_button("Write").min_size(size))
                 .on_hover_text("Write the edited config to the keyboard")
@@ -429,16 +428,6 @@ impl App {
             if push.clicked() {
                 self.push();
             }
-        } else {
-            let connect = ui
-                .add_enabled(idle, theme::primary_button("Connect").min_size(size))
-                .on_hover_text("Connect to the keyboard, the edited config stays as it is");
-            if connect.clicked() {
-                self.device.send(Command::Connect);
-            }
-        }
-        // Offline Connect is the only keyboard action, the others follow once connected.
-        if connected {
             let read = ui
                 .add_enabled(idle, egui::Button::new("Read"))
                 .on_hover_text("Read the config from the keyboard, replacing the edited one");
@@ -451,11 +440,16 @@ impl App {
             if reset.clicked() {
                 self.dialog = Some(Dialog::ConfirmReset);
             }
-        }
-        ui.add_space(theme::GAP_XS);
-        if connected {
+            ui.add_space(theme::GAP_XS);
             theme::status(ui, theme::SUCCESS, "Connected");
         } else {
+            let connect = ui
+                .add_enabled(idle, theme::primary_button("Connect").min_size(size))
+                .on_hover_text("Connect to the keyboard, the edited config stays as it is");
+            if connect.clicked() {
+                self.device.send(Command::Connect);
+            }
+            ui.add_space(theme::GAP_XS);
             theme::status(ui, ui.visuals().weak_text_color(), "Offline")
                 .on_hover_text("Edits stay in the app until written to the keyboard");
         }

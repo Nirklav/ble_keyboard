@@ -17,6 +17,29 @@ pub enum WriteProgress {
     Applying,
 }
 
+/// Keyboard size used for validation while no keyboard is connected.
+pub const DEFAULT_SIZE: (u8, u8) = (10, 5);
+
+/// Checks what blocks a write: validity for the keyboard size, the keyboard limits, the encoded size.
+/// `info` is the connected keyboard, if any.
+pub fn check(config: &Config, info: Option<&Info>) -> Result<(), String> {
+    let (width, height) = info.map_or(DEFAULT_SIZE, |info| (info.width, info.height));
+    config.validate_for(width, height).map_err(|e| config_file::describe(&e, config))?;
+    if let Some(info) = info {
+        if config.layouts.len() > info.max_layouts as usize {
+            return Err(format!("the keyboard supports at most {} layouts", info.max_layouts));
+        }
+        if config.combos.len() > info.max_combos as usize {
+            return Err(format!("the keyboard supports at most {} combos", info.max_combos));
+        }
+    }
+    let size = config.to_bytes().len();
+    if size > hid::MAX_CONFIG_SIZE {
+        return Err(format!("encoded config is {size} bytes, max is {}", hid::MAX_CONFIG_SIZE));
+    }
+    Ok(())
+}
+
 /// Fails if the firmware speaks a different protocol version.
 pub fn check_protocol(info: &Info) -> Result<()> {
     ensure!(
@@ -84,16 +107,9 @@ pub async fn write_config(
         info.config_version,
         config::CONFIG_VERSION
     );
-    config.validate_for(info.width, info.height).map_err(|e| anyhow!("{}", config_file::describe(&e, config)))?;
-    ensure!(
-        config.layouts.len() <= info.max_layouts as usize,
-        "keyboard supports at most {} layouts",
-        info.max_layouts
-    );
-    ensure!(config.combos.len() <= info.max_combos as usize, "keyboard supports at most {} combos", info.max_combos);
+    check(config, Some(info)).map_err(anyhow::Error::msg)?;
 
     let bytes = config.to_bytes();
-    ensure!(bytes.len() <= hid::MAX_CONFIG_SIZE, "config is {} bytes, max is {}", bytes.len(), hid::MAX_CONFIG_SIZE);
     let total = bytes.len();
     device.request_ok(&Request::WriteBegin { len: total as u32, crc32: crc32(&bytes) }).await?;
     for (offset, chunk) in hid::chunks(&bytes, hid::CHUNK_SIZE) {

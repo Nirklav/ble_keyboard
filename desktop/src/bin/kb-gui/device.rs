@@ -9,9 +9,11 @@
 //! While connected, the worker pings the keyboard every [`hid::PING_INTERVAL`] so it doesn't
 //! deep sleep; [`Command::Disconnect`] and dropping the worker end the session.
 //!
-//! A fake worker ([`DeviceWorker::spawn`] with `fake`) answers like a keyboard without a real one,
+//! A fake worker ([`DeviceWorker::spawn`] with `fake`) talks to a [`FakeDevice`] instead of a real keyboard,
 //! to look at the UI in every connection state.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -23,8 +25,8 @@ use desktop::{Device, EXAMPLE_CONFIG, config_file};
 use eframe::egui;
 use futures::StreamExt;
 use futures::channel::mpsc as async_mpsc;
-use protocol::hid::{self, Info, Request};
-use protocol::config::Config;
+use protocol::config::{Config, MAX_COMBOS, MAX_LAYOUTS};
+use protocol::hid::{self, ConfigReceiver, Info, Request, Response};
 
 /// How long dropping the worker waits for it to end the session.
 #[cfg(not(target_arch = "wasm32"))]
@@ -83,7 +85,7 @@ pub struct DeviceWorker {
 }
 
 impl DeviceWorker {
-    /// `fake` runs [`run_fake`] instead of talking to a real keyboard.
+    /// `fake` talks to a [`FakeDevice`] instead of a real keyboard.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn spawn(ctx: egui::Context, fake: bool) -> Result<DeviceWorker> {
         use anyhow::Context;
@@ -153,21 +155,28 @@ impl EventSender {
     }
 }
 
-struct Connection {
-    device: Device,
+struct Connection<D> {
+    device: D,
     info: Info,
 }
 
 async fn work(commands: Commands, events: EventSender, fake: bool) {
     if fake {
-        run_fake(commands, events).await;
+        let factory: Rc<[u8]> = config_file::parse(EXAMPLE_CONFIG).expect("the example config is valid").to_bytes().into();
+        let stored = Rc::new(RefCell::new(factory.to_vec()));
+        let (width, height) = ops::DEFAULT_SIZE;
+        let connect = async |_: &Options| {
+            sleep(Duration::from_millis(1000)).await;
+            Ok(FakeDevice { factory: factory.clone(), stored: stored.clone(), receiver: ConfigReceiver::new(width, height) })
+        };
+        run(commands, events, connect).await;
     } else {
-        run(commands, events).await;
+        run(commands, events, Device::connect).await;
     }
 }
 
-async fn run(mut commands: Commands, events: EventSender) {
-    let mut connection: Option<Connection> = None;
+async fn run<D: Link>(mut commands: Commands, events: EventSender, mut connect: impl AsyncFnMut(&Options) -> Result<D>) {
+    let mut connection: Option<Connection<D>> = None;
     loop {
         // Pings when no command came for an interval: any request keeps the session alive too.
         let command = match &mut connection {
@@ -184,7 +193,7 @@ async fn run(mut commands: Commands, events: EventSender) {
             None => commands.next().await,
         };
         let Some((options, command)) = command else { break };
-        let event = match execute(&mut connection, &options, command, &events).await {
+        let event = match execute(&mut connection, &mut connect, &options, command, &events).await {
             Ok(event) => event,
             Err(error) => {
                 // The device may be in an unknown state (a timed out request, a late response).
@@ -199,8 +208,9 @@ async fn run(mut commands: Commands, events: EventSender) {
     }
 }
 
-async fn execute(
-    connection: &mut Option<Connection>,
+async fn execute<D: Link>(
+    connection: &mut Option<Connection<D>>,
+    connect: &mut impl AsyncFnMut(&Options) -> Result<D>,
     options: &Options,
     command: Command,
     events: &EventSender,
@@ -213,7 +223,15 @@ async fn execute(
     }
     let Connection { device, info } = match connection {
         Some(connection) => connection,
-        None => connection.insert(connect(options, events).await?),
+        None => {
+            events.progress("Connecting to the keyboard...");
+            let mut device = connect(options).await?;
+            events.progress("Reading the keyboard info...");
+            let info = device.info().await?;
+            events.send(Event::Connected(info.clone()));
+            ops::check_protocol(&info)?;
+            connection.insert(Connection { device, info })
+        }
     };
 
     Ok(match command {
@@ -240,75 +258,45 @@ async fn execute(
     })
 }
 
-async fn connect(options: &Options, events: &EventSender) -> Result<Connection> {
-    events.progress("Connecting to the keyboard...");
-    let mut device = Device::connect(options).await?;
-    events.progress("Reading the keyboard info...");
-    let info = device.info().await?;
-    events.send(Event::Connected(info.clone()));
-    ops::check_protocol(&info)?;
-    Ok(Connection { device, info })
+/// Fake keyboard of the default size: answers like a real one, slowly; the written config outlives the connection
+/// (`stored`), the factory one is the example config.
+struct FakeDevice {
+    factory: Rc<[u8]>,
+    stored: Rc<RefCell<Vec<u8>>>,
+    receiver: ConfigReceiver,
 }
 
-/// Fake keyboard: connects, reads, writes and resets like a real one, with delays and progress,
-/// keeping the written config; starts with the example config.
-async fn run_fake(mut commands: Commands, events: EventSender) {
-    let factory = config_file::parse(EXAMPLE_CONFIG).expect("the example config is valid");
-    let mut stored = factory.clone();
-    let mut connected = false;
-    while let Some((_, command)) = commands.next().await {
-        if matches!(command, Command::Disconnect) {
-            connected = false;
-            events.send(Event::Disconnected);
-            continue;
-        }
-        if !connected {
-            events.progress("Connecting to the keyboard...");
-            sleep(Duration::from_millis(1500)).await;
-            events.progress("Reading the keyboard info...");
-            sleep(Duration::from_millis(300)).await;
-            events.send(Event::Connected(fake_info()));
-            connected = true;
-        }
-        let event = match command {
-            Command::Connect => Event::Done("Connected to the keyboard".to_string()),
-            Command::Pull => {
-                events.progress("Reading the config...");
-                sleep(Duration::from_millis(600)).await;
-                Event::Pulled(Box::new(stored.clone()))
-            }
-            Command::Push(config) => {
-                let total = config.to_bytes().len();
-                for done in (0..total).step_by(128).skip(1).chain([total]) {
-                    events.progress(format!("Sent {done} of {total} bytes..."));
-                    sleep(Duration::from_millis(80)).await;
+impl Link for FakeDevice {
+    async fn request_once(&mut self, request: &Request) -> Result<Response> {
+        sleep(Duration::from_millis(60)).await;
+        Ok(match request {
+            Request::GetInfo => Response::Info(Info {
+                protocol_version: hid::PROTOCOL_VERSION,
+                config_version: protocol::config::CONFIG_VERSION,
+                width: ops::DEFAULT_SIZE.0,
+                height: ops::DEFAULT_SIZE.1,
+                max_layouts: MAX_LAYOUTS as u8,
+                max_combos: MAX_COMBOS as u8,
+                firmware_version: "0.0.0-fake".to_string(),
+            }),
+            Request::ReadConfig { offset } => Response::config_chunk(&self.stored.borrow(), *offset, hid::CHUNK_SIZE),
+            Request::WriteBegin { len, crc32 } => self.receiver.begin(*len, *crc32).into(),
+            Request::WriteChunk { offset, data } => self.receiver.chunk(*offset, data).into(),
+            Request::WriteCommit => match self.receiver.commit() {
+                Ok(config) => {
+                    sleep(Duration::from_millis(500)).await;
+                    *self.stored.borrow_mut() = config.to_bytes();
+                    Response::Ok
                 }
-                events.progress("Applying, release all keys...");
-                sleep(Duration::from_millis(500)).await;
-                stored = *config;
-                Event::Pushed { bytes: total }
+                Err(code) => Response::Error(code),
+            },
+            Request::ResetToDefault => {
+                *self.stored.borrow_mut() = self.factory.to_vec();
+                Response::Ok
             }
-            Command::Reset => {
-                events.progress("Restoring the factory config...");
-                sleep(Duration::from_millis(800)).await;
-                stored = factory.clone();
-                Event::Done("Factory config restored on the keyboard, Read to edit it".to_string())
-            }
-            Command::Disconnect => unreachable!("handled above"),
-        };
-        events.send(event);
+            Request::Ping | Request::End => Response::Ok,
+        })
     }
-}
 
-/// Info of the fake keyboard: the current versions and the default 10x5 grid.
-fn fake_info() -> Info {
-    Info {
-        protocol_version: hid::PROTOCOL_VERSION,
-        config_version: protocol::config::CONFIG_VERSION,
-        width: 10,
-        height: 5,
-        max_layouts: protocol::config::MAX_LAYOUTS as u8,
-        max_combos: protocol::config::MAX_COMBOS as u8,
-        firmware_version: "0.0.0-fake".to_string(),
-    }
+    async fn close(self) {}
 }
