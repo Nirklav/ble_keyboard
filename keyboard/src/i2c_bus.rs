@@ -5,7 +5,7 @@ use esp_idf_svc::hal::i2c::{I2cDriver, I2cError};
 use esp_idf_svc::sys::EspError;
 
 /// I2C bus shared by the display and the extensions.
-/// The display is flushed from a timer task, so the driver is behind a mutex.
+/// The display is flushed from its own thread, so the driver is behind a mutex.
 #[derive(Clone)]
 pub struct SharedI2c {
     driver: Arc<Mutex<I2cDriver<'static>>>,

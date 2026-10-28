@@ -88,6 +88,8 @@ fn main_body() -> anyhow::Result<()> {
     let mut special_combinations = SpecialCombinations::from_config(&config.combos);
     let mut svc = Services::new(keyboard, key_matrix, display, config);
 
+    // Before the pop-up: its first frames show the status under the plate.
+    svc.update_status()?;
     svc.display.show_text(source.message().unwrap_or("Welcome!"))?;
 
     // While a key is held the loop runs every `DELAY_MS`, that's what lets a tap-hold key become a hold
@@ -265,7 +267,8 @@ fn wakeup_pins<'a, const W: usize, const H: usize>(
 }
 
 fn new_i2c(i2c: I2C0<'static>, sda: Gpio9<'static>, scl: Gpio10<'static>) -> anyhow::Result<I2cDriver<'static>> {
-    let config = I2cConfig::new().baudrate(100.kHz().into());
+    // A display frame takes ~13 ms, at 100 kHz pop-up slides would stutter; the joystick suits both.
+    let config = I2cConfig::new().baudrate(400.kHz().into());
     let driver = I2cDriver::new(i2c, sda, scl, &config)?;
     Ok(driver)
 }

@@ -34,7 +34,7 @@ impl Source {
         match self {
             Source::Saved | Source::Default => None,
             Source::Fallback => Some("Default config"),
-            Source::Bypass => Some("Default config (boot)"),
+            Source::Bypass => Some("Defaults (boot)"),
         }
     }
 }

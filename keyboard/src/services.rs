@@ -56,7 +56,7 @@ impl<const W: usize, const H: usize> Services<W, H> {
                 return self.display.show_text("BT clear all");
             },
         };
-        // At most 18 characters of the display font.
+        // At most 17 characters fit the pop-up plate.
         let number = state.index + 1;
         let text = match (cleared, state.bound) {
             (true, _) => format!("BT {number} clear"),
