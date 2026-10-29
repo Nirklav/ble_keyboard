@@ -2,8 +2,8 @@
 # Browser build of kb-gui (WebHID), served as static files by nginx on port 80.
 # WebHID needs a secure context, so put it behind an HTTPS proxy.
 #
-# Build from the workspace root:
-#   docker build -f desktop/Dockerfile -t kb-gui .
+# It bundles the keyboard firmware (its Update button installs it), built outside: the firmware needs
+# ESP-IDF and its toolchain. `desktop/scripts/bundle.sh docker` builds both (the "web: docker" VS Code tasks).
 
 # The output is wasm, so the build stage always runs natively.
 FROM --platform=$BUILDPLATFORM rust:1-slim-bookworm AS build
@@ -22,12 +22,14 @@ COPY .cargo .cargo
 RUN rustup show active-toolchain
 COPY protocol protocol
 COPY desktop desktop
+# Not under target/, that's a cache mount. Missing: build with `desktop/scripts/bundle.sh docker`.
+COPY target/firmware/keyboard.bin firmware/keyboard.bin
 
 # trunk fetches the matching wasm-bindgen and wasm-opt itself.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     --mount=type=cache,target=/root/.cache/trunk \
-    cd desktop && trunk build --release --locked --dist /dist
+    cd desktop && KB_FIRMWARE=firmware/keyboard.bin trunk build --release --locked --dist /dist
 
 FROM nginx:stable-alpine
 COPY <<'EOF' /etc/nginx/conf.d/default.conf

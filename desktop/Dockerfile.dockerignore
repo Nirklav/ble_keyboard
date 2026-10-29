@@ -6,4 +6,5 @@
 !.cargo
 !protocol
 !desktop
+!target/firmware/keyboard.bin
 desktop/dist

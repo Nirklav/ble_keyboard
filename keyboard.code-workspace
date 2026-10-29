@@ -55,6 +55,24 @@
 				"options": { "cwd": "${workspaceFolder:root}" },
 				"group": "test",
 				"problemMatcher": ["$rustc"]
+			},
+			{
+				// Browser build with the firmware bundled.
+				"label": "web: docker build",
+				"type": "shell",
+				"command": "desktop/scripts/bundle.sh docker",
+				"options": { "cwd": "${workspaceFolder:root}" },
+				"group": "build",
+				"problemMatcher": ["$rustc"]
+			},
+			{
+				// Builds first, so the pushed image is the current one.
+				"label": "web: docker push",
+				"type": "shell",
+				"command": "docker push reg.thirtynineeighty.com/kb-gui",
+				"options": { "cwd": "${workspaceFolder:root}" },
+				"dependsOn": "web: docker build",
+				"problemMatcher": []
 			}
 		]
 	},
