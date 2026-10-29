@@ -11,13 +11,15 @@ use eframe::egui;
 use protocol::hid::{Info, Versions};
 use protocol::config::{Config, JoystickButton};
 
-use crate::device::{Command, DeviceWorker, Event};
+use crate::device::{Busy, Command, DeviceWorker, Event};
 use crate::files::{Files, Opened};
 use crate::theme;
 use crate::views;
 
 /// Timeout of every request.
 const TIMEOUT: Duration = Duration::from_secs(10);
+/// Width of the progress bar in the status bar.
+const STATUS_PROGRESS_WIDTH: f32 = 200.0;
 /// Smallest window that fits the default 10x5 key grid and the combo editor.
 pub const MIN_SIZE: egui::Vec2 = egui::vec2(780.0, 540.0);
 
@@ -136,8 +138,8 @@ pub struct DeviceState {
     pub incompatible: bool,
     /// [`Event::Incompatible`] came, the [`Event::Failed`] of its command keeps it.
     detected_incompatible: bool,
-    /// Status text of the running command, `None` if idle.
-    pub busy: Option<String>,
+    /// Status of the running command, `None` if idle.
+    pub busy: Option<Busy>,
     /// Result of the last command, `true` for errors.
     pub status: Option<(bool, String)>,
 }
@@ -146,7 +148,7 @@ impl DeviceState {
     pub fn send(&mut self, command: Command) {
         let Some(worker) = &self.worker else { return };
         let options = Options { timeout: TIMEOUT };
-        self.busy = Some("Starting...".to_string());
+        self.busy = Some(Busy::new("Starting..."));
         worker.send(options, command);
     }
 
@@ -318,7 +320,7 @@ impl App {
                 self.device.busy = None;
             }
             match event {
-                Event::Progress(text) => self.device.busy = Some(text),
+                Event::Progress(busy) => self.device.busy = Some(busy),
                 Event::Connected(versions, info) => {
                     self.device.versions = Some(versions);
                     self.device.incompatible = false;
@@ -502,8 +504,7 @@ impl App {
     fn status_bar(&self, ui: &mut egui::Ui, validation: &Result<(), String>) {
         ui.horizontal(|ui| {
             if let Some(busy) = &self.device.busy {
-                ui.spinner();
-                ui.label(busy);
+                theme::busy(ui, busy, STATUS_PROGRESS_WIDTH);
             } else if let Some((error, text)) = &self.device.status {
                 if *error {
                     ui.colored_label(ui.visuals().error_fg_color, text);

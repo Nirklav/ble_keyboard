@@ -53,8 +53,8 @@ pub enum Command {
 /// Message from the worker.
 #[derive(Debug)]
 pub enum Event {
-    /// Status text of the running command.
-    Progress(String),
+    /// Status of the running command.
+    Progress(Busy),
     /// Connected to the keyboard (sent before the command continues).
     Connected(Versions, Info),
     /// The keyboard firmware is one the app can't edit, only update (sent before the command fails).
@@ -74,6 +74,20 @@ impl Event {
     /// Whether the command is finished.
     pub fn is_final(&self) -> bool {
         !matches!(self, Event::Progress(_) | Event::Connected(..) | Event::Incompatible(_))
+    }
+}
+
+/// Status of the running command: a text, and how much of it is done if that's known.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Busy {
+    pub text: String,
+    /// 0..=1, `None` for a step of unknown length.
+    pub fraction: Option<f32>,
+}
+
+impl Busy {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self { text: text.into(), fraction: None }
     }
 }
 
@@ -153,7 +167,13 @@ impl EventSender {
     }
 
     fn progress(&self, text: impl Into<String>) {
-        self.send(Event::Progress(text.into()));
+        self.send(Event::Progress(Busy::new(text)));
+    }
+
+    /// Progress of a step that is `done` of `total` through.
+    fn progress_of(&self, text: impl Into<String>, done: usize, total: usize) {
+        let fraction = if total == 0 { 1.0 } else { done as f32 / total as f32 };
+        self.send(Event::Progress(Busy { text: text.into(), fraction: Some(fraction) }));
     }
 }
 
@@ -250,7 +270,9 @@ async fn execute<D: Link>(
         Command::Push(config) => {
             events.progress("Sending the config...");
             let bytes = ops::write_config(device, info, &config, |progress| match progress {
-                WriteProgress::Sent { done, total } => events.progress(format!("Sent {done} of {total} bytes...")),
+                WriteProgress::Sent { done, total } => {
+                    events.progress_of(format!("Sent {done} of {total} bytes..."), done, total)
+                }
                 WriteProgress::Applying => events.progress("Applying, release all keys..."),
             })
             .await?;
@@ -316,7 +338,7 @@ async fn update_firmware<D: Link>(
             let percent = done * 100 / total;
             if last_percent != Some(percent) {
                 last_percent = Some(percent);
-                events.progress(format!("Sending firmware {version}: {percent}%..."));
+                events.progress_of(format!("Sending firmware {version}..."), done, total);
             }
         }
         FirmwareProgress::Checking => events.progress("Checking the firmware..."),

@@ -28,11 +28,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
         ui.add_space(theme::GAP_S);
 
-        // Spinner above the text: a horizontal row wouldn't be centered.
         let device = &app.device;
         if let Some(busy) = &device.busy {
-            ui.spinner();
-            ui.label(busy);
+            theme::busy_centered(ui, busy, WIDTH);
         } else if device.worker.is_none() {
             ui.colored_label(ui.visuals().error_fg_color, "Keyboard worker is not running");
         } else if let Some((error, text)) = &device.status {

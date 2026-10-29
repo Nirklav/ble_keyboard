@@ -3,6 +3,8 @@
 
 use eframe::egui::{self, Color32, CornerRadius, FontFamily, FontId, RichText, Stroke, TextStyle};
 
+use crate::device::Busy;
+
 /// Spacing scale.
 pub const GAP_XS: f32 = 4.0;
 pub const GAP_S: f32 = 8.0;
@@ -128,6 +130,35 @@ pub fn status(ui: &mut egui::Ui, color: Color32, text: &str) -> egui::Response {
     painter.circle_filled(egui::pos2(rect.left() + DOT / 2.0, rect.center().y), DOT / 2.0, color);
     painter.galley(egui::pos2(rect.left() + DOT + GAP_S, rect.top()), galley, ui.visuals().text_color());
     response
+}
+
+/// Status of a running command in a row: a progress bar `width` wide if it's known how much is done,
+/// a spinner otherwise, and the text.
+pub fn busy(ui: &mut egui::Ui, busy: &Busy, width: f32) {
+    ui.horizontal(|ui| {
+        match busy.fraction {
+            Some(fraction) => progress_bar(ui, fraction, width),
+            None => {
+                ui.spinner();
+            }
+        }
+        ui.label(&busy.text);
+    });
+}
+
+/// [`busy`] for a centered column `width` wide: the bar or the spinner above the text, a row wouldn't be centered.
+pub fn busy_centered(ui: &mut egui::Ui, busy: &Busy, width: f32) {
+    match busy.fraction {
+        Some(fraction) => progress_bar(ui, fraction, width),
+        None => {
+            ui.spinner();
+        }
+    }
+    ui.label(&busy.text);
+}
+
+fn progress_bar(ui: &mut egui::Ui, fraction: f32, width: f32) {
+    ui.add(egui::ProgressBar::new(fraction).desired_width(width).fill(ACCENT).show_percentage());
 }
 
 /// Small colored square and a weak label explaining that color.

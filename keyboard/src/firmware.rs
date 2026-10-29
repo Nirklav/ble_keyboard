@@ -28,6 +28,10 @@ use protocol::image::BUILD_ID_LEN;
 const RESTART_DELAY: Duration = Duration::from_millis(500);
 /// The decompressor state and the block are on the heap.
 const STACK_SIZE: usize = 8 * 1024;
+/// Stack of the thread that starts a transfer: `InflateState::new_boxed` builds the decompressor state on the
+/// stack before it moves to the heap, a frame of about 10 KiB in a release build and 43 KiB in a debug one.
+/// Too much for [`STACK_SIZE`], and only needed for that moment.
+const BEGIN_STACK_SIZE: usize = if cfg!(debug_assertions) { 48 * 1024 } else { 16 * 1024 };
 
 /// The running firmware is new and not confirmed yet.
 static PENDING: AtomicBool = AtomicBool::new(false);
@@ -265,7 +269,18 @@ impl Update {
             error!("No OTA slot to update");
             return Err(ErrorCode::Storage);
         };
-        self.receiver.begin(len, crc32, image_len, slot.size as usize)?;
+        let max_image_len = slot.size as usize;
+        let receiver = &mut self.receiver;
+        thread::scope(|scope| {
+            let begin = move || receiver.begin(len, crc32, image_len, max_image_len);
+            match thread::Builder::new().stack_size(BEGIN_STACK_SIZE).spawn_scoped(scope, begin) {
+                Ok(thread) => thread.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                Err(e) => {
+                    error!("Can't start the firmware update thread: {}", e);
+                    Err(ErrorCode::Busy)
+                },
+            }
+        })?;
         match Ota::begin(partition) {
             Ok(ota) => self.ota = Some(ota),
             Err(e) => {

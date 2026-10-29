@@ -2,7 +2,7 @@
 
 [package]
 name = "keyboard"
-version = "0.2.2"
+version = "0.2.3"
 authors = ["Nirklav <mrAnton911@gmail.com>"]
 edition = "2021"
 resolver = "2"
