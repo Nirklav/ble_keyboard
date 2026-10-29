@@ -4,13 +4,23 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use protocol::hid::{self, ErrorCode, Info, Request, Response};
+use protocol::hid::{self, ErrorCode, Info, Request, Response, Versions};
 
 use crate::time::sleep;
 
 /// How often a [`ErrorCode::Busy`] request is retried.
 const BUSY_RETRIES: usize = 5;
 const BUSY_DELAY: Duration = Duration::from_millis(500);
+
+/// Error of a request that didn't reach the keyboard: the write of its report failed.
+#[derive(Debug, Clone, Copy)]
+pub struct NotSent(pub &'static str);
+
+impl std::fmt::Display for NotSent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "can't send {}", self.0)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -29,7 +39,31 @@ pub trait Link {
     where
         Self: Sized;
 
-    /// Firmware info.
+    /// Firmware versions: the first request, a firmware of any protocol version answers it
+    /// (see the update part in [`protocol::hid`]).
+    async fn versions(&mut self) -> Result<Versions> {
+        match self.request(&Request::GetVersions).await {
+            Ok(Response::Versions(versions)) => Ok(versions),
+            Ok(response) => bail!("unexpected response to GetVersions: {response:?}"),
+            // Firmware 0.1.0 has no GetVersions and no update yet: update version 0.
+            Err(error) if error.downcast_ref::<ErrorCode>() == Some(&ErrorCode::BadRequest) => {
+                let info = self.info().await?;
+                Ok(Versions {
+                    firmware_version: info.firmware_version,
+                    protocol_version: info.protocol_version,
+                    update_version: 0,
+                    build_id: [0; protocol::image::BUILD_ID_LEN],
+                    board: protocol::image::KEYBOARD_PROJECT.to_string(),
+                    device_id: [0; 6],
+                    slot_size: 0,
+                    features: 0,
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Firmware info, only for a firmware of the app protocol version.
     async fn info(&mut self) -> Result<Info> {
         match self.request(&Request::GetInfo).await? {
             Response::Info(info) => Ok(info),
@@ -61,6 +95,16 @@ pub trait Link {
     }
 }
 
+/// Response in the message of an input report. An error code of a newer firmware (they are appended) is an
+/// error of its own: the rest of the response can't be decoded.
+pub fn decode_response(message: &[u8]) -> Result<Response> {
+    Response::from_bytes(message).or_else(|error| match message {
+        // `Response::Error` and the code, both varints; the tag is part of the update part, it stays.
+        [3, code, ..] => bail!("the keyboard failed the request with error {code}, unknown to the app: update the app"),
+        _ => Err(error).context("can't decode response"),
+    })
+}
+
 /// Output report (without the report ID) with `request`.
 pub fn encode(request: &Request) -> Result<[u8; hid::REPORT_LEN]> {
     let bytes = request.to_bytes();
@@ -78,5 +122,9 @@ pub fn name(request: &Request) -> &'static str {
         Request::ResetToDefault => "ResetToDefault",
         Request::Ping => "Ping",
         Request::End => "End",
+        Request::FirmwareBegin { .. } => "FirmwareBegin",
+        Request::FirmwareChunk { .. } => "FirmwareChunk",
+        Request::FirmwareCommit => "FirmwareCommit",
+        Request::GetVersions => "GetVersions",
     }
 }

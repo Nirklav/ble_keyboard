@@ -17,7 +17,7 @@ use protocol::hid::{self, Request, Response};
 use wasm_bindgen::prelude::*;
 use web_sys::{HidDevice, HidDeviceFilter, HidDeviceRequestOptions, HidInputReportEvent};
 
-use crate::link::{Link, Options, encode, name};
+use crate::link::{Link, NotSent, Options, decode_response, encode, name};
 use crate::time::timeout;
 
 pub struct Device {
@@ -89,19 +89,19 @@ impl Link for Device {
         // Late responses of timed out requests.
         while self.reports.try_recv().is_ok() {}
 
-        let sent = self.device.send_report_with_u8_slice(hid::REPORT_ID, &mut report).map_err(js_error)?;
+        let sent = self.device.send_report_with_u8_slice(hid::REPORT_ID, &mut report).map_err(js_error).context(NotSent(name(request)))?;
         timeout(self.timeout, sent.into_future())
             .await
             .with_context(|| format!("{} send timed out", name(request)))?
             .map_err(js_error)
-            .with_context(|| format!("can't send {}", name(request)))?;
+            .context(NotSent(name(request)))?;
 
         let report = timeout(self.timeout, self.reports.next())
             .await
             .with_context(|| format!("no response to {} within {:?}", name(request), self.timeout))?
             .ok_or_else(|| anyhow!("keyboard disconnected"))?;
         let message = hid::decode(&report).ok_or_else(|| anyhow!("bad response report {report:02x?}"))?;
-        Response::from_bytes(message).context("can't decode response")
+        decode_response(message)
     }
 
     async fn close(mut self) {

@@ -1,6 +1,14 @@
-# ESP-IDF Partition Table
-# Name,   Type, SubType, Offset,  Size, Flags
-nvs,      data, nvs,     0x9000,  0x6000,
-phy_init, data, phy,     0xf000,  0x1000,
-factory,  app,  factory, 0x10000, 0x300000,
-storage,  data, fat,     ,        0xF0000,
+# ESP-IDF Partition Table, 4 MB flash
+# Two OTA slots for the firmware update over the config protocol (src/firmware.rs); a wired flash
+# (scripts/flash.sh) writes ota_0 and erases otadata, so the keyboard boots it whatever slot ran before.
+# nvs (bonds) and storage (config) keep their place across firmware changes.
+# The wear levelling of storage keeps its state at the partition end. The old table (factory app, storage
+# 0xF0000 at 0x310000) had it at 0x3FD000..0x400000, a storage ending there would take that state, sized
+# for the old partition, and break; at the start of the old app the new one finds none and formats itself.
+# Name,   Type, SubType, Offset,   Size,
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+otadata,  data, ota,     0x10000,  0x2000,
+storage,  data, fat,     0x20000,  0x20000,
+ota_0,    app,  ota_0,   0x40000,  0x1E0000,
+ota_1,    app,  ota_1,   0x220000, 0x1E0000,

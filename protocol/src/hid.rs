@@ -28,8 +28,20 @@
 //! The keyboard encodes its current config on every request, so `total_len` is checked to be the
 //! same in all chunks.
 //!
+//! Firmware update flow (`image` is an app image, see [`crate::image`];
+//! `bytes = firmware::compress(image)`, see [`crate::firmware`]):
+//! 1. [`Request::FirmwareBegin`] with `len = bytes.len()`, `crc32 = crc32(&bytes)` and
+//!    `image_len = image.len()` → [`Response::Ok`]. Starts a new update and drops an unfinished one.
+//! 2. [`Request::FirmwareChunk`] for every chunk of `bytes`, like [`Request::WriteChunk`] → [`Response::Ok`].
+//!    The keyboard decompresses and writes the image to its update slot on the way.
+//! 3. [`Request::FirmwareCommit`] → the keyboard checks length, CRC and the image, makes it the boot
+//!    one and answers [`Response::Ok`], then restarts into it.
+//! 4. The app reconnects and sends [`Request::GetVersions`]: the first request (any one) confirms the new firmware.
+//!    Without one for [`ROLLBACK_TIMEOUT`](crate::firmware::ROLLBACK_TIMEOUT) (it can't connect, crashes),
+//!    the keyboard goes back to the old one.
+//!
 //! Any failed request is answered with [`Response::Error`]; a failed write step aborts the
-//! transfer, the app starts again from [`Request::WriteBegin`].
+//! transfer, the app starts again from [`Request::WriteBegin`] / [`Request::FirmwareBegin`].
 //! [`Request::ResetToDefault`] replaces the config with the factory one → [`Response::Ok`].
 //!
 //! Session: while the app is connected it sends [`Request::Ping`] every [`PING_INTERVAL`] and
@@ -39,9 +51,27 @@
 //!
 //! Compatibility: new requests, responses and error codes are only appended;
 //! [`PROTOCOL_VERSION`] is bumped on any other change.
+//!
+//! Update part: an app updates a keyboard of any [`PROTOCOL_VERSION`], so this part stays the same when
+//! it's bumped. It's the reports (collection, report ID and length, [`encode`] / [`decode`]), the requests
+//! [`Request::GetVersions`], [`Request::Ping`], [`Request::End`] and the firmware ones, the responses
+//! [`Response::Ok`], [`Response::Error`] and [`Response::Versions`]: their variant indices and fields,
+//! and [`ErrorCode`], only appended to. An app connects with [`Request::GetVersions`] and uses the rest
+//! of the protocol only if [`Versions::protocol_version`] is its own. Any change of the update part bumps
+//! [`UPDATE_VERSION`]; an app updates only a keyboard of its own one, another one is flashed over USB.
+//!
+//! The update part grows without that: a new update feature is new requests (appended, so a firmware
+//! without them answers [`ErrorCode::BadRequest`]) and a bit in [`Versions::features`] that tells the
+//! app the firmware has them. [`UPDATE_VERSION`] is for a change the old apps can't live with.
+//!
+//! Every firmware confirms itself the same way, so that any app (an old one too) does it by connecting:
+//! the first request after the restart, whatever it is.
 
-/// Version of this protocol, reported in [`Info::protocol_version`].
+/// Version of this protocol, reported in [`Versions::protocol_version`] and [`Info::protocol_version`].
 pub const PROTOCOL_VERSION: u16 = 1;
+
+/// Version of the update part of the protocol (see above), reported in [`Versions::update_version`].
+pub const UPDATE_VERSION: u16 = 1;
 
 /// How often the app sends [`Request::Ping`] while it's connected.
 pub const PING_INTERVAL: core::time::Duration = core::time::Duration::from_secs(5);
@@ -81,6 +111,11 @@ const ATT_HEADER: usize = 3;
 
 /// Min ATT MTU for a report to fit one BLE write / notification.
 pub const MIN_MTU: usize = REPORT_LEN + ATT_HEADER;
+
+/// Max length of [`Versions::firmware_version`] and [`Versions::board`] together for [`Response::Versions`]
+/// to fit a report: the rest takes at most 33 bytes (tag, two string lengths, the numbers as the longest
+/// varints, the arrays).
+pub const MAX_VERSIONS_TEXT: usize = MAX_MESSAGE_LEN - 33;
 
 /// Max length of an encoded config the keyboard accepts.
 pub const MAX_CONFIG_SIZE: usize = 8 * 1024;
@@ -143,6 +178,41 @@ mod messages {
         pub firmware_version: String,
     }
 
+    /// Versions of the firmware and its protocol, the answer to [`Request::GetVersions`].
+    /// Part of the update part of the protocol: never changes, see the module docs.
+    /// The strings are short: the encoding fits a report with `firmware_version` and `board` of up to
+    /// [`MAX_VERSIONS_TEXT`](super::MAX_VERSIONS_TEXT) bytes together.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Versions {
+        /// Firmware crate version.
+        pub firmware_version: String,
+        /// [`PROTOCOL_VERSION`](super::PROTOCOL_VERSION) of the firmware.
+        pub protocol_version: u16,
+        /// [`UPDATE_VERSION`](super::UPDATE_VERSION) of the firmware.
+        pub update_version: u16,
+        /// [`build_id`](crate::image::build_id) of the running image: tells a reinstalled build of the same
+        /// version from the old one, all zeros if the firmware can't read it.
+        pub build_id: [u8; crate::image::BUILD_ID_LEN],
+        /// Board the firmware is built for: the project name of its image, the firmware installs only
+        /// images of the same one (see [`crate::image`]).
+        pub board: String,
+        /// Tells keyboards apart (the Bluetooth MAC address): the app reconnects to the same one after the
+        /// update. All zeros if the firmware can't read it.
+        pub device_id: [u8; 6],
+        /// Size of the update slot: the max image length of [`Request::FirmwareBegin`].
+        pub slot_size: u32,
+        /// Optional update features of the firmware, bits of [`UpdateFeatures`]. A bit an app doesn't
+        /// know is ignored by it.
+        pub features: u32,
+    }
+
+    bitflags::bitflags! {
+        /// [`Versions::features`]. None yet: a faster transfer, a resumed one or another compression would
+        /// be one, each with requests of its own appended to the update part.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub struct UpdateFeatures: u32 {}
+    }
+
     /// Request of the app, sent in the output report.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub enum Request {
@@ -162,6 +232,15 @@ mod messages {
         Ping,
         /// Ends the session, the keyboard may sleep again → [`Response::Ok`].
         End,
+        /// Starts a firmware update of `len` compressed bytes with CRC-32 `crc32`, `image_len` bytes
+        /// once decompressed → [`Response::Ok`].
+        FirmwareBegin { len: u32, crc32: u32, image_len: u32 },
+        /// Next chunk of the compressed firmware, `offset` must be the number of bytes sent so far → [`Response::Ok`].
+        FirmwareChunk { offset: u32, data: Vec<u8> },
+        /// Checks and activates the firmware → [`Response::Ok`], then the keyboard restarts.
+        FirmwareCommit,
+        /// → [`Response::Versions`]: the first request of an app, for a keyboard of any protocol version.
+        GetVersions,
     }
 
     /// Response of the keyboard to a [`Request`], sent in the input report.
@@ -172,6 +251,7 @@ mod messages {
         ConfigChunk { total_len: u32, offset: u32, data: Vec<u8> },
         Ok,
         Error(ErrorCode),
+        Versions(Versions),
     }
 
     /// Why a request failed.
@@ -179,9 +259,11 @@ mod messages {
     pub enum ErrorCode {
         /// Request can't be decoded.
         BadRequest,
-        /// Write step without [`Request::WriteBegin`], chunk at a wrong offset or commit before all bytes arrived.
+        /// Write step without [`Request::WriteBegin`] / [`Request::FirmwareBegin`], chunk at a wrong offset
+        /// or commit before all bytes arrived.
         OutOfOrder,
-        /// Config is larger than [`MAX_CONFIG_SIZE`] or a chunk goes past the announced length.
+        /// Config is larger than [`MAX_CONFIG_SIZE`], firmware is larger than the update slot,
+        /// or a chunk goes past the announced length.
         TooLarge,
         /// CRC-32 of the received bytes differs from the announced one.
         CrcMismatch,
@@ -191,6 +273,8 @@ mod messages {
         Storage,
         /// Keyboard can't handle the request now, try again later.
         Busy,
+        /// Firmware is not an image of the keyboard firmware, or it's broken.
+        InvalidImage,
     }
 
     impl fmt::Display for ErrorCode {
@@ -198,11 +282,12 @@ mod messages {
             f.write_str(match self {
                 ErrorCode::BadRequest => "bad request",
                 ErrorCode::OutOfOrder => "request out of order",
-                ErrorCode::TooLarge => "config too large",
+                ErrorCode::TooLarge => "too large",
                 ErrorCode::CrcMismatch => "CRC mismatch",
                 ErrorCode::Invalid => "invalid config",
                 ErrorCode::Storage => "storage error",
                 ErrorCode::Busy => "busy",
+                ErrorCode::InvalidImage => "invalid firmware image",
             })
         }
     }
@@ -226,7 +311,7 @@ mod messages {
         )*};
     }
 
-    postcard_helpers!(Info, Request, Response);
+    postcard_helpers!(Info, Versions, Request, Response);
 
     impl From<Result<(), ErrorCode>> for Response {
         fn from(result: Result<(), ErrorCode>) -> Self {
@@ -369,6 +454,66 @@ mod tests {
                 receiver.chunk(offset, chunk)?;
             }
             receiver.commit()
+        }
+
+        /// The update part of the protocol is encoded the same forever (see the module docs):
+        /// a failure here means [`UPDATE_VERSION`] must be bumped, or the change undone.
+        #[test]
+        fn update_part_is_frozen() {
+            let requests = [
+                (Request::Ping, vec![6]),
+                (Request::End, vec![7]),
+                (Request::FirmwareBegin { len: 1, crc32: 2, image_len: 3 }, vec![8, 1, 2, 3]),
+                (Request::FirmwareChunk { offset: 1, data: vec![9] }, vec![9, 1, 1, 9]),
+                (Request::FirmwareCommit, vec![10]),
+                (Request::GetVersions, vec![11]),
+            ];
+            for (request, bytes) in requests {
+                assert_eq!(request.to_bytes(), bytes, "{request:?}");
+            }
+            let versions = Versions {
+                firmware_version: "1.2".into(),
+                protocol_version: 1,
+                update_version: 1,
+                build_id: [1, 2, 3, 4, 5, 6, 7, 8],
+                board: "kb".into(),
+                device_id: [9, 10, 11, 12, 13, 14],
+                slot_size: 0x80,
+                features: 1,
+            };
+            let mut versions_bytes = vec![4, 3, b'1', b'.', b'2', 1, 1, 1, 2, 3, 4, 5, 6, 7, 8, 2, b'k', b'b'];
+            versions_bytes.extend_from_slice(&[9, 10, 11, 12, 13, 14, 0x80, 0x01, 1]);
+            let responses = [
+                (Response::Ok, vec![2]),
+                (Response::Error(ErrorCode::BadRequest), vec![3, 0]),
+                (Response::Error(ErrorCode::InvalidImage), vec![3, 7]),
+                (Response::Versions(versions), versions_bytes),
+            ];
+            for (response, bytes) in responses {
+                assert_eq!(response.to_bytes(), bytes, "{response:?}");
+            }
+            assert_eq!(UPDATE_VERSION, 1);
+
+            assert_eq!((USAGE_PAGE, USAGE, REPORT_ID, REPORT_LEN), (0xFF4B, 0x01, 0x04, 64));
+        }
+
+        #[test]
+        fn versions_fit_report() {
+            let versions = |text: usize| {
+                let text = "x".repeat(text);
+                Response::Versions(Versions {
+                    firmware_version: text[..text.len() / 2].into(),
+                    protocol_version: u16::MAX,
+                    update_version: u16::MAX,
+                    build_id: [0xFF; crate::image::BUILD_ID_LEN],
+                    board: text[text.len() / 2..].into(),
+                    device_id: [0xFF; 6],
+                    slot_size: u32::MAX,
+                    features: u32::MAX,
+                })
+            };
+            assert!(encode(&versions(MAX_VERSIONS_TEXT).to_bytes()).is_some());
+            assert!(encode(&versions(MAX_VERSIONS_TEXT + 1).to_bytes()).is_none());
         }
 
         #[test]

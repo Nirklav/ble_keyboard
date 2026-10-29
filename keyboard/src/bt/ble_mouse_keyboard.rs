@@ -340,7 +340,7 @@ impl BleMouseKeyboard {
 
         hid.set_battery_level(100);
 
-        let config_service = ConfigService::register(width, height, current_config, wake, input_config, &output_config);
+        let config_service = ConfigService::register(width, height, current_config, wake, input_config, &output_config)?;
         let disconnect_service = config_service.clone();
         let disconnect_profiles = profiles.clone();
         let dropping = Arc::new(AtomicBool::new(false));

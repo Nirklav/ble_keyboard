@@ -1,4 +1,5 @@
-//! `kb`: reads and writes the keyboard config over HID (the keyboard connected over Bluetooth LE).
+//! `kb`: reads and writes the keyboard config and updates its firmware over HID (the keyboard
+//! connected over Bluetooth LE).
 
 mod commands;
 
@@ -37,6 +38,12 @@ enum Command {
     },
     /// Restores the factory config on the keyboard.
     Reset,
+    /// Sends a new firmware to the keyboard, which restarts into it.
+    Update {
+        /// Firmware app image: `espflash save-image --chip esp32c3 <ELF> <file>`. Without it, the firmware
+        /// bundled with this build.
+        file: Option<PathBuf>,
+    },
     /// Validates a TOML config without connecting to the keyboard.
     Check {
         /// TOML config file.
@@ -56,6 +63,7 @@ async fn main() -> ExitCode {
         Command::Pull { file } => commands::pull(&options, file).await,
         Command::Push { file } => commands::push(&options, file).await,
         Command::Reset => commands::reset(&options).await,
+        Command::Update { file } => commands::update(&options, file.as_deref()).await,
         Command::Check { file } => commands::check(file),
         Command::UdevRule => {
             commands::udev_rule();

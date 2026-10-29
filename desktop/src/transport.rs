@@ -13,7 +13,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use hidapi::{HidApi, HidDevice};
 use protocol::hid::{self, Request, Response};
 
-use crate::link::{Link, Options, encode, name};
+use crate::link::{Link, NotSent, Options, decode_response, encode, name};
 
 /// Gives the user at the computer access to the keyboard's hidraw device: Bluetooth bus (0005),
 /// [`hid::VENDOR_ID`], [`hid::PRODUCT_ID`].
@@ -66,7 +66,7 @@ impl Link for Device {
         let mut input = [0; READ_LEN];
         while self.device.read_timeout(&mut input, 0).context("can't read from the keyboard")? > 0 {}
 
-        self.device.write(&output).with_context(|| format!("can't send {}", name(request)))?;
+        self.device.write(&output).context(NotSent(name(request)))?;
 
         let deadline = Instant::now() + self.timeout;
         loop {
@@ -84,7 +84,7 @@ impl Link for Device {
                 .filter(|report| report.len() <= hid::REPORT_LEN)
                 .and_then(hid::decode)
                 .ok_or_else(|| anyhow!("bad response report {:02x?}", &input[..len]))?;
-            return Response::from_bytes(message).context("can't decode response");
+            return decode_response(message);
         }
     }
 

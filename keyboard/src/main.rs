@@ -7,6 +7,7 @@ mod bt;
 mod key_matrix;
 mod layout;
 mod display;
+mod firmware;
 mod i2c_bus;
 mod joystick;
 mod sc;
@@ -46,6 +47,15 @@ use crate::sc::SpecialCombinations;
 use crate::services::Services;
 // Not used directly: its timer queue is what esp-idf-svc's embassy time driver links against.
 use embassy_time as _;
+
+/// Our app description instead of the ESP-IDF one (project `libespidf`): the firmware update checks
+/// the project name of an image, see `protocol::image`.
+mod app_desc {
+    // The macro checks cfgs of other ESP-IDF versions.
+    #![allow(unexpected_cfgs)]
+    // `true`: build time and date in the right fields (`{}` matches the `()` arm of the macro, which swaps them).
+    esp_idf_sys::esp_app_desc!(true);
+}
 
 type Mcp23s17 = mcp23s17::Mcp23s17<SpiDeviceDriver<'static, Rc<SpiDriver<'static>>>>;
 
@@ -196,7 +206,8 @@ fn wait_for_activity<const W: usize, const H: usize>(
     // so the keyboard stays idle and checks again after the whole timeout (never zero, no busy loop).
     while notification.wait(timeout).is_none() {
         timeout = TickType::new_millis(deep_sleep_ms).into();
-        if !svc.keyboard.config_service().session_active() {
+        // A wake-up from deep sleep is a reset, it would drop a firmware pending verification.
+        if !svc.keyboard.config_service().session_active() && !firmware::pending_verification() {
             info!("entering deep sleep");
             // The display is not worth staying awake for.
             if let Err(e) = svc.display.turn_off() {
@@ -204,7 +215,7 @@ fn wait_for_activity<const W: usize, const H: usize>(
             }
             enter_deep_sleep(&wakeup_pins(&svc.key_matrix, joystick));
         }
-        info!("deep sleep postponed, the config app is connected");
+        info!("deep sleep postponed: the config app is connected or the firmware is not confirmed yet");
     }
 
     svc.keyboard.set_active();

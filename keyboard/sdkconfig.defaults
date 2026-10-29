@@ -1,3 +1,9 @@
+# Flash: 4 MB, two OTA slots, see partitions.csv
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+# A new firmware that doesn't confirm itself (src/firmware.rs) is rolled back on the next boot.
+# The bootloader does it: flash the one built with this config, see scripts/flash.sh.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
 # Rust often needs a bit of an extra main task stack size compared to C (the default is 3K)
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8000
 CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=7000 

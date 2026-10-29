@@ -1,5 +1,5 @@
 //! CRC-32 (IEEE 802.3, the one of zip/png: reflected, polynomial `0xEDB88320`,
-//! init and final xor `0xFFFFFFFF`), used to check transferred and stored configs.
+//! init and final xor `0xFFFFFFFF`), used to check transferred and stored configs and firmware.
 
 const TABLE: [u32; 256] = make_table();
 
@@ -20,7 +20,12 @@ const fn make_table() -> [u32; 256] {
 }
 
 pub fn crc32(bytes: &[u8]) -> u32 {
-    !bytes.iter().fold(!0u32, |crc, &byte| {
+    crc32_update(0, bytes)
+}
+
+/// CRC-32 of the bytes `crc` was computed of, followed by `bytes`: `crc32_update(crc32(a), b) == crc32(a ++ b)`.
+pub fn crc32_update(crc: u32, bytes: &[u8]) -> u32 {
+    !bytes.iter().fold(!crc, |crc, &byte| {
         TABLE[((crc ^ byte as u32) & 0xFF) as usize] ^ (crc >> 8)
     })
 }
@@ -33,5 +38,6 @@ mod tests {
     fn check_value() {
         assert_eq!(crc32(b""), 0);
         assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+        assert_eq!(crc32_update(crc32(b"1234"), b"56789"), 0xCBF4_3926);
     }
 }

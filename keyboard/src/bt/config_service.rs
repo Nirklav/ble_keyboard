@@ -4,6 +4,7 @@
 //! they only use [`State`] behind a mutex. Requests that change the config ([`Request::WriteCommit`],
 //! [`Request::ResetToDefault`]) are handed to the main loop through [`ConfigService::take_submitted`],
 //! the main loop applies them once all keys are up and answers with [`ConfigService::finish`].
+//! Firmware requests and [`Request::GetVersions`] go to the [`FirmwareUpdate`] thread, it answers them.
 
 use std::num::NonZeroU32;
 use std::sync::{Arc, MutexGuard};
@@ -17,6 +18,7 @@ use protocol::hid::{self, ConfigReceiver, ErrorCode, Info, Request, Response};
 use protocol::config::{CONFIG_VERSION, MAX_COMBOS, MAX_LAYOUTS};
 
 use crate::config::Pending;
+use crate::firmware::FirmwareUpdate;
 
 /// The keyboard stays active (no idle connection parameters) this long after the last transfer request.
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(5);
@@ -30,6 +32,7 @@ pub struct ConfigService {
     /// Wakes the main loop up from `wait_for_activity`.
     wake: Arc<Notifier>,
     info: Arc<Info>,
+    firmware: FirmwareUpdate,
 }
 
 struct State {
@@ -56,7 +59,7 @@ impl ConfigService {
         wake: Arc<Notifier>,
         input: Arc<Mutex<BLECharacteristic>>,
         output: &Mutex<BLECharacteristic>,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let info = Info {
             protocol_version: hid::PROTOCOL_VERSION,
             config_version: CONFIG_VERSION,
@@ -66,6 +69,9 @@ impl ConfigService {
             max_combos: MAX_COMBOS as u8,
             firmware_version: env!("CARGO_PKG_VERSION").into(),
         };
+
+        let firmware_input = input.clone();
+        let firmware = FirmwareUpdate::spawn(move |response| send(&firmware_input, response))?;
 
         let config_service = Self {
             state: Arc::new(std::sync::Mutex::new(State {
@@ -79,6 +85,7 @@ impl ConfigService {
             input,
             wake,
             info: Arc::new(info),
+            firmware,
         };
 
         let callback_service = config_service.clone();
@@ -96,7 +103,7 @@ impl ConfigService {
             }
         });
 
-        config_service
+        Ok(config_service)
     }
 
     /// Handles a request in the NimBLE task (the output report is locked, the input one is not).
@@ -117,6 +124,7 @@ impl ConfigService {
             warn!("Config service: bad request {:02x?}", data);
             return (Some(Response::Error(ErrorCode::BadRequest)), true);
         };
+        self.firmware.link_works();
 
         let mut state = self.lock();
         match request {
@@ -129,6 +137,8 @@ impl ConfigService {
             },
             Request::End => {
                 info!("Config session ended");
+                // An unfinished firmware transfer ends with the session.
+                self.firmware.abort();
                 state.last_seen = None;
                 state.last_request = None;
                 return (Some(Response::Ok), false);
@@ -145,7 +155,7 @@ impl ConfigService {
 
     /// Handles a config request, see [`Self::handle`].
     fn handle_transfer(&self, state: &mut State, request: Request) -> Option<Response> {
-        if state.busy && request != Request::GetInfo {
+        if state.busy && !matches!(request, Request::GetInfo | Request::GetVersions) {
             return Some(Response::Error(ErrorCode::Busy));
         }
 
@@ -173,6 +183,14 @@ impl ConfigService {
                 state.receiver.abort();
                 state.submitted = Some(Pending::Reset);
                 state.busy = true;
+                return None;
+            },
+            // The versions too: the build ID takes a read of the whole image.
+            Request::GetVersions
+            | Request::FirmwareBegin { .. }
+            | Request::FirmwareChunk { .. }
+            | Request::FirmwareCommit => {
+                self.firmware.request(request);
                 return None;
             },
             Request::Ping | Request::End => unreachable!("handled by the caller"),
@@ -223,21 +241,11 @@ impl ConfigService {
         state.receiver.abort();
         state.last_request = None;
         state.last_seen = None;
+        self.firmware.abort();
     }
 
     fn send(&self, response: &Response) {
-        let bytes = response.to_bytes();
-        // Fits a report: chunks are sized by it, other responses are small.
-        let Some(report) = hid::encode(&bytes) else {
-            warn!("Config response of {} bytes doesn't fit a report", bytes.len());
-            return;
-        };
-        let mut input = self.input.lock();
-        if input.subscribed_count() == 0 {
-            warn!("Config response dropped, nobody is subscribed");
-            return;
-        }
-        input.set_value(&report).notify();
+        send(&self.input, response);
     }
 
     fn wake_main_loop(&self) {
@@ -251,4 +259,20 @@ impl ConfigService {
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
+}
+
+/// Notifies `response` in the config input report.
+fn send(input: &Mutex<BLECharacteristic>, response: &Response) {
+    let bytes = response.to_bytes();
+    // Fits a report: chunks are sized by it, other responses are small.
+    let Some(report) = hid::encode(&bytes) else {
+        warn!("Config response of {} bytes doesn't fit a report", bytes.len());
+        return;
+    };
+    let mut input = input.lock();
+    if input.subscribed_count() == 0 {
+        warn!("Config response dropped, nobody is subscribed");
+        return;
+    }
+    input.set_value(&report).notify();
 }

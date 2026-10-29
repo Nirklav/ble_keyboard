@@ -59,16 +59,21 @@ pub fn decode(bytes: &[u8], width: u8, height: u8) -> Result<(Config, u16), Load
 }
 
 /// Reads the saved config, `Ok(None)` if there is none.
-/// A config stored with an older version is saved again upgraded.
-pub fn load(width: u8, height: u8) -> Result<Option<Config>, LoadError> {
+/// A config stored with an older version is saved again upgraded if `save_upgraded`, otherwise it's
+/// upgraded on every load until then.
+pub fn load(width: u8, height: u8, save_upgraded: bool) -> Result<Option<Config>, LoadError> {
     let Some((config, stored_version)) = load_stored(width, height)? else {
         return Ok(None);
     };
 
     if stored_version != CONFIG_VERSION {
-        log::info!("Saving config upgraded from version {} to {}", stored_version, CONFIG_VERSION);
-        if let Err(e) = save(&config) {
-            log::error!("Failed to save upgraded config: {}", e);
+        if save_upgraded {
+            log::info!("Saving config upgraded from version {} to {}", stored_version, CONFIG_VERSION);
+            if let Err(e) = save(&config) {
+                log::error!("Failed to save upgraded config: {}", e);
+            }
+        } else {
+            log::info!("Config upgraded from version {} to {}, saved once the firmware is confirmed", stored_version, CONFIG_VERSION);
         }
     }
     Ok(Some(config))

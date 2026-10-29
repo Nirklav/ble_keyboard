@@ -8,7 +8,7 @@ use desktop::config_file;
 use desktop::link::Options;
 use desktop::ops;
 use eframe::egui;
-use protocol::hid::Info;
+use protocol::hid::{Info, Versions};
 use protocol::config::{Config, JoystickButton};
 
 use crate::device::{Command, DeviceWorker, Event};
@@ -118,6 +118,8 @@ pub enum Discarding {
 pub enum Dialog {
     Discard(Discarding),
     ConfirmReset,
+    /// Install the bundled firmware of this version.
+    ConfirmUpdate(String),
     Message { title: String, text: String },
 }
 
@@ -128,6 +130,12 @@ pub struct DeviceState {
     /// Info of the last connected keyboard.
     pub info: Option<Info>,
     pub connected: bool,
+    /// Versions of the last connected keyboard.
+    pub versions: Option<Versions>,
+    /// The last keyboard runs a firmware the app can't edit, only update.
+    pub incompatible: bool,
+    /// [`Event::Incompatible`] came, the [`Event::Failed`] of its command keeps it.
+    detected_incompatible: bool,
     /// Status text of the running command, `None` if idle.
     pub busy: Option<String>,
     /// Result of the last command, `true` for errors.
@@ -144,6 +152,13 @@ impl DeviceState {
 
     pub fn is_busy(&self) -> bool {
         self.busy.is_some()
+    }
+
+    /// The keyboard is gone: its versions don't tell what an update would find.
+    fn forget_keyboard(&mut self) {
+        self.versions = None;
+        self.incompatible = false;
+        self.detected_incompatible = false;
     }
 
     pub fn set_status(&mut self, error: bool, text: impl Into<String>) {
@@ -181,6 +196,9 @@ impl App {
             worker: None,
             info: None,
             connected: false,
+            versions: None,
+            incompatible: false,
+            detected_incompatible: false,
             busy: None,
             status: None,
         };
@@ -222,6 +240,10 @@ impl App {
     /// Closes the editors of the old screen.
     pub fn go(&mut self, screen: Screen) {
         if screen != self.screen {
+            // The start screen shows errors and the result of an update from it, not the results of the editor.
+            if screen == Screen::Start && matches!(self.device.status, Some((false, _))) {
+                self.device.status = None;
+            }
             self.screen = screen;
             self.key_editor = None;
             self.picking = None;
@@ -297,12 +319,20 @@ impl App {
             }
             match event {
                 Event::Progress(text) => self.device.busy = Some(text),
-                Event::Connected(info) => {
+                Event::Connected(versions, info) => {
+                    self.device.versions = Some(versions);
+                    self.device.incompatible = false;
                     self.device.info = Some(info);
                     self.device.connected = true;
                 }
                 Event::Done(text) => self.device.set_status(false, text),
+                Event::Incompatible(versions) => {
+                    self.device.versions = Some(versions);
+                    self.device.incompatible = true;
+                    self.device.detected_incompatible = true;
+                }
                 Event::Disconnected => {
+                    self.device.forget_keyboard();
                     self.device.connected = false;
                     self.device.status = None;
                     self.go(Screen::Start);
@@ -322,6 +352,10 @@ impl App {
                 }
                 Event::Failed(error) => {
                     self.pushing = None;
+                    // Otherwise the keyboard is gone, or in a state unknown after the failed command.
+                    if !std::mem::take(&mut self.device.detected_incompatible) {
+                        self.device.forget_keyboard();
+                    }
                     // A lost connection leads back to the start screen, like a disconnect.
                     if std::mem::take(&mut self.device.connected) {
                         self.go(Screen::Start);
@@ -541,6 +575,7 @@ impl App {
         let frame = egui::Frame::popup(&ctx.global_style()).inner_margin(theme::GAP_L);
         let response = egui::Modal::new(egui::Id::unique("dialog")).frame(frame).show(ctx, |ui| {
             ui.set_max_width(420.0);
+            let text;
             let (title, text, confirm) = match dialog {
                 Dialog::Discard(_) => {
                     ("Unsaved changes", "The config has unsaved changes. Discard them?", Some("Discard"))
@@ -550,6 +585,13 @@ impl App {
                     "Restore the factory config on the keyboard? The current keyboard config is lost.",
                     Some("Reset"),
                 ),
+                Dialog::ConfirmUpdate(version) => {
+                    text = format!(
+                        "Install firmware {version} bundled with the app? The keyboard restarts into it, which takes \
+                         about a minute; the config stays. A firmware that doesn't start is rolled back."
+                    );
+                    ("Update the firmware", text.as_str(), Some("Update"))
+                }
                 Dialog::Message { title, text } => (title.as_str(), text.as_str(), None),
             };
             ui.label(theme::screen_title(title));
@@ -580,6 +622,7 @@ impl App {
             match self.dialog.take() {
                 Some(Dialog::Discard(action)) => self.run_discarding(ctx, action),
                 Some(Dialog::ConfirmReset) => self.device.send(Command::Reset),
+                Some(Dialog::ConfirmUpdate(_)) => self.device.send(Command::UpdateFirmware),
                 _ => {}
             }
         } else if close {

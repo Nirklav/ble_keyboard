@@ -765,7 +765,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "desktop"
-version = "0.1.0"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -2462,6 +2462,7 @@ name = "protocol"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.13.2",
+ "miniz_oxide 0.8.9",
  "postcard",
  "serde",
  "toml 0.8.23",

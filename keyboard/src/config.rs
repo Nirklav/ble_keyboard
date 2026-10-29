@@ -4,6 +4,7 @@ use protocol::config::Config;
 use protocol::keymap::Keymap;
 
 use crate::config_store;
+use crate::firmware;
 use crate::layout::default_config;
 use crate::sc::SpecialCombinations;
 use crate::services::Services;
@@ -46,7 +47,9 @@ pub fn load(width: u8, height: u8, bypass: bool) -> (Config, Source) {
         return (default_config(), Source::Bypass);
     }
 
-    match config_store::load(width, height) {
+    // The old firmware can't read an upgraded config: it stays as it is until the new firmware is
+    // confirmed, a rollback finds it.
+    match config_store::load(width, height, !firmware::running_state_pending()) {
         Ok(Some(config)) => {
             info!("Saved config loaded");
             (config, Source::Saved)

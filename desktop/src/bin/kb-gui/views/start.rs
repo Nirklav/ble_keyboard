@@ -2,7 +2,9 @@
 
 use eframe::egui;
 
-use crate::app::{App, Discarding};
+use desktop::ops;
+
+use crate::app::{App, Dialog, Discarding};
 use crate::theme;
 
 /// Width of the column in the middle: the connect button and the other buttons.
@@ -33,8 +35,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ui.label(busy);
         } else if device.worker.is_none() {
             ui.colored_label(ui.visuals().error_fg_color, "Keyboard worker is not running");
-        } else if let Some((true, error)) = &device.status {
-            ui.colored_label(ui.visuals().error_fg_color, error);
+        } else if let Some((error, text)) = &device.status {
+            // Not an error here: the result of an update from this screen (the others are cleared on the way here).
+            let color = if *error { ui.visuals().error_fg_color } else { ui.visuals().text_color() };
+            ui.colored_label(color, text);
+        }
+        if !device.is_busy() {
+            update(app, ui, idle);
         }
         ui.add_space(theme::GAP_L);
 
@@ -48,6 +55,24 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             });
         });
     });
+}
+
+/// Update to the bundled firmware for a keyboard whose firmware the app can't edit.
+fn update(app: &mut App, ui: &mut egui::Ui, idle: bool) {
+    let (Some(versions), true, Some(bundled)) = (&app.device.versions, app.device.incompatible, ops::bundled_firmware())
+    else {
+        return;
+    };
+    ui.add_space(theme::GAP_S);
+    let compatible = ops::check_update(versions, bundled);
+    let button = ui.add_enabled(idle && compatible.is_ok(), egui::Button::new(format!("Update firmware to {}", bundled.version)));
+    let button = match &compatible {
+        Ok(()) => button.on_hover_text("Install the firmware bundled with the app (asks first)"),
+        Err(error) => button.on_disabled_hover_text(format!("{error:#}")),
+    };
+    if button.clicked() {
+        app.dialog = Some(Dialog::ConfirmUpdate(bundled.version.clone()));
+    }
 }
 
 /// Ways to edit a config without the keyboard.

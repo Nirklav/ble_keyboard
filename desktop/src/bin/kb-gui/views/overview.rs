@@ -6,7 +6,9 @@ use eframe::egui;
 use protocol::hid;
 use protocol::config::{CONFIG_VERSION, MAX_LAYOUTS, Settings};
 
-use crate::app::{App, Screen};
+use desktop::ops::{self, Firmware};
+
+use crate::app::{App, Dialog, Screen};
 use crate::editing;
 use crate::theme;
 use crate::views::{NAV_SIZE, nav_button};
@@ -89,9 +91,9 @@ fn number(ui: &mut egui::Ui, name: &str, value: &mut u16, range: RangeInclusive<
 }
 
 /// Info of the connected keyboard in one line, nothing offline.
-fn keyboard(app: &App, ui: &mut egui::Ui) {
+fn keyboard(app: &mut App, ui: &mut egui::Ui) {
     let device = &app.device;
-    let (Some(info), true) = (&device.info, device.connected) else {
+    let (Some(info), Some(versions), true) = (&device.info, &device.versions, device.connected) else {
         return;
     };
     // One weak line; a version other than the app one is highlighted, it may break reading or writing.
@@ -104,8 +106,19 @@ fn keyboard(app: &App, ui: &mut egui::Ui) {
             egui::RichText::new(format!("{text} (app: {app})")).color(warn)
         }
     };
+    // The bundled firmware, whether the keyboard runs that very build, whether it can be installed.
+    let bundled = ops::bundled_firmware()
+        .map(|bundled| (bundled, bundled.runs_on(versions), ops::check_update(versions, bundled)));
+    let firmware = format!("Firmware {}", versions.firmware_version);
+    let firmware = match bundled {
+        Some((bundled, false, _)) if bundled.version == versions.firmware_version => {
+            egui::RichText::new(format!("{firmware} (app: another build)")).color(warn)
+        }
+        Some((bundled, false, _)) => egui::RichText::new(format!("{firmware} (app: {})", bundled.version)).color(warn),
+        _ => egui::RichText::new(firmware).color(ui.visuals().weak_text_color()),
+    };
     let parts = [
-        egui::RichText::new(format!("Firmware {}", info.firmware_version)).color(ui.visuals().weak_text_color()),
+        firmware,
         version("Protocol", info.protocol_version, hid::PROTOCOL_VERSION),
         version("Config format", info.config_version, CONFIG_VERSION),
         egui::RichText::new(format!(
@@ -121,8 +134,34 @@ fn keyboard(app: &App, ui: &mut egui::Ui) {
             }
             ui.label(part);
         }
+        if let Some((bundled, runs, compatible)) = bundled {
+            ui.add_space(theme::GAP_XS);
+            update_button(app, ui, bundled, runs, compatible);
+        }
     });
     ui.add_space(theme::GAP_L);
+}
+
+/// Installs the firmware bundled with the app, asks first; `compatible` is [`ops::check_update`].
+fn update_button(app: &mut App, ui: &mut egui::Ui, bundled: &Firmware, runs: bool, compatible: anyhow::Result<()>) {
+    let version = &bundled.version;
+    let (label, hint) = if runs {
+        ("Reinstall", format!("Install firmware {version} bundled with the app again, the keyboard runs it already"))
+    } else {
+        ("Update", format!("Install firmware {version} bundled with the app"))
+    };
+    let disabled = match compatible {
+        Err(error) => Some(format!("{error:#}")),
+        Ok(()) if app.device.is_busy() => Some("Wait for the keyboard command to finish".to_string()),
+        Ok(()) => None,
+    };
+    let button = ui
+        .add_enabled(disabled.is_none(), egui::Button::new(label).small())
+        .on_hover_text(hint)
+        .on_disabled_hover_text(disabled.unwrap_or_default());
+    if button.clicked() {
+        app.dialog = Some(Dialog::ConfirmUpdate(version.clone()));
+    }
 }
 
 /// Layout buttons and "Add".

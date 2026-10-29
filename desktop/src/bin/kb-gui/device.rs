@@ -17,16 +17,16 @@ use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use desktop::link::{Link, Options};
-use desktop::ops::{self, WriteProgress};
+use desktop::ops::{self, FirmwareProgress, WriteProgress};
 use desktop::time::{sleep, timeout};
 use desktop::{Device, EXAMPLE_CONFIG, config_file};
 use eframe::egui;
 use futures::StreamExt;
 use futures::channel::mpsc as async_mpsc;
 use protocol::config::{Config, MAX_COMBOS, MAX_LAYOUTS};
-use protocol::hid::{self, ConfigReceiver, Info, Request, Response};
+use protocol::hid::{self, ConfigReceiver, ErrorCode, Info, Request, Response, Versions};
 
 /// How long dropping the worker waits for it to end the session.
 #[cfg(not(target_arch = "wasm32"))]
@@ -45,6 +45,8 @@ pub enum Command {
     Push(Box<Config>),
     /// Restores the factory config.
     Reset,
+    /// Installs the bundled firmware, reconnects after the restart.
+    UpdateFirmware,
     Disconnect,
 }
 
@@ -54,8 +56,10 @@ pub enum Event {
     /// Status text of the running command.
     Progress(String),
     /// Connected to the keyboard (sent before the command continues).
-    Connected(Info),
-    /// [`Command::Connect`] or [`Command::Reset`] is done, with a status text.
+    Connected(Versions, Info),
+    /// The keyboard firmware is one the app can't edit, only update (sent before the command fails).
+    Incompatible(Versions),
+    /// [`Command::Connect`], [`Command::Reset`] or [`Command::UpdateFirmware`] is done, with a status text.
     Done(String),
     Disconnected,
     Pulled(Box<Config>),
@@ -69,7 +73,7 @@ pub enum Event {
 impl Event {
     /// Whether the command is finished.
     pub fn is_final(&self) -> bool {
-        !matches!(self, Event::Progress(_) | Event::Connected(_))
+        !matches!(self, Event::Progress(_) | Event::Connected(..) | Event::Incompatible(_))
     }
 }
 
@@ -88,8 +92,6 @@ impl DeviceWorker {
     /// `fake` talks to a [`FakeDevice`] instead of a real keyboard.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn spawn(ctx: egui::Context, fake: bool) -> Result<DeviceWorker> {
-        use anyhow::Context;
-
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -155,8 +157,10 @@ impl EventSender {
     }
 }
 
+/// Connection to a keyboard the app can edit, see [`open`].
 struct Connection<D> {
     device: D,
+    versions: Versions,
     info: Info,
 }
 
@@ -215,22 +219,25 @@ async fn execute<D: Link>(
     command: Command,
     events: &EventSender,
 ) -> Result<Event> {
-    if matches!(command, Command::Disconnect) {
-        if let Some(old) = connection.take() {
-            old.device.close().await;
+    match command {
+        Command::Disconnect => {
+            if let Some(old) = connection.take() {
+                old.device.close().await;
+            }
+            return Ok(Event::Disconnected);
         }
-        return Ok(Event::Disconnected);
+        // Also for a keyboard the app can't edit, it doesn't need a connection.
+        Command::UpdateFirmware => return update_firmware(connection, connect, options, events).await,
+        _ => {}
     }
-    let Connection { device, info } = match connection {
+    let Connection { device, info, .. } = match connection {
         Some(connection) => connection,
         None => {
             events.progress("Connecting to the keyboard...");
             let mut device = connect(options).await?;
             events.progress("Reading the keyboard info...");
-            let info = device.info().await?;
-            events.send(Event::Connected(info.clone()));
-            ops::check_protocol(&info)?;
-            connection.insert(Connection { device, info })
+            let versions = device.versions().await?;
+            connection.insert(open(device, versions, events).await?)
         }
     };
 
@@ -254,9 +261,85 @@ async fn execute<D: Link>(
             ops::reset_config(device, info).await?;
             Event::Done("Factory config restored on the keyboard, Read to edit it".to_string())
         }
-        Command::Disconnect => unreachable!("handled above"),
+        Command::Disconnect | Command::UpdateFirmware => unreachable!("handled above"),
     })
 }
+
+/// Connection to a keyboard the app can edit: speaks the app protocol, has a config version it reads
+/// (also for Connect, which reads nothing: such a config is of a firmware the app doesn't know).
+/// Otherwise closes `device`, sends [`Event::Incompatible`] and fails with the reason.
+async fn open<D: Link>(mut device: D, versions: Versions, events: &EventSender) -> Result<Connection<D>> {
+    let reason = match ops::check_protocol(versions.protocol_version) {
+        Ok(()) => {
+            let info = device.info().await?;
+            match ops::check_config_version(&info) {
+                Ok(()) => {
+                    events.send(Event::Connected(versions.clone(), info.clone()));
+                    return Ok(Connection { device, versions, info });
+                }
+                Err(reason) => reason,
+            }
+        }
+        Err(reason) => reason,
+    };
+    // Nothing to do on it but the update, which connects itself: the keyboard may sleep meanwhile.
+    device.close().await;
+    events.send(Event::Incompatible(versions));
+    Err(reason)
+}
+
+/// [`Command::UpdateFirmware`]: on the open connection or a new one; the keyboard restarts, the new connection
+/// replaces the old one.
+async fn update_firmware<D: Link>(
+    connection: &mut Option<Connection<D>>,
+    connect: &mut impl AsyncFnMut(&Options) -> Result<D>,
+    options: &Options,
+    events: &EventSender,
+) -> Result<Event> {
+    let firmware = ops::bundled_firmware().context("the app has no bundled firmware")?;
+    let version = &firmware.version;
+    // The session is gone with the restart.
+    let (mut device, versions) = match connection.take() {
+        Some(Connection { device, versions, .. }) => (device, versions),
+        None => {
+            events.progress("Connecting to the keyboard...");
+            let mut device = connect(options).await?;
+            let versions = device.versions().await?;
+            (device, versions)
+        }
+    };
+    events.progress(format!("Sending firmware {version}..."));
+    // One event per percent, not per chunk (thousands of them).
+    let mut last_percent = None;
+    let sent = ops::update_firmware(&mut device, &versions, firmware, |progress| match progress {
+        FirmwareProgress::Sent { done, total } => {
+            let percent = done * 100 / total;
+            if last_percent != Some(percent) {
+                last_percent = Some(percent);
+                events.progress(format!("Sending firmware {version}: {percent}%..."));
+            }
+        }
+        FirmwareProgress::Checking => events.progress("Checking the firmware..."),
+    })
+    .await;
+    if let Err(error) = sent {
+        // The keyboard didn't restart: end the session, so it may sleep again.
+        device.close().await;
+        return Err(error);
+    }
+    drop(device);
+
+    events.progress("Waiting for the keyboard to restart...");
+    let (device, versions) = ops::reconnect_after_update(versions.device_id, async || connect(options).await).await?;
+    if let Err(error) = firmware.check_running(&versions) {
+        device.close().await;
+        return Err(error);
+    }
+    *connection = Some(open(device, versions, events).await?);
+    Ok(Event::Done(format!("Firmware {version} is running")))
+}
+
+const FAKE_FIRMWARE: &str = "0.0.0-fake";
 
 /// Fake keyboard of the default size: answers like a real one, slowly; the written config outlives the connection
 /// (`stored`), the factory one is the example config.
@@ -277,7 +360,7 @@ impl Link for FakeDevice {
                 height: ops::DEFAULT_SIZE.1,
                 max_layouts: MAX_LAYOUTS as u8,
                 max_combos: MAX_COMBOS as u8,
-                firmware_version: "0.0.0-fake".to_string(),
+                firmware_version: FAKE_FIRMWARE.to_string(),
             }),
             Request::ReadConfig { offset } => Response::config_chunk(&self.stored.borrow(), *offset, hid::CHUNK_SIZE),
             Request::WriteBegin { len, crc32 } => self.receiver.begin(*len, *crc32).into(),
@@ -294,7 +377,20 @@ impl Link for FakeDevice {
                 *self.stored.borrow_mut() = self.factory.to_vec();
                 Response::Ok
             }
+            Request::GetVersions => Response::Versions(Versions {
+                firmware_version: FAKE_FIRMWARE.to_string(),
+                protocol_version: hid::PROTOCOL_VERSION,
+                update_version: hid::UPDATE_VERSION,
+                build_id: [0; protocol::image::BUILD_ID_LEN],
+                board: protocol::image::KEYBOARD_PROJECT.to_string(),
+                device_id: [0x02, 0, 0, 0, 0, 0x01],
+                slot_size: 0x1E_0000,
+                features: 0,
+            }),
             Request::Ping | Request::End => Response::Ok,
+            Request::FirmwareBegin { .. } | Request::FirmwareChunk { .. } | Request::FirmwareCommit => {
+                Response::Error(ErrorCode::BadRequest)
+            }
         })
     }
 
