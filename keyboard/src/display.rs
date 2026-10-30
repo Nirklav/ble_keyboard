@@ -15,6 +15,7 @@ use ssd1306::{I2CDisplayInterface, size::DisplaySize128x32};
 use ssd1306::prelude::{Brightness, DisplayRotation, I2CInterface};
 use ssd1306::mode::{BufferedGraphicsMode, DisplayConfig};
 
+use crate::firmware;
 use crate::i2c_bus::SharedI2c;
 
 /// How long a pop-up is shown, the slides in and out included.
@@ -36,6 +37,12 @@ const PLATE_HEIGHT: u32 = 24;
 /// Between the text and the plate's sides; a long text takes the whole width.
 const PLATE_PADDING: u32 = 8;
 const PLATE_RADIUS: u32 = 4;
+/// How often the progress of a firmware update is checked. The display thread reads it itself: the main loop
+/// rarely runs meanwhile, the update thread (of the display's priority) has chunks to handle all the time.
+const UPDATE_POLL: Duration = Duration::from_millis(200);
+/// Progress bar of a firmware update, under its text.
+const BAR_TOP: i32 = 20;
+const BAR_HEIGHT: u32 = 10;
 
 /// Of the display thread: drawing, a flush and logging an error took the 3.5 KB esp_timer task before,
 /// the frame buffer (512 bytes) is on this stack now.
@@ -49,6 +56,8 @@ pub struct Display {
     sender: Sender<Msg>,
     /// The main loop's copy of the status: an unchanged one isn't sent.
     status: Mutex<Status>,
+    /// The main loop's copy of whether a firmware update is shown, likewise.
+    update: Mutex<bool>,
     /// The thread has died, logged once.
     gone: AtomicBool
 }
@@ -67,6 +76,9 @@ impl Display {
             status_changed: false,
             woken: false,
             popup: None,
+            updating: false,
+            update_drawn: None,
+            update_changed: false,
             off_at: None,
             on: false
         };
@@ -80,6 +92,7 @@ impl Display {
         Ok(Self {
             sender,
             status: Mutex::new(Status::default()),
+            update: Mutex::new(false),
             gone: AtomicBool::new(false)
         })
     }
@@ -97,6 +110,17 @@ impl Display {
         }
         *status = Status { layer: layer.to_string(), profile };
         self.send(Msg::Status(status.clone()))
+    }
+
+    /// A firmware update is received: its progress ([`firmware::update_progress`]) is shown instead of anything
+    /// else until it's turned off.
+    pub fn set_update(&self, updating: bool) -> anyhow::Result<()> {
+        let mut update = lock(&self.update)?;
+        if *update == updating {
+            return Ok(());
+        }
+        *update = updating;
+        self.send(Msg::Update(updating))
     }
 
     /// A key was pressed or released: the status is shown again, if it has gone off, for another timeout.
@@ -124,6 +148,7 @@ impl Display {
 enum Msg {
     Text(String),
     Status(Status),
+    Update(bool),
     Wake,
     /// Answered once the display is off.
     Off(Sender<anyhow::Result<()>>)
@@ -176,6 +201,11 @@ struct Screen {
     woken: bool,
     /// Shown instead of the status until it's over, the status is drawn then.
     popup: Option<Popup>,
+    /// A firmware update is shown instead of the pop-ups and the status, which never goes off meanwhile.
+    updating: bool,
+    /// Its progress on the screen.
+    update_drawn: Option<u8>,
+    update_changed: bool,
     /// When the status goes off; not counted under a pop-up, it starts over after one.
     off_at: Option<Instant>,
     on: bool
@@ -185,6 +215,7 @@ impl Screen {
     fn run(mut self, receiver: Receiver<Msg>) {
         loop {
             let next_at = match &self.popup {
+                _ if self.updating => Some(Instant::now() + UPDATE_POLL),
                 Some(popup) => Some(popup.frame_at),
                 None => self.off_at,
             };
@@ -222,10 +253,18 @@ impl Screen {
                 self.status = status;
                 self.status_changed = true;
             },
+            Msg::Update(updating) => {
+                self.updating = updating;
+                self.update_drawn = None;
+                self.update_changed = true;
+            },
             Msg::Wake => self.woken = true,
             Msg::Off(ack) => {
                 // Nothing that came before comes back on.
                 self.popup = None;
+                self.updating = false;
+                self.update_drawn = None;
+                self.update_changed = false;
                 self.status_changed = false;
                 self.woken = false;
                 self.off_at = None;
@@ -239,7 +278,21 @@ impl Screen {
     fn update(&mut self) -> anyhow::Result<()> {
         let now = Instant::now();
         let woken = mem::take(&mut self.woken);
-        let mut ended = false;
+        let update_changed = mem::take(&mut self.update_changed);
+        if self.updating {
+            // Pop-ups that came meanwhile are over, the status is drawn after the update (if it fails).
+            self.popup = None;
+            self.off_at = None;
+            // A failed update stays at its last progress until the main loop turns it off.
+            let progress = firmware::update_progress().or(self.update_drawn).unwrap_or(0);
+            if self.update_drawn == Some(progress) {
+                return Ok(());
+            }
+            // Even if drawing fails: it's tried again on the next change only.
+            self.update_drawn = Some(progress);
+            return self.draw_update(progress);
+        }
+        let mut ended = update_changed;
         if let Some(mut popup) = self.popup.take() {
             let elapsed = now - popup.shown_at;
             if let Some(progress) = Popup::progress(elapsed) {
@@ -322,6 +375,35 @@ impl Screen {
             .draw(display));
         map_err!(display.flush());
         // Off, it was cleared before: on only with the first frame drawn.
+        if !self.on {
+            map_err!(display.set_display_on(true));
+            self.on = true;
+        }
+        Ok(())
+    }
+
+    /// `Updating NN%` and a bar `progress` percent full.
+    fn draw_update(&mut self, progress: u8) -> anyhow::Result<()> {
+        let display = &mut self.display;
+        map_err!(display.clear(BinaryColor::Off));
+        let text = format!("Updating {progress}%");
+        map_err!(Text::with_text_style(&text, Point::new(WIDTH / 2, BAR_TOP / 2), style(), aligned(Alignment::Center))
+            .draw(display));
+        let outline = PrimitiveStyleBuilder::new()
+            .stroke_color(BinaryColor::On)
+            .stroke_width(1)
+            .stroke_alignment(StrokeAlignment::Inside)
+            .build();
+        map_err!(Rectangle::new(Point::new(0, BAR_TOP), Size::new(WIDTH as u32, BAR_HEIGHT))
+            .into_styled(outline)
+            .draw(display));
+        // Inside the outline, one pixel off it.
+        let full = (WIDTH as u32 - 4) * progress.min(100) as u32 / 100;
+        let fill = PrimitiveStyleBuilder::new().fill_color(BinaryColor::On).build();
+        map_err!(Rectangle::new(Point::new(2, BAR_TOP + 2), Size::new(full, BAR_HEIGHT - 4))
+            .into_styled(fill)
+            .draw(display));
+        map_err!(display.flush());
         if !self.on {
             map_err!(display.set_display_on(true));
             self.on = true;

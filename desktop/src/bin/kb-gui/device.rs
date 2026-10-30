@@ -13,6 +13,7 @@
 //! to look at the UI in every connection state.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -191,7 +192,12 @@ async fn work(commands: Commands, events: EventSender, fake: bool) {
         let (width, height) = ops::DEFAULT_SIZE;
         let connect = async |_: &Options| {
             sleep(Duration::from_millis(1000)).await;
-            Ok(FakeDevice { factory: factory.clone(), stored: stored.clone(), receiver: ConfigReceiver::new(width, height) })
+            Ok(FakeDevice {
+                factory: factory.clone(),
+                stored: stored.clone(),
+                receiver: ConfigReceiver::new(width, height),
+                responses: VecDeque::new(),
+            })
         };
         run(commands, events, connect).await;
     } else {
@@ -369,12 +375,13 @@ struct FakeDevice {
     factory: Rc<[u8]>,
     stored: Rc<RefCell<Vec<u8>>>,
     receiver: ConfigReceiver,
+    /// Responses to the sent requests, not received yet.
+    responses: VecDeque<Response>,
 }
 
-impl Link for FakeDevice {
-    async fn request_once(&mut self, request: &Request) -> Result<Response> {
-        sleep(Duration::from_millis(60)).await;
-        Ok(match request {
+impl FakeDevice {
+    async fn answer(&mut self, request: &Request) -> Response {
+        match request {
             Request::GetInfo => Response::Info(Info {
                 protocol_version: hid::PROTOCOL_VERSION,
                 config_version: protocol::config::CONFIG_VERSION,
@@ -413,7 +420,25 @@ impl Link for FakeDevice {
             Request::FirmwareBegin { .. } | Request::FirmwareChunk { .. } | Request::FirmwareCommit => {
                 Response::Error(ErrorCode::BadRequest)
             }
-        })
+        }
+    }
+}
+
+impl Link for FakeDevice {
+    fn drain(&mut self) -> Result<()> {
+        self.responses.clear();
+        Ok(())
+    }
+
+    async fn send(&mut self, request: &Request) -> Result<()> {
+        let response = self.answer(request).await;
+        self.responses.push_back(response);
+        Ok(())
+    }
+
+    async fn receive(&mut self, name: &'static str) -> Result<Response> {
+        sleep(Duration::from_millis(60)).await;
+        self.responses.pop_front().with_context(|| format!("no response to {name}"))
     }
 
     async fn close(self) {}

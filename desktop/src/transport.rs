@@ -56,23 +56,28 @@ impl Device {
 }
 
 impl Link for Device {
-    async fn request_once(&mut self, request: &Request) -> Result<Response> {
+    fn drain(&mut self) -> Result<()> {
+        let mut input = [0; READ_LEN];
+        while self.device.read_timeout(&mut input, 0).context("can't read from the keyboard")? > 0 {}
+        Ok(())
+    }
+
+    async fn send(&mut self, request: &Request) -> Result<()> {
         let report = encode(request)?;
         let mut output = [0; 1 + hid::REPORT_LEN];
         output[0] = hid::REPORT_ID;
         output[1..].copy_from_slice(&report);
-
-        // Late responses of timed out requests.
-        let mut input = [0; READ_LEN];
-        while self.device.read_timeout(&mut input, 0).context("can't read from the keyboard")? > 0 {}
-
         self.device.write(&output).context(NotSent(name(request)))?;
+        Ok(())
+    }
 
+    async fn receive(&mut self, name: &'static str) -> Result<Response> {
+        let mut input = [0; READ_LEN];
         let deadline = Instant::now() + self.timeout;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                bail!("no response to {} within {:?}", name(request), self.timeout);
+                bail!("no response to {name} within {:?}", self.timeout);
             }
             let millis = i32::try_from(left.as_millis()).unwrap_or(i32::MAX).max(1);
             let len = self.device.read_timeout(&mut input, millis).context("can't read from the keyboard")?;

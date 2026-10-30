@@ -151,6 +151,7 @@ fn main_body() -> anyhow::Result<()> {
         }
         special_combinations.try_apply(&mut svc)?;
         svc.update_status()?;
+        svc.update_firmware_state()?;
 
         if all_up && svc.keymap.is_idle() {
             config::apply_changes(&mut svc, &mut special_combinations)?;
@@ -185,6 +186,8 @@ fn wait_for_activity<const W: usize, const H: usize>(
             return Ok(());
         }
     }
+    // An update that stopped coming is off the display before the keyboard idles.
+    svc.update_firmware_state()?;
 
     info!("idle");
     special_combinations.reset();

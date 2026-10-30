@@ -7,7 +7,9 @@
 //! Firmware requests and [`Request::GetVersions`] go to the [`FirmwareUpdate`] thread, it answers them.
 
 use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, MutexGuard};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use esp32_nimble::utilities::mutex::Mutex;
@@ -23,12 +25,19 @@ use crate::firmware::FirmwareUpdate;
 /// The keyboard stays active (no idle connection parameters) this long after the last transfer request.
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long a response of the firmware thread waits for NimBLE buffers: the app sends up to
+/// [`hid::CHUNK_WINDOW`] chunks at once, their answers may come faster than the link sends them.
+const SEND_RETRY_TIMEOUT: Duration = Duration::from_secs(2);
+const SEND_RETRY_DELAY: Duration = Duration::from_millis(5);
+
 /// Shared between the GATT callbacks and the main loop.
 #[derive(Clone)]
 pub struct ConfigService {
     state: Arc<std::sync::Mutex<State>>,
     /// HID config input report, responses to the requests of the output report.
     input: Arc<Mutex<BLECharacteristic>>,
+    /// Connection of the last request, the responses go to it.
+    conn_handle: Arc<AtomicU16>,
     /// Wakes the main loop up from `wait_for_activity`.
     wake: Arc<Notifier>,
     info: Arc<Info>,
@@ -70,8 +79,18 @@ impl ConfigService {
             firmware_version: env!("CARGO_PKG_VERSION").into(),
         };
 
+        let conn_handle = Arc::new(AtomicU16::new(0));
         let firmware_input = input.clone();
-        let firmware = FirmwareUpdate::spawn(move |response| send(&firmware_input, response))?;
+        let firmware_conn = conn_handle.clone();
+        let firmware_wake = wake.clone();
+        let firmware = FirmwareUpdate::spawn(
+            move |response| send(&firmware_input, firmware_conn.load(Ordering::Relaxed), response, SEND_RETRY_TIMEOUT),
+            // The main loop shows the update and asks for its connection params, the chunks don't wake it.
+            move || {
+                // The main task lives as long as the program.
+                unsafe { firmware_wake.notify(NonZeroU32::new(1).unwrap()) };
+            },
+        )?;
 
         let config_service = Self {
             state: Arc::new(std::sync::Mutex::new(State {
@@ -83,6 +102,7 @@ impl ConfigService {
                 last_seen: None,
             })),
             input,
+            conn_handle,
             wake,
             info: Arc::new(info),
             firmware,
@@ -94,6 +114,7 @@ impl ConfigService {
             if mtu < hid::MIN_MTU {
                 warn!("Config report over MTU {}, responses don't fit (needs {})", mtu, hid::MIN_MTU);
             }
+            callback_service.conn_handle.store(args.desc().conn_handle(), Ordering::Relaxed);
             match hid::decode(args.recv_data()) {
                 Some(data) => callback_service.on_request(data),
                 None => {
@@ -118,7 +139,8 @@ impl ConfigService {
     }
 
     /// Handles a request in the NimBLE task; the response is `None` if it's sent later by the main loop.
-    /// Returns whether to wake the main loop up: session requests don't, so the keyboard can still idle.
+    /// Returns whether to wake the main loop up: session requests don't, so the keyboard can still idle; nor do
+    /// firmware chunks, hundreds a second: the main loop learns of an update from its begin and commit.
     fn handle(&self, data: &[u8]) -> (Option<Response>, bool) {
         let Ok(request) = Request::from_bytes(data) else {
             warn!("Config service: bad request {:02x?}", data);
@@ -150,7 +172,8 @@ impl ConfigService {
         }
         state.last_request = Some(Instant::now());
         state.last_seen = state.last_request;
-        (self.handle_transfer(&mut state, request), true)
+        let wake = !matches!(request, Request::FirmwareChunk { .. });
+        (self.handle_transfer(&mut state, request), wake)
     }
 
     /// Handles a config request, see [`Self::handle`].
@@ -244,8 +267,9 @@ impl ConfigService {
         self.firmware.abort();
     }
 
+    /// No retries: the buffers are freed by the NimBLE task, the caller may be it.
     fn send(&self, response: &Response) {
-        send(&self.input, response);
+        send(&self.input, self.conn_handle.load(Ordering::Relaxed), response, Duration::ZERO);
     }
 
     fn wake_main_loop(&self) {
@@ -261,18 +285,33 @@ impl ConfigService {
     }
 }
 
-/// Notifies `response` in the config input report.
-fn send(input: &Mutex<BLECharacteristic>, response: &Response) {
+/// Notifies `response` in the config input report to `conn_handle`, retrying up to `retry` while NimBLE
+/// is out of buffers.
+fn send(input: &Mutex<BLECharacteristic>, conn_handle: u16, response: &Response, retry: Duration) {
     let bytes = response.to_bytes();
     // Fits a report: chunks are sized by it, other responses are small.
     let Some(report) = hid::encode(&bytes) else {
         warn!("Config response of {} bytes doesn't fit a report", bytes.len());
         return;
     };
-    let mut input = input.lock();
-    if input.subscribed_count() == 0 {
-        warn!("Config response dropped, nobody is subscribed");
-        return;
+    let start = Instant::now();
+    loop {
+        let mut input = input.lock();
+        if input.subscribed_count() == 0 {
+            warn!("Config response dropped, nobody is subscribed");
+            return;
+        }
+        input.set_value(&report);
+        match input.notify_with(&report, conn_handle) {
+            Ok(()) => return,
+            Err(e) if e.code() == esp_idf_sys::BLE_HS_ENOMEM && start.elapsed() < retry => {
+                drop(input);
+                thread::sleep(SEND_RETRY_DELAY);
+            },
+            Err(e) => {
+                warn!("Config response dropped: {}", e);
+                return;
+            },
+        }
     }
-    input.set_value(&report).notify();
 }

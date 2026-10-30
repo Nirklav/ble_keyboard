@@ -444,21 +444,33 @@ impl BleMouseKeyboard {
     /// Idle connection parameters (slave latency) for the host. Not for a connection that isn't accepted
     /// yet: it may be pairing, and a connection update would block its encryption (see `on_connect`).
     pub fn set_idle(&mut self) {
-        self.set_conn_params(true);
+        self.link.set_idle(true);
+        self.set_conn_params();
     }
 
     /// Active connection parameters for the host, see [`Self::set_idle`].
     pub fn set_active(&mut self) {
-        self.set_conn_params(false);
+        self.link.set_idle(false);
+        self.set_conn_params();
     }
 
-    fn set_conn_params(&mut self, idle: bool) {
-        // Before the check: a host accepted after it gets the idle params, see `on_authentication_complete`.
-        self.link.set_idle(idle);
+    /// A firmware update is being received: the shortest interval while active ([`ConnParams::TRANSFER`]).
+    pub fn set_transfer(&mut self, transfer: bool) {
+        if self.link.set_transfer(transfer) {
+            if let Some(desc) = self.server.connections().next() {
+                let interval = ConnParams::interval_ms(desc.conn_handle()).unwrap_or(0.0);
+                info!("Firmware transfer {}, connection interval {} ms", if transfer { "started" } else { "ended" }, interval);
+            }
+            self.set_conn_params();
+        }
+    }
+
+    fn set_conn_params(&mut self) {
+        // After the link has the state: a host accepted after it gets these params, see `on_authentication_complete`.
         if !self.host_connected() {
             return;
         }
-        let params = if idle { ConnParams::IDLE } else { ConnParams::ACTIVE };
+        let params = self.link.main_params();
         if let Some(desc) = self.server.connections().next() {
             self.link.request_conn_params(desc.conn_handle(), params);
         }
@@ -689,6 +701,8 @@ struct Deadlines {
     conn_params: Option<(u16, ConnParams)>,
     /// The main loop is idle, see [`Link::request_host_conn_params`].
     idle: bool,
+    /// A firmware update is being received, see [`BleMouseKeyboard::set_transfer`].
+    transfer: bool,
     /// A connection params request waits for the host, see [`ConnParams::request`].
     conn_params_pending: bool,
     /// NimBLE's request slot wasn't free yet, `conn_params` are sent then.
@@ -792,11 +806,25 @@ impl Link {
         self.deadlines().idle = idle;
     }
 
+    /// See [`BleMouseKeyboard::set_transfer`]; returns whether it changed.
+    fn set_transfer(&self, transfer: bool) -> bool {
+        let mut deadlines = self.deadlines();
+        let changed = deadlines.transfer != transfer;
+        deadlines.transfer = transfer;
+        changed
+    }
+
+    /// Params of the main loop's state.
+    fn main_params(&self) -> ConnParams {
+        let deadlines = self.deadlines();
+        ConnParams::of(deadlines.idle, deadlines.transfer)
+    }
+
     /// The host of connection `handle` has been accepted: asks it for the params of the main loop's state,
     /// the loop doesn't send them to a host accepted while it's idle.
     fn request_host_conn_params(&self, handle: u16) {
         let mut deadlines = self.deadlines();
-        let params = if deadlines.idle { ConnParams::IDLE } else { ConnParams::ACTIVE };
+        let params = ConnParams::of(deadlines.idle, deadlines.transfer);
         deadlines.conn_params = Some((handle, params));
         self.changed.notify_one();
     }

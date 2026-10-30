@@ -11,6 +11,8 @@ pub struct ConnParams {
 impl ConnParams {
     pub const IDLE: ConnParams = ConnParams::new(12, 24, 10, 70);
     pub const ACTIVE: ConnParams = ConnParams::new(6, 12, 0, 60);
+    /// While a firmware update is received: the shortest interval, a chunk takes about two of them.
+    pub const TRANSFER: ConnParams = ConnParams::new(6, 6, 0, 60);
 
     pub const fn new(min: u16, max: u16, latency: u16, timeout: u16) -> Self {
         Self {
@@ -19,6 +21,24 @@ impl ConnParams {
             latency,
             timeout
         }
+    }
+
+    /// Params for the main loop's state: idle, or receiving a firmware update while active.
+    pub fn of(idle: bool, transfer: bool) -> ConnParams {
+        match (idle, transfer) {
+            (true, _) => ConnParams::IDLE,
+            (false, true) => ConnParams::TRANSFER,
+            (false, false) => ConnParams::ACTIVE,
+        }
+    }
+
+    /// Interval of connection `conn_handle` in milliseconds, `None` if there's no such connection.
+    pub fn interval_ms(conn_handle: u16) -> Option<f32> {
+        let mut desc = esp_idf_sys::ble_gap_conn_desc::default();
+        if unsafe { esp_idf_sys::ble_gap_conn_find(conn_handle, &mut desc) } != 0 {
+            return None;
+        }
+        Some(desc.conn_itvl as f32 * 1.25)
     }
 
     /// Connection `conn_handle` runs with these params already. `None` if there's no such connection.

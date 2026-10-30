@@ -12,9 +12,10 @@
 //! Over BLE a report is one write / notification, so the connection's ATT MTU must be at least [`MIN_MTU`];
 //! the hosts negotiate more than that.
 //!
-//! Every [`Request`] is answered by exactly one [`Response`], the app sends the next request only after
-//! the response to the previous one arrived. Configs are transferred in chunks of at most [`CHUNK_SIZE`]
-//! bytes. All numbers in the messages are offsets/lengths in bytes of the postcard encoded config.
+//! Every [`Request`] is answered by exactly one [`Response`], in order. The app sends the next request only
+//! after the response to the previous one arrived, except [`Request::FirmwareChunk`]: up to [`CHUNK_WINDOW`]
+//! of them may wait for their responses. Configs are transferred in chunks of at most [`CHUNK_SIZE`] bytes. All numbers in the messages are
+//! offsets/lengths in bytes of the postcard encoded config.
 //!
 //! Write flow (`bytes = config.to_bytes()`):
 //! 1. [`Request::WriteBegin`] with `len = bytes.len()` and `crc32 = crc32(&bytes)` → [`Response::Ok`].
@@ -33,7 +34,10 @@
 //! 1. [`Request::FirmwareBegin`] with `len = bytes.len()`, `crc32 = crc32(&bytes)` and
 //!    `image_len = image.len()` → [`Response::Ok`]. Starts a new update and drops an unfinished one.
 //! 2. [`Request::FirmwareChunk`] for every chunk of `bytes`, like [`Request::WriteChunk`] → [`Response::Ok`].
-//!    The keyboard decompresses and writes the image to its update slot on the way.
+//!    The keyboard decompresses and writes the image to its update slot on the way. The app keeps up to
+//!    [`CHUNK_WINDOW`] chunks unanswered (a round trip
+//!    per chunk takes two BLE connection intervals) and stops at the first error; the chunks after it fail
+//!    with [`ErrorCode::OutOfOrder`].
 //! 3. [`Request::FirmwareCommit`] → the keyboard checks length, CRC and the image, makes it the boot
 //!    one and answers [`Response::Ok`], then restarts into it.
 //! 4. The app reconnects and sends [`Request::GetVersions`]: the first request (any one) confirms the new firmware.
@@ -105,6 +109,10 @@ pub const CHUNK_OVERHEAD: usize = 1 + 5 + 5 + 2;
 /// Max number of config bytes per [`Request::WriteChunk`] / [`Response::ConfigChunk`], so that the
 /// message fits a report.
 pub const CHUNK_SIZE: usize = MAX_MESSAGE_LEN - CHUNK_OVERHEAD;
+
+/// Max number of [`Request::FirmwareChunk`] sent without their responses. Below the 32 input reports Windows
+/// buffers for a HID device, and the NimBLE buffers of the keyboard.
+pub const CHUNK_WINDOW: usize = 16;
 
 /// ATT header of a BLE write / notification (opcode + handle).
 const ATT_HEADER: usize = 3;
@@ -207,8 +215,8 @@ mod messages {
     }
 
     bitflags::bitflags! {
-        /// [`Versions::features`]. None yet: a faster transfer, a resumed one or another compression would
-        /// be one, each with requests of its own appended to the update part.
+        /// [`Versions::features`]. None yet: a resumed transfer or another compression would be one, each
+        /// with requests of its own appended to the update part.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub struct UpdateFeatures: u32 {}
     }

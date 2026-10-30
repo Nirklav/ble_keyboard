@@ -13,11 +13,12 @@
 use std::ffi::CStr;
 use std::mem::ManuallyDrop;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration;
 use esp_idf_sys::{self as sys, esp, EspError};
 use log::{error, info, warn};
 use protocol::firmware::{FirmwareReceiver, ROLLBACK_TIMEOUT};
@@ -28,6 +29,9 @@ use protocol::image::BUILD_ID_LEN;
 const RESTART_DELAY: Duration = Duration::from_millis(500);
 /// The decompressor state and the block are on the heap.
 const STACK_SIZE: usize = 8 * 1024;
+/// That of the main task: with the chunks of an update queued (see [`hid::CHUNK_WINDOW`]) the thread is busy for
+/// long, the keys are scanned and the progress shown meanwhile. The default of the threads (5) starved the main loop.
+const PRIORITY: u8 = 1;
 /// Stack of the thread that starts a transfer: `InflateState::new_boxed` builds the decompressor state on the
 /// stack before it moves to the heap, a frame of about 10 KiB in a release build and 43 KiB in a debug one.
 /// Too much for [`STACK_SIZE`], and only needed for that moment.
@@ -35,6 +39,10 @@ const BEGIN_STACK_SIZE: usize = if cfg!(debug_assertions) { 48 * 1024 } else { 1
 
 /// The running firmware is new and not confirmed yet.
 static PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Percent of the update received, [`NO_UPDATE`] without one; see [`update_progress`].
+static PROGRESS: AtomicU8 = AtomicU8::new(NO_UPDATE);
+const NO_UPDATE: u8 = u8::MAX;
 
 enum Command {
     Request(Request),
@@ -47,6 +55,16 @@ enum Command {
 /// returned, before that see [`running_state_pending`].
 pub fn pending_verification() -> bool {
     PENDING.load(Ordering::Acquire)
+}
+
+/// Percent of the compressed image received, while an update is in progress; 100 from the last chunk until the
+/// restart into the new firmware.
+pub fn update_progress() -> Option<u8> {
+    Some(PROGRESS.load(Ordering::Relaxed)).filter(|&progress| progress != NO_UPDATE)
+}
+
+fn set_progress(progress: Option<u8>) {
+    PROGRESS.store(progress.unwrap_or(NO_UPDATE), Ordering::Relaxed);
 }
 
 /// Answer to [`Request::GetVersions`]: reads the whole running image for its hash, so it's made on the
@@ -90,16 +108,25 @@ pub struct FirmwareUpdate {
 }
 
 impl FirmwareUpdate {
-    /// Starts the thread; `respond` sends the answers to the requests.
-    pub fn spawn(respond: impl Fn(&Response) + Send + 'static) -> anyhow::Result<Self> {
+    /// Starts the thread; `respond` sends the answers to the requests, `on_update` is called when an update
+    /// starts or ends ([`update_progress`] turns `Some` or `None`).
+    pub fn spawn(
+        respond: impl Fn(&Response) + Send + 'static,
+        on_update: impl Fn() + Send + 'static,
+    ) -> anyhow::Result<Self> {
         // Before any request can reach `link_works`.
         let pending = log_running();
         PENDING.store(pending, Ordering::Release);
         let (commands, receiver) = mpsc::channel();
-        thread::Builder::new()
+        let default = ThreadSpawnConfiguration::get().unwrap_or_default();
+        let own = ThreadSpawnConfiguration { priority: PRIORITY, ..ThreadSpawnConfiguration::get().unwrap_or_default() };
+        own.set()?;
+        let spawned = thread::Builder::new()
             .name("firmware".into())
             .stack_size(STACK_SIZE)
-            .spawn(move || run(receiver, pending, respond))?;
+            .spawn(move || run(receiver, pending, respond, on_update));
+        default.set()?;
+        spawned?;
         Ok(Self { commands })
     }
 
@@ -123,11 +150,17 @@ impl FirmwareUpdate {
     }
 }
 
-fn run(commands: Receiver<Command>, pending: bool, respond: impl Fn(&Response)) {
+fn run(commands: Receiver<Command>, pending: bool, respond: impl Fn(&Response), on_update: impl Fn()) {
     let mut rollback_at = pending.then(|| Instant::now() + ROLLBACK_TIMEOUT);
     let mut versions = None;
     let mut update = Update::new();
+    let mut updating = false;
     loop {
+        // After the previous command, whichever way it went.
+        if update_progress().is_some() != updating {
+            updating = !updating;
+            on_update();
+        }
         let command = match rollback_at {
             Some(at) => match commands.recv_timeout(at.saturating_duration_since(Instant::now())) {
                 Ok(command) => command,
@@ -248,16 +281,35 @@ fn rollback() {
 struct Update {
     receiver: FirmwareReceiver,
     ota: Option<Ota>,
+    /// Compressed length, for [`update_progress`].
+    len: u32,
+    stats: Stats,
+}
+
+/// Where the time of an update goes, logged on commit: the rest of it the thread waits for chunks.
+struct Stats {
+    started: Instant,
+    /// Handling the chunks: decompressing and writing.
+    chunks: Duration,
+    /// Writing to the flash (a sector erase each block).
+    writes: Duration,
+}
+
+impl Stats {
+    fn new() -> Self {
+        Self { started: Instant::now(), chunks: Duration::ZERO, writes: Duration::ZERO }
+    }
 }
 
 impl Update {
     /// Takes images of the running firmware's board.
     fn new() -> Self {
-        Self { receiver: FirmwareReceiver::new(running_board()), ota: None }
+        Self { receiver: FirmwareReceiver::new(running_board()), ota: None, len: 0, stats: Stats::new() }
     }
 
     /// Returns whether an update was in progress.
     fn abort(&mut self) -> bool {
+        set_progress(None);
         self.receiver.abort();
         self.ota.take().is_some()
     }
@@ -282,7 +334,12 @@ impl Update {
             }
         })?;
         match Ota::begin(partition) {
-            Ok(ota) => self.ota = Some(ota),
+            Ok(ota) => {
+                self.ota = Some(ota);
+                self.len = len;
+                self.stats = Stats::new();
+                set_progress(Some(0));
+            },
             Err(e) => {
                 self.receiver.abort();
                 error!("Failed to start the firmware update: {}", e);
@@ -302,39 +359,87 @@ impl Update {
 
     fn chunk(&mut self, offset: u32, data: &[u8]) -> Result<(), ErrorCode> {
         let ota = self.ota.as_mut().ok_or(ErrorCode::OutOfOrder)?;
-        let result = self.receiver.chunk(offset, data, |block| ota.write(block));
-        if result.is_err() {
-            self.ota = None;
+        let start = Instant::now();
+        let writes = &mut self.stats.writes;
+        let result = self.receiver.chunk(offset, data, |block| {
+            let start = Instant::now();
+            let written = ota.write(block);
+            *writes += start.elapsed();
+            written
+        });
+        self.stats.chunks += start.elapsed();
+        match result {
+            Ok(()) => {
+                let received = offset as u64 + data.len() as u64;
+                set_progress(Some((received * 100 / self.len.max(1) as u64).min(100) as u8));
+            },
+            Err(_) => {
+                self.ota = None;
+                set_progress(None);
+            },
         }
         result
     }
 
     fn commit(&mut self) -> Result<(), ErrorCode> {
         let mut ota = self.ota.take().ok_or(ErrorCode::OutOfOrder)?;
-        self.receiver.commit(|block| ota.write(block))?;
-        ota.finish()
+        let stats = &self.stats;
+        let decompressing = stats.chunks.saturating_sub(stats.writes);
+        info!(
+            "Firmware received in {:.1?}: chunks took {:.1?} ({:.1?} decompressing, {:.1?} writing)",
+            stats.started.elapsed(),
+            stats.chunks,
+            decompressing,
+            stats.writes
+        );
+        let result = self.receiver.commit(|block| ota.write(block)).and_then(|()| ota.finish());
+        if result.is_err() {
+            set_progress(None);
+        }
+        result
     }
 }
+
+/// The slot is erased in blocks the flash erases at once, as the writes reach them: a sector erase per write
+/// (`OTA_WITH_SEQUENTIAL_WRITES`) takes three times as long, and every erase stalls the NimBLE host (its code is
+/// in the flash) while the chunks come. Not all at once on begin: that takes seconds for a large image, the app
+/// waits for the answer meanwhile.
+const ERASE_BLOCK: usize = 64 * 1024;
 
 /// ESP-IDF OTA write, aborted on drop.
 struct Ota {
     handle: sys::esp_ota_handle_t,
     partition: *const sys::esp_partition_t,
+    written: usize,
+    /// The slot is erased up to here.
+    erased: usize,
 }
 
 impl Ota {
-    /// Erases the slot sector by sector as it's written, not all at once.
     fn begin(partition: *const sys::esp_partition_t) -> Result<Self, EspError> {
         let mut handle = 0;
-        esp!(unsafe { sys::esp_ota_begin(partition, sys::OTA_WITH_SEQUENTIAL_WRITES as _, &mut handle) })?;
-        Ok(Self { handle, partition })
+        // A size, not `OTA_WITH_SEQUENTIAL_WRITES`: the writes don't erase then. Erases the first block.
+        esp!(unsafe { sys::esp_ota_begin(partition, ERASE_BLOCK, &mut handle) })?;
+        Ok(Self { handle, partition, written: 0, erased: ERASE_BLOCK })
     }
 
     fn write(&mut self, data: &[u8]) -> Result<(), ErrorCode> {
+        let end = self.written + data.len();
+        // The slot size is a multiple of the block; a write past it fails in `esp_ota_write`.
+        let slot_size = unsafe { (*self.partition).size } as usize;
+        while self.erased < end.min(slot_size) {
+            esp!(unsafe { sys::esp_partition_erase_range(self.partition, self.erased, ERASE_BLOCK) }).map_err(|e| {
+                error!("Firmware slot erase failed: {}", e);
+                ErrorCode::Storage
+            })?;
+            self.erased += ERASE_BLOCK;
+        }
         esp!(unsafe { sys::esp_ota_write(self.handle, data.as_ptr().cast(), data.len() as _) }).map_err(|e| {
             error!("Firmware write failed: {}", e);
             ErrorCode::Storage
-        })
+        })?;
+        self.written = end;
+        Ok(())
     }
 
     /// Checks the written image and makes it the boot one.

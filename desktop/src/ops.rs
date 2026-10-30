@@ -1,5 +1,6 @@
 //! Config and firmware operations on a connected keyboard, shared by the CLI and the GUI.
 
+use std::collections::VecDeque;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -272,9 +273,29 @@ pub async fn update_firmware(
     let total = bytes.len();
     let begin = Request::FirmwareBegin { len: total as u32, crc32: crc32(&bytes), image_len: image.len() as u32 };
     device.request_ok(&begin).await?;
-    for (offset, chunk) in hid::chunks(&bytes, hid::CHUNK_SIZE) {
-        device.request_ok(&Request::FirmwareChunk { offset, data: chunk.to_vec() }).await?;
-        progress(FirmwareProgress::Sent { done: offset as usize + chunk.len(), total });
+    // Up to `CHUNK_WINDOW` chunks on the way, the ends of the unanswered ones.
+    let mut chunks = hid::chunks(&bytes, hid::CHUNK_SIZE);
+    let mut unanswered = VecDeque::with_capacity(hid::CHUNK_WINDOW);
+    loop {
+        while unanswered.len() < hid::CHUNK_WINDOW {
+            let Some((offset, chunk)) = chunks.next() else { break };
+            device.send(&Request::FirmwareChunk { offset, data: chunk.to_vec() }).await?;
+            unanswered.push_back(offset as usize + chunk.len());
+        }
+        let Some(done) = unanswered.pop_front() else { break };
+        match device.receive("FirmwareChunk").await? {
+            Response::Ok => progress(FirmwareProgress::Sent { done, total }),
+            Response::Error(code) => {
+                // The chunks on the way fail too: their responses would answer the next requests.
+                for _ in unanswered {
+                    if device.receive("FirmwareChunk").await.is_err() {
+                        break;
+                    }
+                }
+                return Err(code).context("FirmwareChunk failed");
+            }
+            response => bail!("unexpected response to FirmwareChunk: {response:?}"),
+        }
     }
     progress(FirmwareProgress::Checking);
     match device.request_ok(&Request::FirmwareCommit).await {
@@ -327,5 +348,138 @@ pub async fn reconnect_after_update<D: Link>(
             )));
         }
         sleep(RECONNECT_INTERVAL).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::executor::block_on;
+
+    use super::*;
+
+    /// Keyboard that takes the chunks in order and answers them only when asked; fails chunk `fail_at`.
+    struct WindowDevice {
+        received: usize,
+        /// Responses of the sent requests, the next one first.
+        responses: VecDeque<Response>,
+        max_unanswered: usize,
+        fail_at: Option<usize>,
+        failed: bool,
+        chunks: usize,
+    }
+
+    impl WindowDevice {
+        fn new(fail_at: Option<usize>) -> Self {
+            WindowDevice { received: 0, responses: VecDeque::new(), max_unanswered: 0, fail_at, failed: false, chunks: 0 }
+        }
+    }
+
+    impl Link for WindowDevice {
+        fn drain(&mut self) -> Result<()> {
+            self.responses.clear();
+            Ok(())
+        }
+
+        async fn send(&mut self, request: &Request) -> Result<()> {
+            let response = match request {
+                Request::FirmwareBegin { .. } | Request::FirmwareCommit => Response::Ok,
+                Request::FirmwareChunk { offset, data } => {
+                    let fail = self.fail_at == Some(self.chunks);
+                    self.chunks += 1;
+                    if self.failed || *offset as usize != self.received {
+                        Response::Error(ErrorCode::OutOfOrder)
+                    } else if fail {
+                        self.failed = true;
+                        Response::Error(ErrorCode::Storage)
+                    } else {
+                        self.received += data.len();
+                        Response::Ok
+                    }
+                }
+                request => bail!("unexpected request {request:?}"),
+            };
+            self.responses.push_back(response);
+            self.max_unanswered = self.max_unanswered.max(self.responses.len());
+            Ok(())
+        }
+
+        async fn receive(&mut self, name: &'static str) -> Result<Response> {
+            self.responses.pop_front().with_context(|| format!("no response to {name}"))
+        }
+
+        async fn close(self) {}
+    }
+
+    fn versions() -> Versions {
+        Versions {
+            firmware_version: "0.0.0".into(),
+            protocol_version: hid::PROTOCOL_VERSION,
+            update_version: hid::UPDATE_VERSION,
+            build_id: [0; image::BUILD_ID_LEN],
+            board: image::KEYBOARD_PROJECT.into(),
+            device_id: [0; 6],
+            slot_size: 1 << 20,
+            features: 0,
+        }
+    }
+
+    /// Random-ish bytes, so that the compressed image takes many chunks.
+    fn image() -> Vec<u8> {
+        let mut state = 1u32;
+        (0..20_000)
+            .map(|_| {
+                state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                (state >> 16) as u8
+            })
+            .collect()
+    }
+
+    fn firmware(image: &[u8]) -> Firmware<'_> {
+        Firmware {
+            image,
+            version: "0.0.1".into(),
+            board: image::KEYBOARD_PROJECT.into(),
+            build_id: [0; image::BUILD_ID_LEN],
+        }
+    }
+
+    #[test]
+    fn update_sends_a_window_of_chunks() {
+        let image = image();
+        let versions = versions();
+        let mut device = WindowDevice::new(None);
+        let mut done = Vec::new();
+        let sent = block_on(update_firmware(&mut device, &versions, &firmware(&image), |progress| {
+            if let FirmwareProgress::Sent { done: bytes, .. } = progress {
+                done.push(bytes);
+            }
+        }))
+        .unwrap();
+        assert_eq!(device.received, sent);
+        assert_eq!(device.max_unanswered, hid::CHUNK_WINDOW);
+        // Progress of the answered chunks, every one of them.
+        assert_eq!(done.len(), sent.div_ceil(hid::CHUNK_SIZE));
+        assert!(done.is_sorted());
+        assert_eq!(done.last(), Some(&sent));
+    }
+
+    #[test]
+    fn update_stops_at_the_first_failed_chunk() {
+        let image = image();
+        let versions = versions();
+        let mut device = WindowDevice::new(Some(5));
+        let mut answered = 0;
+        let error = block_on(update_firmware(&mut device, &versions, &firmware(&image), |progress| {
+            if let FirmwareProgress::Sent { .. } = progress {
+                answered += 1;
+            }
+        }))
+        .unwrap_err();
+        assert_eq!(error.downcast_ref::<ErrorCode>(), Some(&ErrorCode::Storage));
+        assert_eq!(answered, 5);
+        // The window was full when the error came, nothing was sent after it.
+        assert_eq!(device.chunks, 5 + hid::CHUNK_WINDOW);
+        // The responses of the chunks on the way are taken, not left for the next request.
+        assert!(device.responses.is_empty());
     }
 }

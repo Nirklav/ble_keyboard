@@ -9,6 +9,9 @@ rustflags = [ "--cfg",  "espidf_time64"] # Extending time_t for ESP IDF 5: https
 
 [unstable]
 build-std = ["std", "panic_abort"]
+# Without the default `backtrace`: gimli, addr2line and rustc-demangle (~70 KB) only print a backtrace the
+# ESP-IDF panic handler shows anyway.
+build-std-features = []
 
 [env]
 MCU = "esp32c3"

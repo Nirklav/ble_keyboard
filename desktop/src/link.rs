@@ -31,8 +31,21 @@ pub struct Options {
 /// Connected keyboard. Futures are not `Send`: the links run on single-threaded executors.
 #[allow(async_fn_in_trait)]
 pub trait Link {
+    /// Drops the responses that came already: late ones of timed out requests.
+    fn drain(&mut self) -> Result<()>;
+
+    /// Sends `request` without waiting for its response; the responses come in the order of the requests.
+    async fn send(&mut self, request: &Request) -> Result<()>;
+
+    /// Waits for the next response, to the request named `name` (for messages).
+    async fn receive(&mut self, name: &'static str) -> Result<Response>;
+
     /// Sends `request` and waits for its response, no retries.
-    async fn request_once(&mut self, request: &Request) -> Result<Response>;
+    async fn request_once(&mut self, request: &Request) -> Result<Response> {
+        self.drain()?;
+        self.send(request).await?;
+        self.receive(name(request)).await
+    }
 
     /// Ends the session (the keyboard may sleep again); keeps the OS connection.
     async fn close(self)

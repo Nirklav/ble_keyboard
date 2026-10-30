@@ -3,6 +3,7 @@ use protocol::config::Config;
 use protocol::keymap::{BtCommand, Keymap};
 
 use crate::config::Pending;
+use crate::firmware;
 
 use crate::key_matrix::KeyMatrix;
 use crate::display::Display;
@@ -40,6 +41,15 @@ impl<const W: usize, const H: usize> Services<W, H> {
     pub fn update_status(&self) -> anyhow::Result<()> {
         let layer = &self.keymap.layout(self.keymap.top_layer()).name;
         self.display.set_status(layer, self.keyboard.profile().index)
+    }
+
+    /// While the chunks of a firmware update come: shows its progress and asks for the shortest connection
+    /// interval. An update the app stopped sending without ending it counts only until the transfer times out.
+    pub fn update_firmware_state(&mut self) -> anyhow::Result<()> {
+        let progress = firmware::update_progress().filter(|_| self.keyboard.config_service().transfer_active());
+        // The image check after the last chunk takes no requests.
+        self.keyboard.set_transfer(progress.is_some_and(|progress| progress < 100));
+        self.display.set_update(progress.is_some())
     }
 
     /// Runs a BLE profile command of a key or a combo and shows the profile, e.g. `BT 2 pair`.

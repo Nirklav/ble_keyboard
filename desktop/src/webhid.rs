@@ -83,22 +83,26 @@ impl Device {
 }
 
 impl Link for Device {
-    async fn request_once(&mut self, request: &Request) -> Result<Response> {
-        let mut report = encode(request)?;
-
-        // Late responses of timed out requests.
+    fn drain(&mut self) -> Result<()> {
         while self.reports.try_recv().is_ok() {}
+        Ok(())
+    }
 
+    async fn send(&mut self, request: &Request) -> Result<()> {
+        let mut report = encode(request)?;
         let sent = self.device.send_report_with_u8_slice(hid::REPORT_ID, &mut report).map_err(js_error).context(NotSent(name(request)))?;
         timeout(self.timeout, sent.into_future())
             .await
             .with_context(|| format!("{} send timed out", name(request)))?
             .map_err(js_error)
             .context(NotSent(name(request)))?;
+        Ok(())
+    }
 
+    async fn receive(&mut self, name: &'static str) -> Result<Response> {
         let report = timeout(self.timeout, self.reports.next())
             .await
-            .with_context(|| format!("no response to {} within {:?}", name(request), self.timeout))?
+            .with_context(|| format!("no response to {name} within {:?}", self.timeout))?
             .ok_or_else(|| anyhow!("keyboard disconnected"))?;
         let message = hid::decode(&report).ok_or_else(|| anyhow!("bad response report {report:02x?}"))?;
         decode_response(message)
