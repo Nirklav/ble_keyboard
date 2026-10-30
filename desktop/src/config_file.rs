@@ -24,7 +24,8 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use protocol::config::{v1, v2, v3, Config, ValidationError};
+use protocol::config::{Config, Format, ValidationError};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 /// Doesn't validate the config.
@@ -42,12 +43,18 @@ pub fn parse(text: &str) -> Result<Config> {
 
     // toml errors already contain the line, column and the source snippet.
     let Header { version } = toml::from_str(text)?;
-    Ok(match version {
-        1 => toml::from_str::<v1::Config>(text)?.into(),
-        2 => toml::from_str::<v2::Config>(text)?.into(),
-        3 => toml::from_str::<v3::Config>(text)?.into(),
-        _ => toml::from_str(text)?,
-    })
+    Ok(Config::decode(version, &Toml(text))?)
+}
+
+/// TOML text of a config, see [`Config::decode`].
+struct Toml<'a>(&'a str);
+
+impl Format for Toml<'_> {
+    type Error = toml::de::Error;
+
+    fn decode<T: DeserializeOwned>(&self) -> Result<T, toml::de::Error> {
+        toml::from_str(self.0)
+    }
 }
 
 pub fn save(path: &Path, config: &Config) -> Result<()> {
@@ -144,8 +151,8 @@ mod tests {
     use crate::EXAMPLE_CONFIG as EXAMPLE;
 
     #[test]
-    fn example_is_valid() {
-        parse(EXAMPLE).unwrap().validate_for(10, 5).unwrap();
+    fn example_is_the_factory_config() {
+        assert_eq!(parse(EXAMPLE).unwrap(), protocol::board::factory_config());
     }
 
     #[test]

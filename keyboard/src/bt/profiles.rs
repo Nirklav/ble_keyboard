@@ -30,7 +30,7 @@
 //! (see `ble_mouse_keyboard`).
 
 use std::ffi::{c_int, c_void, CString};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use esp_idf_svc::handle::RawHandle;
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs, NvsDefault};
@@ -487,4 +487,9 @@ fn random_static_address() -> [u8; 6] {
 fn format(address: &[u8; 6]) -> String {
     let bytes: Vec<String> = address.iter().rev().map(|b| format!("{b:02X}")).collect();
     bytes.join(":")
+}
+
+/// Profiles stay consistent if a holder panicked: every change is saved at once.
+pub fn lock(profiles: &Mutex<Profiles>) -> MutexGuard<'_, Profiles> {
+    profiles.lock().unwrap_or_else(|e| e.into_inner())
 }

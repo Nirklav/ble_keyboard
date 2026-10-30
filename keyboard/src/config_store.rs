@@ -5,10 +5,10 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Write};
 
-use protocol::config::{crc32, Config, ValidationError, CONFIG_VERSION};
+use protocol::config::{Config, ValidationError, CONFIG_VERSION};
+use protocol::crc::crc32;
 
-const CONFIG_FILE: &str = "/spiflash/config.bin";
-const CONFIG_TMP: &str = "/spiflash/config.tmp";
+use crate::storage::{CONFIG_FILE, CONFIG_TMP};
 
 const MAGIC: [u8; 4] = *b"KBCF";
 const FORMAT_VERSION: u16 = 1;

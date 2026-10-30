@@ -59,13 +59,13 @@ pub fn header(app: &mut App, ui: &mut egui::Ui) {
     };
     ui.horizontal(|ui| {
         let back = match app.screen {
-            Screen::Overview if app.device.connected => "‹ Disconnect",
+            Screen::Overview if app.device.is_connected() => "‹ Disconnect",
             _ => "‹ Back",
         };
         let idle = !app.device.is_busy();
         if ui.add_enabled(idle || app.screen != Screen::Overview, egui::Button::new(back)).clicked() {
             match app.screen {
-                Screen::Overview if app.device.connected => app.device.send(crate::device::Command::Disconnect),
+                Screen::Overview if app.device.is_connected() => app.device.send(crate::device::Command::Disconnect),
                 screen => app.go(screen.parent()),
             }
         }

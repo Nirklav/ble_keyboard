@@ -2,8 +2,9 @@
 //! on the grid or matched by action.
 
 use eframe::egui;
+use protocol::board::recovery_combo;
 use protocol::config::{
-    Combo, ComboAction, ComboKeyIdent, Config, KeyAction, MAX_COMBO_KEYS, MAX_COMBOS, recovery_combo,
+    Combo, ComboAction, ComboKeyIdent, Config, KeyAction, MAX_COMBO_KEYS, MAX_COMBOS,
 };
 
 use crate::app::{App, EditTarget, KeyEditor, Screen};

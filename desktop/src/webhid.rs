@@ -17,7 +17,7 @@ use protocol::hid::{self, Request, Response};
 use wasm_bindgen::prelude::*;
 use web_sys::{HidDevice, HidDeviceFilter, HidDeviceRequestOptions, HidInputReportEvent};
 
-use crate::link::{Link, NotSent, Options, decode_response, encode, name};
+use crate::link::{NotSent, Options, Transport, decode_response, encode, name};
 use crate::time::timeout;
 
 pub struct Device {
@@ -82,7 +82,7 @@ impl Device {
     }
 }
 
-impl Link for Device {
+impl Transport for Device {
     fn drain(&mut self) -> Result<()> {
         while self.reports.try_recv().is_ok() {}
         Ok(())
@@ -108,8 +108,7 @@ impl Link for Device {
         decode_response(message)
     }
 
-    async fn close(mut self) {
-        let _ = self.request_ok(&Request::End).await;
+    async fn release(self) {
         let _ = timeout(self.timeout, self.device.close().into_future()).await;
     }
 }

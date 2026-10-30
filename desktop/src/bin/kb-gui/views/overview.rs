@@ -6,9 +6,10 @@ use eframe::egui;
 use protocol::hid;
 use protocol::config::{CONFIG_VERSION, MAX_LAYOUTS, Settings};
 
-use desktop::ops::{self, Firmware};
+use desktop::compat;
+use desktop::firmware::{self, Firmware};
 
-use crate::app::{App, Dialog, Screen};
+use crate::app::{App, Dialog, Keyboard, Screen};
 use crate::editing;
 use crate::theme;
 use crate::views::{NAV_SIZE, nav_button};
@@ -92,8 +93,7 @@ fn number(ui: &mut egui::Ui, name: &str, value: &mut u16, range: RangeInclusive<
 
 /// Info of the connected keyboard in one line, nothing offline.
 fn keyboard(app: &mut App, ui: &mut egui::Ui) {
-    let device = &app.device;
-    let (Some(info), Some(versions), true) = (&device.info, &device.versions, device.connected) else {
+    let Keyboard::Connected { versions, info } = &app.device.keyboard else {
         return;
     };
     // One weak line; a version other than the app one is highlighted, it may break reading or writing.
@@ -107,8 +107,8 @@ fn keyboard(app: &mut App, ui: &mut egui::Ui) {
         }
     };
     // The bundled firmware, whether the keyboard runs that very build, whether it can be installed.
-    let bundled = ops::bundled_firmware()
-        .map(|bundled| (bundled, bundled.runs_on(versions), ops::check_update(versions, bundled)));
+    let bundled = firmware::bundled_firmware()
+        .map(|bundled| (bundled, bundled.runs_on(versions), compat::check_update(versions, bundled)));
     let firmware = format!("Firmware {}", versions.firmware_version);
     let firmware = match bundled {
         Some((bundled, false, _)) if bundled.version == versions.firmware_version => {
@@ -142,7 +142,7 @@ fn keyboard(app: &mut App, ui: &mut egui::Ui) {
     ui.add_space(theme::GAP_L);
 }
 
-/// Installs the firmware bundled with the app, asks first; `compatible` is [`ops::check_update`].
+/// Installs the firmware bundled with the app, asks first; `compatible` is [`compat::check_update`].
 fn update_button(app: &mut App, ui: &mut egui::Ui, bundled: &Firmware, runs: bool, compatible: anyhow::Result<()>) {
     let version = &bundled.version;
     let (label, hint) = if runs {

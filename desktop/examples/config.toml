@@ -1,4 +1,4 @@
-# Factory config of the keyboard (`default_config()` in keyboard/src/layout.rs).
+# Factory config of the keyboard (`board::factory_config()` in protocol/src/board.rs).
 #
 # rows[y][x]: 5 rows of 10 keys per layout. Key actions:
 #   { Key = "A" }, { KeyWithMod = ["Num1", "LeftShift"] }, { Mod = "LeftCtrl | LeftAlt" },

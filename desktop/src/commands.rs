@@ -5,51 +5,52 @@ use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
-use desktop::config_file;
-use desktop::ops::{self, Firmware, FirmwareProgress, WriteProgress};
-use desktop::link::{Link, Options};
-use desktop::transport::{self, Device};
+use desktop::firmware::{self, Firmware, FirmwareProgress};
+use desktop::link::Options;
+use desktop::session::{Opened, Session, WriteProgress};
+use desktop::{config_file, connect, transport};
 use protocol::hid;
 use protocol::config::{self, Config};
 
 /// `kb info`.
 pub async fn info(options: &Options) -> Result<()> {
-    let mut device = Device::connect(options).await?;
-    let versions = device.versions().await?;
-    let build = ops::hex(&versions.build_id);
-    match ops::bundled_firmware() {
+    let mut client = connect(options).await?;
+    let versions = client.versions().await?;
+    let build = firmware::hex(&versions.build_id);
+    match firmware::bundled_firmware() {
         Some(bundled) => println!(
             "Firmware version:  {} build {build} (bundled: {} build {})",
             versions.firmware_version,
             bundled.version,
-            ops::hex(&bundled.build_id)
+            firmware::hex(&bundled.build_id)
         ),
         None => println!("Firmware version:  {} build {build}", versions.firmware_version),
     }
-    println!("Board:             {} ({})", versions.board, ops::device_id_text(&versions.device_id));
+    println!("Board:             {} ({})", versions.board, firmware::device_id_text(&versions.device_id));
     println!("Protocol version:  {} (app: {})", versions.protocol_version, hid::PROTOCOL_VERSION);
     println!("Update version:    {} (app: {})", versions.update_version, hid::UPDATE_VERSION);
     // The rest is in the info, which only a firmware of the app protocol sends.
-    if let Err(error) = ops::check_protocol(versions.protocol_version) {
-        device.close().await;
-        return Err(error);
-    }
-    // The versions are read and checked already, `ops::connect_info` would ask again.
-    let info = device.info().await?;
+    let session = match Session::open(client, versions).await? {
+        Opened::Session(session) => session,
+        Opened::Incompatible { client, reason, .. } => {
+            client.close().await;
+            return Err(reason);
+        }
+    };
+    let info = session.info();
     println!("Config version:    {} (app: {})", info.config_version, config::CONFIG_VERSION);
     println!("Keys:              {}x{}", info.width, info.height);
     println!("Max layouts:       {}", info.max_layouts);
     println!("Max combos:        {}", info.max_combos);
-    device.close().await;
+    session.close().await;
     Ok(())
 }
 
 /// `kb pull <file>`.
 pub async fn pull(options: &Options, path: &Path) -> Result<()> {
-    let mut device = Device::connect(options).await?;
-    let info = ops::connect_info(&mut device).await?;
-    let config = ops::read_config(&mut device, &info).await?;
-    device.close().await;
+    let mut session = Session::connect(connect(options).await?).await?;
+    let config = session.read_config().await?;
+    session.close().await;
 
     config_file::save(path, &config)?;
     println!("Saved {} ({} layouts, {} combos)", path.display(), config.layouts.len(), config.combos.len());
@@ -60,9 +61,8 @@ pub async fn pull(options: &Options, path: &Path) -> Result<()> {
 pub async fn push(options: &Options, path: &Path) -> Result<()> {
     let config = load_valid(path)?;
 
-    let mut device = Device::connect(options).await?;
-    let info = ops::connect_info(&mut device).await?;
-    let len = ops::write_config(&mut device, &info, &config, |progress| {
+    let mut session = Session::connect(connect(options).await?).await?;
+    let len = session.write_config(&config, |progress| {
         if let WriteProgress::Sent { done, total } = progress
             && done == total
         {
@@ -71,7 +71,7 @@ pub async fn push(options: &Options, path: &Path) -> Result<()> {
     })
     .await
     .with_context(|| path.display().to_string())?;
-    device.close().await;
+    session.close().await;
 
     println!("Config applied ({} layouts, {} combos, {len} bytes)", config.layouts.len(), config.combos.len());
     Ok(())
@@ -79,10 +79,9 @@ pub async fn push(options: &Options, path: &Path) -> Result<()> {
 
 /// `kb reset`.
 pub async fn reset(options: &Options) -> Result<()> {
-    let mut device = Device::connect(options).await?;
-    let info = ops::connect_info(&mut device).await?;
-    ops::reset_config(&mut device, &info).await?;
-    device.close().await;
+    let mut session = Session::connect(connect(options).await?).await?;
+    session.reset_config().await?;
+    session.close().await;
     println!("Factory config restored");
     Ok(())
 }
@@ -97,19 +96,19 @@ pub async fn update(options: &Options, path: Option<&Path>) -> Result<()> {
             (firmware, path.display().to_string())
         }
         None => {
-            let firmware = ops::bundled_firmware()
+            let firmware = firmware::bundled_firmware()
                 .context("this build has no bundled firmware (see scripts/bundle.sh), give an image file")?;
             (firmware.clone(), "the bundled firmware".to_string())
         }
     };
     let version = &firmware.version;
 
-    let mut device = Device::connect(options).await?;
-    let versions = device.versions().await?;
+    let mut client = connect(options).await?;
+    let versions = client.versions().await?;
     eprintln!("Updating firmware {} to {version} ({} bytes)", versions.firmware_version, firmware.image.len());
     let start = Instant::now();
     let mut last_percent = None;
-    let result = ops::update_firmware(&mut device, &versions, &firmware, |progress| match progress {
+    let result = firmware::update_firmware(&mut client, &versions, &firmware, |progress| match progress {
         FirmwareProgress::Sent { done, total } => {
             let percent = done * 100 / total;
             if last_percent != Some(percent) {
@@ -134,17 +133,16 @@ pub async fn update(options: &Options, path: Option<&Path>) -> Result<()> {
                 eprintln!();
             }
             // Aborts the transfer, the keyboard may sleep again.
-            device.close().await;
+            client.close().await;
             return Err(error.context(source));
         }
     };
     // The keyboard restarts, the session is gone with it.
-    drop(device);
+    drop(client);
     eprintln!("Firmware sent ({sent} bytes compressed) in {:.0?}, waiting for the keyboard to restart...", start.elapsed());
 
-    let (device, versions) =
-        ops::reconnect_after_update(versions.device_id, async || Device::connect(options).await).await?;
-    device.close().await;
+    let (client, versions) = firmware::reconnect_after_update(versions.device_id, async || connect(options).await).await?;
+    client.close().await;
     firmware.check_running(&versions)?;
     println!("Firmware {version} is running and confirmed");
     Ok(())

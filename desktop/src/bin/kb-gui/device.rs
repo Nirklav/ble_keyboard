@@ -1,6 +1,6 @@
 //! Keyboard connection off the UI thread.
 //!
-//! [`DeviceWorker`] runs a task that keeps the [`Device`] and runs [`Command`]s one at a time: natively
+//! [`DeviceWorker`] runs a task that keeps the [`Session`] and runs [`Command`]s one at a time: natively
 //! on a thread with a single-threaded tokio runtime (the device can't be shared between threads anyway),
 //! in the browser on its event loop. Every command ends with exactly one final [`Event`]
 //! ([`Event::is_final`]), possibly after some [`Event::Progress`]. The UI polls the events
@@ -19,14 +19,17 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use desktop::link::{Link, Options};
-use desktop::ops::{self, FirmwareProgress, WriteProgress};
+use desktop::compat::check_config_version;
+use desktop::firmware::{self, FirmwareProgress};
+use desktop::link::{Client, Options, Transport};
+use desktop::session::{Opened, Session, WriteProgress};
 use desktop::time::{sleep, timeout};
-use desktop::{Device, EXAMPLE_CONFIG, config_file};
+use desktop::{EXAMPLE_CONFIG, config_file, connect};
 use eframe::egui;
 use futures::StreamExt;
 use futures::channel::mpsc as async_mpsc;
 use protocol::config::{Config, MAX_COMBOS, MAX_LAYOUTS};
+use protocol::board;
 use protocol::hid::{self, ConfigReceiver, ErrorCode, Info, Request, Response, Versions};
 
 /// How long dropping the worker waits for it to end the session.
@@ -178,42 +181,38 @@ impl EventSender {
     }
 }
 
-/// Connection to a keyboard the app can edit, see [`open`].
-struct Connection<D> {
-    device: D,
-    versions: Versions,
-    info: Info,
-}
-
 async fn work(commands: Commands, events: EventSender, fake: bool) {
     if fake {
         let factory: Rc<[u8]> = config_file::parse(EXAMPLE_CONFIG).expect("the example config is valid").to_bytes().into();
         let stored = Rc::new(RefCell::new(factory.to_vec()));
-        let (width, height) = ops::DEFAULT_SIZE;
-        let connect = async |_: &Options| {
+                let connect_fake = async |_: &Options| {
             sleep(Duration::from_millis(1000)).await;
-            Ok(FakeDevice {
+            Ok(Client::new(FakeDevice {
                 factory: factory.clone(),
                 stored: stored.clone(),
-                receiver: ConfigReceiver::new(width, height),
+                receiver: ConfigReceiver::new(board::WIDTH, board::HEIGHT),
                 responses: VecDeque::new(),
-            })
+            }))
         };
-        run(commands, events, connect).await;
+        run(commands, events, connect_fake).await;
     } else {
-        run(commands, events, Device::connect).await;
+        run(commands, events, connect).await;
     }
 }
 
-async fn run<D: Link>(mut commands: Commands, events: EventSender, mut connect: impl AsyncFnMut(&Options) -> Result<D>) {
-    let mut connection: Option<Connection<D>> = None;
+async fn run<T: Transport>(
+    mut commands: Commands,
+    events: EventSender,
+    mut connect: impl AsyncFnMut(&Options) -> Result<Client<T>>,
+) {
+    let mut connection: Option<Session<T>> = None;
     loop {
         // Pings when no command came for an interval: any request keeps the session alive too.
         let command = match &mut connection {
-            Some(open) => match timeout(hid::PING_INTERVAL, commands.next()).await {
+            Some(session) => match timeout(hid::PING_INTERVAL, commands.next()).await {
                 Some(command) => command,
                 None => {
-                    if let Err(error) = open.device.request_ok(&Request::Ping).await {
+                    if let Err(error) = session.ping().await {
                         connection = None;
                         events.send(Event::Failed(format!("lost the keyboard: {error:#}")));
                     }
@@ -233,14 +232,14 @@ async fn run<D: Link>(mut commands: Commands, events: EventSender, mut connect: 
         };
         events.send(event);
     }
-    if let Some(connection) = connection {
-        connection.device.close().await;
+    if let Some(session) = connection {
+        session.close().await;
     }
 }
 
-async fn execute<D: Link>(
-    connection: &mut Option<Connection<D>>,
-    connect: &mut impl AsyncFnMut(&Options) -> Result<D>,
+async fn execute<T: Transport>(
+    connection: &mut Option<Session<T>>,
+    connect: &mut impl AsyncFnMut(&Options) -> Result<Client<T>>,
     options: &Options,
     command: Command,
     events: &EventSender,
@@ -248,7 +247,7 @@ async fn execute<D: Link>(
     match command {
         Command::Disconnect => {
             if let Some(old) = connection.take() {
-                old.device.close().await;
+                old.close().await;
             }
             return Ok(Event::Disconnected);
         }
@@ -256,14 +255,14 @@ async fn execute<D: Link>(
         Command::UpdateFirmware => return update_firmware(connection, connect, options, events).await,
         _ => {}
     }
-    let Connection { device, info, .. } = match connection {
-        Some(connection) => connection,
+    let session = match connection {
+        Some(session) => session,
         None => {
             events.progress("Connecting to the keyboard...");
-            let mut device = connect(options).await?;
+            let mut client = connect(options).await?;
             events.progress("Reading the keyboard info...");
-            let versions = device.versions().await?;
-            connection.insert(open(device, versions, events).await?)
+            let versions = client.versions().await?;
+            connection.insert(open(client, versions, events).await?)
         }
     };
 
@@ -271,11 +270,11 @@ async fn execute<D: Link>(
         Command::Connect => Event::Done("Connected to the keyboard".to_string()),
         Command::Pull => {
             events.progress("Reading the config...");
-            Event::Pulled(Box::new(ops::read_config(device, info).await?))
+            Event::Pulled(Box::new(session.read_config().await?))
         }
         Command::Push(config) => {
             events.progress("Sending the config...");
-            let bytes = ops::write_config(device, info, &config, |progress| match progress {
+            let bytes = session.write_config(&config, |progress| match progress {
                 WriteProgress::Sent { done, total } => {
                     events.progress_of(format!("Sent {done} of {total} bytes..."), done, total)
                 }
@@ -286,60 +285,60 @@ async fn execute<D: Link>(
         }
         Command::Reset => {
             events.progress("Restoring the factory config...");
-            ops::reset_config(device, info).await?;
+            session.reset_config().await?;
             Event::Done("Factory config restored on the keyboard, Read to edit it".to_string())
         }
         Command::Disconnect | Command::UpdateFirmware => unreachable!("handled above"),
     })
 }
 
-/// Connection to a keyboard the app can edit: speaks the app protocol, has a config version it reads
+/// Session with a keyboard the app can edit: speaks the app protocol, has a config version it reads
 /// (also for Connect, which reads nothing: such a config is of a firmware the app doesn't know).
-/// Otherwise closes `device`, sends [`Event::Incompatible`] and fails with the reason.
-async fn open<D: Link>(mut device: D, versions: Versions, events: &EventSender) -> Result<Connection<D>> {
-    let reason = match ops::check_protocol(versions.protocol_version) {
-        Ok(()) => {
-            let info = device.info().await?;
-            match ops::check_config_version(&info) {
-                Ok(()) => {
-                    events.send(Event::Connected(versions.clone(), info.clone()));
-                    return Ok(Connection { device, versions, info });
-                }
-                Err(reason) => reason,
+/// Otherwise closes the connection, sends [`Event::Incompatible`] and fails with the reason.
+async fn open<T: Transport>(client: Client<T>, versions: Versions, events: &EventSender) -> Result<Session<T>> {
+    let (client, versions, reason) = match Session::open(client, versions).await? {
+        Opened::Session(session) => match check_config_version(session.info()) {
+            Ok(()) => {
+                events.send(Event::Connected(session.versions().clone(), session.info().clone()));
+                return Ok(session);
             }
-        }
-        Err(reason) => reason,
+            Err(reason) => {
+                let (client, versions) = session.into_parts();
+                (client, versions, reason)
+            }
+        },
+        Opened::Incompatible { client, versions, reason } => (client, versions, reason),
     };
     // Nothing to do on it but the update, which connects itself: the keyboard may sleep meanwhile.
-    device.close().await;
+    client.close().await;
     events.send(Event::Incompatible(versions));
     Err(reason)
 }
 
 /// [`Command::UpdateFirmware`]: on the open connection or a new one; the keyboard restarts, the new connection
 /// replaces the old one.
-async fn update_firmware<D: Link>(
-    connection: &mut Option<Connection<D>>,
-    connect: &mut impl AsyncFnMut(&Options) -> Result<D>,
+async fn update_firmware<T: Transport>(
+    connection: &mut Option<Session<T>>,
+    connect: &mut impl AsyncFnMut(&Options) -> Result<Client<T>>,
     options: &Options,
     events: &EventSender,
 ) -> Result<Event> {
-    let firmware = ops::bundled_firmware().context("the app has no bundled firmware")?;
+    let firmware = firmware::bundled_firmware().context("the app has no bundled firmware")?;
     let version = &firmware.version;
     // The session is gone with the restart.
-    let (mut device, versions) = match connection.take() {
-        Some(Connection { device, versions, .. }) => (device, versions),
+    let (mut client, versions) = match connection.take() {
+        Some(session) => session.into_parts(),
         None => {
             events.progress("Connecting to the keyboard...");
-            let mut device = connect(options).await?;
-            let versions = device.versions().await?;
-            (device, versions)
+            let mut client = connect(options).await?;
+            let versions = client.versions().await?;
+            (client, versions)
         }
     };
     events.progress(format!("Sending firmware {version}..."));
     // One event per percent, not per chunk (thousands of them).
     let mut last_percent = None;
-    let sent = ops::update_firmware(&mut device, &versions, firmware, |progress| match progress {
+    let sent = firmware::update_firmware(&mut client, &versions, firmware, |progress| match progress {
         FirmwareProgress::Sent { done, total } => {
             let percent = done * 100 / total;
             if last_percent != Some(percent) {
@@ -352,18 +351,18 @@ async fn update_firmware<D: Link>(
     .await;
     if let Err(error) = sent {
         // The keyboard didn't restart: end the session, so it may sleep again.
-        device.close().await;
+        client.close().await;
         return Err(error);
     }
-    drop(device);
+    drop(client);
 
     events.progress("Waiting for the keyboard to restart...");
-    let (device, versions) = ops::reconnect_after_update(versions.device_id, async || connect(options).await).await?;
+    let (client, versions) = firmware::reconnect_after_update(versions.device_id, async || connect(options).await).await?;
     if let Err(error) = firmware.check_running(&versions) {
-        device.close().await;
+        client.close().await;
         return Err(error);
     }
-    *connection = Some(open(device, versions, events).await?);
+    *connection = Some(open(client, versions, events).await?);
     Ok(Event::Done(format!("Firmware {version} is running")))
 }
 
@@ -385,8 +384,8 @@ impl FakeDevice {
             Request::GetInfo => Response::Info(Info {
                 protocol_version: hid::PROTOCOL_VERSION,
                 config_version: protocol::config::CONFIG_VERSION,
-                width: ops::DEFAULT_SIZE.0,
-                height: ops::DEFAULT_SIZE.1,
+                width: board::WIDTH,
+                height: board::HEIGHT,
                 max_layouts: MAX_LAYOUTS as u8,
                 max_combos: MAX_COMBOS as u8,
                 firmware_version: FAKE_FIRMWARE.to_string(),
@@ -424,7 +423,7 @@ impl FakeDevice {
     }
 }
 
-impl Link for FakeDevice {
+impl Transport for FakeDevice {
     fn drain(&mut self) -> Result<()> {
         self.responses.clear();
         Ok(())
@@ -440,6 +439,4 @@ impl Link for FakeDevice {
         sleep(Duration::from_millis(60)).await;
         self.responses.pop_front().with_context(|| format!("no response to {name}"))
     }
-
-    async fn close(self) {}
 }

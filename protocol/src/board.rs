@@ -1,9 +1,27 @@
-use protocol::config::{Combo, ComboAction, ComboKey, ComboKeyIdent, Config, JoystickButtons, KeyAction, Settings, CONFIG_VERSION};
+//! The keyboard board, the project [`KEYBOARD_PROJECT`](crate::image::KEYBOARD_PROJECT): its key matrix and
+//! what the firmware and the apps know of its keys. The factory config, the recovery combo and the boot key
+//! are made for this matrix and its key caps: `Escape` at (0, 0), `LeftCtrl` at (0, 4), `Fn` at [`FN_KEY`].
+//!
+//! The factory config is also `desktop/examples/config.toml`, a test there keeps the two the same.
 
-use protocol::motion::Velocity;
+use alloc::string::ToString;
+use alloc::vec;
 
-use crate::bt::{Key, KeyMod, MouseKey};
-use crate::bt::ble_mouse_keyboard::BleMouseKeyboard;
+use crate::config::{
+    Combo, ComboAction, ComboKey, ComboKeyIdent, Config, JoystickButtons, KeyAction, Layout, Settings, CONFIG_VERSION,
+};
+use crate::keys::{Key, KeyMod, MouseKey};
+
+/// Number of key columns.
+pub const WIDTH: u8 = 10;
+/// Number of key rows.
+pub const HEIGHT: u8 = 5;
+
+/// `(x, y)` of the key held at power-on to ignore the saved config: `Escape`.
+pub const BOOT_KEY: (u8, u8) = (0, 0);
+
+/// `(x, y)` of the `Fn` key of the factory layouts, the recovery combo holds it too.
+pub const FN_KEY: (u8, u8) = (2, 4);
 
 macro_rules! k {
     ($key:ident) => {
@@ -29,43 +47,27 @@ macro_rules! f {
     };
 }
 
-/// Adds the held key to the reports. Mouse travel and scroll add their speed to `velocity` instead,
-/// it's turned into the report by the time, see [`protocol::motion`]. Layer, tap-hold and BLE profile
-/// actions are resolved by [`protocol::keymap::Keymap`] and never reach the report, they do nothing here.
-pub fn press(action: &KeyAction, keyboard: &mut BleMouseKeyboard, velocity: &mut Velocity) {
-    match action {
-        KeyAction::Key(key) => keyboard.press_key(*key),
-        KeyAction::KeyWithMod(key, key_mod) => {
-            keyboard.press_key_mod(*key_mod);
-            keyboard.press_key(*key);
-        },
-        KeyAction::Mod(key_mod) => keyboard.press_key_mod(*key_mod),
-        KeyAction::Media(media_key) => keyboard.press_media_key(*media_key),
-        KeyAction::MouseKey(mouse_key) => keyboard.press_mouse(*mouse_key),
-        KeyAction::MouseTravel { .. } | KeyAction::MouseScroll { .. } => *velocity += Velocity::of(action),
-        KeyAction::Fn { .. }
-        | KeyAction::None
-        | KeyAction::Transparent
-        | KeyAction::Momentary(_)
-        | KeyAction::Toggle(_)
-        | KeyAction::To(_)
-        | KeyAction::ModTap { .. }
-        | KeyAction::LayerTap { .. }
-        | KeyAction::BtSelect(_)
-        | KeyAction::BtNext
-        | KeyAction::BtPrev
-        | KeyAction::BtClear => { }
+/// Factory reset built into the firmware, the config can't override it:
+/// hold `Fn` (2, 4) and `LeftCtrl` (0, 4), press `Escape` (0, 0) 5 times.
+pub fn recovery_combo() -> Combo {
+    Combo {
+        keys: vec![
+            ComboKey { ident: ComboKeyIdent::Coord { x: FN_KEY.0, y: FN_KEY.1 }, count: 0 },
+            ComboKey { ident: ComboKeyIdent::Coord { x: 0, y: 4 }, count: 0 },
+            ComboKey { ident: ComboKeyIdent::Coord { x: BOOT_KEY.0, y: BOOT_KEY.1 }, count: 5 },
+        ],
+        action: ComboAction::ResetConfig,
     }
 }
 
 /// Factory config.
-pub fn default_config() -> Config {
+pub fn factory_config() -> Config {
     Config {
         version: CONFIG_VERSION,
-        width: 10,
-        height: 5,
+        width: WIDTH,
+        height: HEIGHT,
         layouts: vec![
-            protocol::config::Layout {
+            Layout {
                 name: "MAIN".to_string(),
                 rows: vec![
                     vec![k!(Escape),   km!(Num1, LeftShift), km!(Num2, LeftShift), km!(Num3, LeftShift), km!(Num7, LeftShift), k!(KpAsterisk), k!(LeftBracket), k!(RightBracket), k!(Minus),     k!(Equal)],
@@ -76,7 +78,7 @@ pub fn default_config() -> Config {
                 ],
                 joystick: JoystickButtons::default(),
             },
-            protocol::config::Layout {
+            Layout {
                 name: "FUNCTION".to_string(),
                 rows: vec![
                     vec![k!(Grave),       k!(F1),          k!(F2),          k!(F3),      k!(F4),     k!(F5),    k!(LeftBracket), k!(RightBracket), km!(Num9, LeftShift), km!(Num0, LeftShift)],
@@ -87,7 +89,7 @@ pub fn default_config() -> Config {
                 ],
                 joystick: JoystickButtons::default(),
             },
-            protocol::config::Layout {
+            Layout {
                 name: "GAME".to_string(),
                 rows: vec![
                     vec![k!(Escape),   k!(Num1),      k!(Num2),      k!(Num3),    k!(Num4),      k!(Num5),  k!(Num6),  k!(RightBracket),                          k!(Minus),                                k!(Equal)],
@@ -102,13 +104,13 @@ pub fn default_config() -> Config {
         combos: vec![
             Combo {
                 keys: vec![
-                    ComboKey { ident: ComboKeyIdent::Coord { x: 2, y: 4 }, count: 2 },
+                    ComboKey { ident: ComboKeyIdent::Coord { x: FN_KEY.0, y: FN_KEY.1 }, count: 2 },
                 ],
                 action: ComboAction::SwitchLayout
             },
             Combo {
                 keys: vec![
-                    ComboKey { ident: ComboKeyIdent::Coord { x: 2, y: 4 }, count: 0 },
+                    ComboKey { ident: ComboKeyIdent::Coord { x: FN_KEY.0, y: FN_KEY.1 }, count: 0 },
                     ComboKey { ident: ComboKeyIdent::Coord { x: 3, y: 3 }, count: 3 },
                 ],
                 action: ComboAction::Unpair
@@ -124,13 +126,34 @@ pub fn default_config() -> Config {
     }
 }
 
-/// Hold `Fn` (2, 4), press the key (`x`, `y`) twice: selects BLE profile `profile`.
+/// Hold `Fn` ([`FN_KEY`]), press the key (`x`, `y`) twice: selects BLE profile `profile`.
 fn bt_select_combo(profile: u8, x: u8, y: u8) -> Combo {
     Combo {
         keys: vec![
-            ComboKey { ident: ComboKeyIdent::Coord { x: 2, y: 4 }, count: 0 },
+            ComboKey { ident: ComboKeyIdent::Coord { x: FN_KEY.0, y: FN_KEY.1 }, count: 0 },
             ComboKey { ident: ComboKeyIdent::Coord { x, y }, count: 2 },
         ],
         action: ComboAction::BtSelect(profile)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn factory_config_is_valid() {
+        assert_eq!(factory_config().validate_for(WIDTH, HEIGHT), Ok(()));
+    }
+
+    #[test]
+    fn keys_are_the_factory_ones() {
+        let main = &factory_config().layouts[0];
+        let at = |(x, y): (u8, u8)| main.get(x as usize, y as usize).copied();
+        assert_eq!(main.fn_coord(), Some((FN_KEY.0 as usize, FN_KEY.1 as usize)));
+        assert_eq!(at(BOOT_KEY), Some(KeyAction::Key(Key::Escape)));
+        assert_eq!(at((0, 4)), Some(KeyAction::Mod(KeyMod::LeftCtrl)));
+        let config = Config { combos: vec![recovery_combo()], ..factory_config() };
+        assert_eq!(config.validate(), Ok(()));
     }
 }

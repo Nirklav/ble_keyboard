@@ -1,6 +1,7 @@
 //! Config protocol over the HID config reports, see [`protocol::hid`] for the reports and the message flows.
 //!
-//! GATT callbacks run in the NimBLE host task and never touch [`Services`](crate::services::Services):
+//! Registered on the [`ConfigReports`] of the HID device. GATT callbacks run in the NimBLE host task and never
+//! touch [`Services`](crate::services::Services):
 //! they only use [`State`] behind a mutex. Requests that change the config ([`Request::WriteCommit`],
 //! [`Request::ResetToDefault`]) are handed to the main loop through [`ConfigService::take_submitted`],
 //! the main loop applies them once all keys are up and answers with [`ConfigService::finish`].
@@ -19,6 +20,7 @@ use log::{info, warn};
 use protocol::hid::{self, ConfigReceiver, ErrorCode, Info, Request, Response};
 use protocol::config::{CONFIG_VERSION, MAX_COMBOS, MAX_LAYOUTS};
 
+use crate::bt::ble_mouse_keyboard::ConfigReports;
 use crate::config::Pending;
 use crate::firmware::FirmwareUpdate;
 
@@ -59,16 +61,16 @@ struct State {
 }
 
 impl ConfigService {
-    /// Must be called before the server starts (advertising).
-    /// `current` is the encoded active config, `input` / `output` are the HID config reports.
+    /// Must be called before the server starts ([`BleMouseKeyboard::start`](crate::bt::ble_mouse_keyboard::BleMouseKeyboard::start)).
+    /// `current` is the encoded active config.
     pub fn register(
         width: u8,
         height: u8,
         current: Vec<u8>,
         wake: Arc<Notifier>,
-        input: Arc<Mutex<BLECharacteristic>>,
-        output: &Mutex<BLECharacteristic>,
+        reports: ConfigReports,
     ) -> anyhow::Result<Self> {
+        let ConfigReports { input, output } = reports;
         let info = Info {
             protocol_version: hid::PROTOCOL_VERSION,
             config_version: CONFIG_VERSION,

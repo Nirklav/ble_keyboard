@@ -2,12 +2,15 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use esp_idf_svc::hal::{delay::Delay, gpio::{Input, PinDriver}, spi::{SpiDeviceDriver, SpiDriver}};
-use mcp23s17::{InterruptMode, Mcp23s17};
+use mcp23s17::InterruptMode;
+
+/// The MCP23S17 extension the keys are behind.
+pub type Mcp23s17 = mcp23s17::Mcp23s17<SpiDeviceDriver<'static, Rc<SpiDriver<'static>>>>;
 
 /// Keys behind the MCP23S17 extension, it pulls `irq` low when a row goes low.
 /// Only scans and debounces, what the keys do is up to [`protocol::keymap::Keymap`].
 pub struct KeyMatrix<const W: usize, const H: usize> {
-    ext: Mcp23s17<SpiDeviceDriver<'static, Rc<SpiDriver<'static>>>>,
+    ext: Mcp23s17,
     irq: PinDriver<'static, Input>,
     delay: Delay,
 
@@ -21,7 +24,7 @@ pub struct KeyMatrix<const W: usize, const H: usize> {
 
 impl<const W: usize, const H: usize> KeyMatrix<W, H> {
     pub fn new(
-        mut ext: Mcp23s17<SpiDeviceDriver<'static, Rc<SpiDriver<'static>>>>,
+        mut ext: Mcp23s17,
         irq: PinDriver<'static, Input>,
         column_pins: [u8; W],
         row_pins: [u8; H],

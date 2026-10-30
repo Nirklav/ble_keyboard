@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use desktop::EXAMPLE_CONFIG;
+use desktop::compat;
 use desktop::config_file;
 use desktop::link::Options;
-use desktop::ops;
 use eframe::egui;
 use protocol::hid::{Info, Versions};
 use protocol::config::{Config, JoystickButton};
@@ -125,19 +125,24 @@ pub enum Dialog {
     Message { title: String, text: String },
 }
 
+/// The keyboard as the UI knows it.
+pub enum Keyboard {
+    /// None connected, or the last one is gone.
+    None,
+    /// Connected, the app edits its config.
+    Connected { versions: Versions, info: Info },
+    /// The last keyboard runs a firmware the app can't edit, only update.
+    Incompatible(Versions),
+}
+
 /// Keyboard connection state as seen by the UI.
 pub struct DeviceState {
     /// `None` if the keyboard worker couldn't start.
     pub worker: Option<DeviceWorker>,
-    /// Info of the last connected keyboard.
-    pub info: Option<Info>,
-    pub connected: bool,
-    /// Versions of the last connected keyboard.
-    pub versions: Option<Versions>,
-    /// The last keyboard runs a firmware the app can't edit, only update.
-    pub incompatible: bool,
-    /// [`Event::Incompatible`] came, the [`Event::Failed`] of its command keeps it.
-    detected_incompatible: bool,
+    pub keyboard: Keyboard,
+    /// [`Event::Incompatible`] came: the keyboard is [`Keyboard::Incompatible`] once the [`Event::Failed`]
+    /// of its command comes.
+    incompatible: Option<Versions>,
     /// Status of the running command, `None` if idle.
     pub busy: Option<Busy>,
     /// Result of the last command, `true` for errors.
@@ -156,11 +161,16 @@ impl DeviceState {
         self.busy.is_some()
     }
 
-    /// The keyboard is gone: its versions don't tell what an update would find.
-    fn forget_keyboard(&mut self) {
-        self.versions = None;
-        self.incompatible = false;
-        self.detected_incompatible = false;
+    pub fn is_connected(&self) -> bool {
+        matches!(self.keyboard, Keyboard::Connected { .. })
+    }
+
+    /// Info of the connected keyboard.
+    pub fn info(&self) -> Option<&Info> {
+        match &self.keyboard {
+            Keyboard::Connected { info, .. } => Some(info),
+            Keyboard::None | Keyboard::Incompatible(_) => None,
+        }
     }
 
     pub fn set_status(&mut self, error: bool, text: impl Into<String>) {
@@ -194,16 +204,8 @@ impl App {
     /// a fake keyboard instead of Bluetooth.
     pub fn new(ctx: &egui::Context, offline: bool, fake_keyboard: bool) -> App {
         theme::apply(ctx);
-        let mut device = DeviceState {
-            worker: None,
-            info: None,
-            connected: false,
-            versions: None,
-            incompatible: false,
-            detected_incompatible: false,
-            busy: None,
-            status: None,
-        };
+        let mut device =
+            DeviceState { worker: None, keyboard: Keyboard::None, incompatible: None, busy: None, status: None };
         match DeviceWorker::spawn(ctx.clone(), fake_keyboard) {
             Ok(worker) => device.worker = Some(worker),
             Err(error) => device.set_status(true, format!("{error:#}")),
@@ -227,8 +229,7 @@ impl App {
 
     /// Validation result of the edited config for the connected (or the default) keyboard.
     pub fn validation(&self) -> Result<(), String> {
-        let info = if self.device.connected { self.device.info.as_ref() } else { None };
-        ops::check(&self.doc.config, info)
+        compat::check_config(&self.doc.config, self.device.info())
     }
 
     /// Also goes back to the overview.
@@ -321,21 +322,12 @@ impl App {
             }
             match event {
                 Event::Progress(busy) => self.device.busy = Some(busy),
-                Event::Connected(versions, info) => {
-                    self.device.versions = Some(versions);
-                    self.device.incompatible = false;
-                    self.device.info = Some(info);
-                    self.device.connected = true;
-                }
+                Event::Connected(versions, info) => self.device.keyboard = Keyboard::Connected { versions, info },
                 Event::Done(text) => self.device.set_status(false, text),
-                Event::Incompatible(versions) => {
-                    self.device.versions = Some(versions);
-                    self.device.incompatible = true;
-                    self.device.detected_incompatible = true;
-                }
+                Event::Incompatible(versions) => self.device.incompatible = Some(versions),
                 Event::Disconnected => {
-                    self.device.forget_keyboard();
-                    self.device.connected = false;
+                    self.device.keyboard = Keyboard::None;
+                    self.device.incompatible = None;
                     self.device.status = None;
                     self.go(Screen::Start);
                 }
@@ -354,12 +346,14 @@ impl App {
                 }
                 Event::Failed(error) => {
                     self.pushing = None;
+                    let connected = self.device.is_connected();
                     // Otherwise the keyboard is gone, or in a state unknown after the failed command.
-                    if !std::mem::take(&mut self.device.detected_incompatible) {
-                        self.device.forget_keyboard();
-                    }
+                    self.device.keyboard = match self.device.incompatible.take() {
+                        Some(versions) => Keyboard::Incompatible(versions),
+                        None => Keyboard::None,
+                    };
                     // A lost connection leads back to the start screen, like a disconnect.
-                    if std::mem::take(&mut self.device.connected) {
+                    if connected {
                         self.go(Screen::Start);
                     }
                     // The start screen shows the error itself.
@@ -456,7 +450,7 @@ impl App {
         let valid = self.validation().is_ok();
         // Offline the only keyboard action is connecting, without reading: the edited config is written after that.
         let size = egui::vec2(0.0, 30.0);
-        if self.device.connected {
+        if self.device.is_connected() {
             let push = ui
                 .add_enabled(idle && valid, theme::primary_button("Write").min_size(size))
                 .on_hover_text("Write the edited config to the keyboard")

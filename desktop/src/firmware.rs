@@ -1,27 +1,18 @@
-//! Config and firmware operations on a connected keyboard, shared by the CLI and the GUI.
+//! Firmware update of a connected keyboard, over the update part of the protocol (see [`protocol::hid`]):
+//! works for a firmware of any protocol version.
 
 use std::collections::VecDeque;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
-use protocol::hid::{self, ErrorCode, Info, Request, Response, Versions};
-use protocol::config::{self, Config};
+use anyhow::{Context, Result, bail, ensure};
 use protocol::crc::crc32;
-use protocol::{firmware, image};
+use protocol::hid::{self, ErrorCode, Request, Response, Versions};
+use protocol::image;
 
-use crate::config_file;
-use crate::link::{Link, NotSent};
+use crate::compat::check_update;
+use crate::link::{Client, NotSent, Transport};
 use crate::time::sleep;
-
-/// Progress of [`write_config`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WriteProgress {
-    /// `done` of `total` bytes are sent.
-    Sent { done: usize, total: usize },
-    /// All bytes are sent, the keyboard is applying the config (waits until all keys are released).
-    Applying,
-}
 
 /// Progress of [`update_firmware`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,158 +21,6 @@ pub enum FirmwareProgress {
     Sent { done: usize, total: usize },
     /// All bytes are sent, the keyboard checks the image; then it restarts.
     Checking,
-}
-
-/// Keyboard size used for validation while no keyboard is connected.
-pub const DEFAULT_SIZE: (u8, u8) = (10, 5);
-
-/// Checks what blocks a write: validity for the keyboard size, the keyboard limits, the encoded size.
-/// `info` is the connected keyboard, if any.
-pub fn check(config: &Config, info: Option<&Info>) -> Result<(), String> {
-    let (width, height) = info.map_or(DEFAULT_SIZE, |info| (info.width, info.height));
-    config.validate_for(width, height).map_err(|e| config_file::describe(&e, config))?;
-    if let Some(info) = info {
-        if config.layouts.len() > info.max_layouts as usize {
-            return Err(format!("the keyboard supports at most {} layouts", info.max_layouts));
-        }
-        if config.combos.len() > info.max_combos as usize {
-            return Err(format!("the keyboard supports at most {} combos", info.max_combos));
-        }
-    }
-    let size = config.to_bytes().len();
-    if size > hid::MAX_CONFIG_SIZE {
-        return Err(format!("encoded config is {size} bytes, max is {}", hid::MAX_CONFIG_SIZE));
-    }
-    Ok(())
-}
-
-/// Fails if the firmware speaks a different protocol version.
-pub fn check_protocol(protocol_version: u16) -> Result<()> {
-    ensure!(
-        protocol_version == hid::PROTOCOL_VERSION,
-        "keyboard protocol version {protocol_version} differs from the app one {}, update the firmware or the app",
-        hid::PROTOCOL_VERSION
-    );
-    Ok(())
-}
-
-/// Fails if the app can't install `firmware` on the keyboard: its update part of the protocol is another one,
-/// the image is for another board or doesn't fit the update slot.
-pub fn check_update(versions: &Versions, firmware: &Firmware) -> Result<()> {
-    ensure!(
-        versions.update_version != 0,
-        "keyboard firmware {} has no update support yet, flash it over USB once",
-        versions.firmware_version
-    );
-    ensure!(
-        versions.update_version == hid::UPDATE_VERSION,
-        "keyboard firmware {} updates with protocol version {}, the app with {}: flash it over USB",
-        versions.firmware_version,
-        versions.update_version,
-        hid::UPDATE_VERSION
-    );
-    ensure!(
-        firmware.board == versions.board,
-        "the firmware is for board `{}`, the keyboard is `{}`",
-        firmware.board,
-        versions.board
-    );
-    ensure!(
-        firmware.image.len() <= versions.slot_size as usize,
-        "the firmware is {} bytes, the keyboard has room for {}",
-        firmware.image.len(),
-        versions.slot_size
-    );
-    Ok(())
-}
-
-/// Info of a just connected keyboard: the versions first, the info only if the firmware speaks the app protocol.
-pub async fn connect_info(device: &mut impl Link) -> Result<Info> {
-    let versions = device.versions().await?;
-    check_protocol(versions.protocol_version)?;
-    device.info().await
-}
-
-/// Fails if the app can't read the keyboard config version (a newer firmware, or one older than the upgrades go).
-pub fn check_config_version(info: &Info) -> Result<()> {
-    ensure!(
-        (config::OLDEST_CONFIG_VERSION..=config::CONFIG_VERSION).contains(&info.config_version),
-        "keyboard config version {} is not supported by the app (versions {}..={}), update the firmware or the app",
-        info.config_version,
-        config::OLDEST_CONFIG_VERSION,
-        config::CONFIG_VERSION
-    );
-    Ok(())
-}
-
-/// Reads, decodes and validates the keyboard config, an older version is upgraded to the app one.
-pub async fn read_config(device: &mut impl Link, info: &Info) -> Result<Config> {
-    check_protocol(info.protocol_version)?;
-    check_config_version(info)?;
-    let bytes = read_config_bytes(device).await?;
-    let config = Config::from_bytes(&bytes).context("can't decode the keyboard config")?;
-    config
-        .validate_for(info.width, info.height)
-        .map_err(|e| anyhow!("keyboard config is invalid: {}", config_file::describe(&e, &config)))?;
-    Ok(config)
-}
-
-async fn read_config_bytes(device: &mut impl Link) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    let mut expected_len = None;
-    loop {
-        let offset = bytes.len() as u32;
-        let response = device.request(&Request::ReadConfig { offset }).await?;
-        let Response::ConfigChunk { total_len, offset: chunk_offset, data } = response else {
-            bail!("unexpected response to ReadConfig: {response:?}");
-        };
-        ensure!(chunk_offset == offset, "asked for offset {offset}, got {chunk_offset}");
-        ensure!(total_len as usize <= hid::MAX_CONFIG_SIZE, "config of {total_len} bytes is too large");
-        if *expected_len.get_or_insert(total_len) != total_len {
-            bail!("config changed while reading, try again");
-        }
-
-        bytes.extend_from_slice(&data);
-        ensure!(bytes.len() <= total_len as usize, "keyboard sent more than {total_len} bytes");
-        if bytes.len() == total_len as usize {
-            return Ok(bytes);
-        }
-        ensure!(!data.is_empty(), "keyboard sent an empty chunk at {offset} of {total_len}");
-    }
-}
-
-/// Validates `config` against the keyboard first. Returns the number of bytes sent.
-pub async fn write_config(
-    device: &mut impl Link,
-    info: &Info,
-    config: &Config,
-    mut progress: impl FnMut(WriteProgress),
-) -> Result<usize> {
-    check_protocol(info.protocol_version)?;
-    ensure!(
-        info.config_version == config::CONFIG_VERSION,
-        "keyboard config version {} differs from the app one {}, update the firmware or the app",
-        info.config_version,
-        config::CONFIG_VERSION
-    );
-    check(config, Some(info)).map_err(anyhow::Error::msg)?;
-
-    let bytes = config.to_bytes();
-    let total = bytes.len();
-    device.request_ok(&Request::WriteBegin { len: total as u32, crc32: crc32(&bytes) }).await?;
-    for (offset, chunk) in hid::chunks(&bytes, hid::CHUNK_SIZE) {
-        device.request_ok(&Request::WriteChunk { offset, data: chunk.to_vec() }).await?;
-        progress(WriteProgress::Sent { done: offset as usize + chunk.len(), total });
-    }
-    progress(WriteProgress::Applying);
-    device.request_ok(&Request::WriteCommit).await?;
-    Ok(total)
-}
-
-/// Restores the factory config on the keyboard.
-pub async fn reset_config(device: &mut impl Link, info: &Info) -> Result<()> {
-    check_protocol(info.protocol_version)?;
-    device.request_ok(&Request::ResetToDefault).await
 }
 
 /// Wait before the first reconnect: the keyboard answers the commit and restarts half a second later,
@@ -261,7 +100,7 @@ pub fn hex(bytes: &[u8]) -> String {
 /// after [`reconnect_after_update`] tells it started. Returns the number of compressed bytes sent.
 /// Uses only the update part of the protocol: works for a firmware of any protocol version.
 pub async fn update_firmware(
-    device: &mut impl Link,
+    device: &mut Client<impl Transport>,
     versions: &Versions,
     firmware: &Firmware<'_>,
     mut progress: impl FnMut(FirmwareProgress),
@@ -312,10 +151,10 @@ pub async fn update_firmware(
 /// ([`Versions::device_id`]), the keyboard restarts into the new firmware; the first request confirms it.
 /// Returns the connection and the versions, the firmware version tells whether the new firmware runs or
 /// the keyboard went back to the old one.
-pub async fn reconnect_after_update<D: Link>(
+pub async fn reconnect_after_update<T: Transport>(
     device_id: [u8; 6],
-    mut connect: impl AsyncFnMut() -> Result<D>,
-) -> Result<(D, Versions)> {
+    mut connect: impl AsyncFnMut() -> Result<Client<T>>,
+) -> Result<(Client<T>, Versions)> {
     sleep(RESTART_WAIT).await;
     let mut tries = 0;
     loop {
@@ -344,7 +183,7 @@ pub async fn reconnect_after_update<D: Link>(
                 "the keyboard didn't come back in {RECONNECT_TRIES} tries after the update; once it reconnects, connecting \
                  to it (`kb info`, the app) confirms the new firmware, without one it goes back to the old firmware {:?} after the \
                  restart",
-                firmware::ROLLBACK_TIMEOUT
+                protocol::firmware::ROLLBACK_TIMEOUT
             )));
         }
         sleep(RECONNECT_INTERVAL).await;
@@ -374,7 +213,7 @@ mod tests {
         }
     }
 
-    impl Link for WindowDevice {
+    impl Transport for WindowDevice {
         fn drain(&mut self) -> Result<()> {
             self.responses.clear();
             Ok(())
@@ -406,8 +245,6 @@ mod tests {
         async fn receive(&mut self, name: &'static str) -> Result<Response> {
             self.responses.pop_front().with_context(|| format!("no response to {name}"))
         }
-
-        async fn close(self) {}
     }
 
     fn versions() -> Versions {
@@ -447,14 +284,15 @@ mod tests {
     fn update_sends_a_window_of_chunks() {
         let image = image();
         let versions = versions();
-        let mut device = WindowDevice::new(None);
+        let mut client = Client::new(WindowDevice::new(None));
         let mut done = Vec::new();
-        let sent = block_on(update_firmware(&mut device, &versions, &firmware(&image), |progress| {
+        let sent = block_on(update_firmware(&mut client, &versions, &firmware(&image), |progress| {
             if let FirmwareProgress::Sent { done: bytes, .. } = progress {
                 done.push(bytes);
             }
         }))
         .unwrap();
+        let device = client.transport();
         assert_eq!(device.received, sent);
         assert_eq!(device.max_unanswered, hid::CHUNK_WINDOW);
         // Progress of the answered chunks, every one of them.
@@ -467,15 +305,16 @@ mod tests {
     fn update_stops_at_the_first_failed_chunk() {
         let image = image();
         let versions = versions();
-        let mut device = WindowDevice::new(Some(5));
+        let mut client = Client::new(WindowDevice::new(Some(5)));
         let mut answered = 0;
-        let error = block_on(update_firmware(&mut device, &versions, &firmware(&image), |progress| {
+        let error = block_on(update_firmware(&mut client, &versions, &firmware(&image), |progress| {
             if let FirmwareProgress::Sent { .. } = progress {
                 answered += 1;
             }
         }))
         .unwrap_err();
         assert_eq!(error.downcast_ref::<ErrorCode>(), Some(&ErrorCode::Storage));
+        let device = client.transport();
         assert_eq!(answered, 5);
         // The window was full when the error came, nothing was sent after it.
         assert_eq!(device.chunks, 5 + hid::CHUNK_WINDOW);

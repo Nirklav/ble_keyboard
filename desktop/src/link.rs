@@ -1,5 +1,5 @@
-//! Connection to the keyboard config protocol ([`protocol::hid`]): hidapi natively ([`crate::transport`]),
-//! WebHID in the browser ([`crate::webhid`]).
+//! Connection to the keyboard config protocol ([`protocol::hid`]): a [`Transport`] moves the reports, hidapi
+//! natively ([`crate::transport`]), WebHID in the browser ([`crate::webhid`]); a [`Client`] makes the requests.
 
 use std::time::Duration;
 
@@ -28,9 +28,10 @@ pub struct Options {
     pub timeout: Duration,
 }
 
-/// Connected keyboard. Futures are not `Send`: the links run on single-threaded executors.
+/// Config reports of a connected keyboard: hidapi, WebHID, a fake. Only moves the messages, the requests and
+/// their answers are [`Client`]'s. Futures are not `Send`: the links run on single-threaded executors.
 #[allow(async_fn_in_trait)]
-pub trait Link {
+pub trait Transport {
     /// Drops the responses that came already: late ones of timed out requests.
     fn drain(&mut self) -> Result<()>;
 
@@ -40,21 +41,55 @@ pub trait Link {
     /// Waits for the next response, to the request named `name` (for messages).
     async fn receive(&mut self, name: &'static str) -> Result<Response>;
 
+    /// Lets the device go once the session has ended; keeps the OS connection.
+    async fn release(self)
+    where
+        Self: Sized,
+    {
+    }
+}
+
+/// Requests to a connected keyboard over its [`Transport`].
+pub struct Client<T> {
+    transport: T,
+}
+
+impl<T: Transport> Client<T> {
+    pub fn new(transport: T) -> Self {
+        Client { transport }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn transport(&self) -> &T {
+        &self.transport
+    }
+
+    /// Sends `request` without waiting for its response, see [`Transport::send`].
+    pub async fn send(&mut self, request: &Request) -> Result<()> {
+        self.transport.send(request).await
+    }
+
+    /// Waits for the next response, see [`Transport::receive`].
+    pub async fn receive(&mut self, name: &'static str) -> Result<Response> {
+        self.transport.receive(name).await
+    }
+
     /// Sends `request` and waits for its response, no retries.
-    async fn request_once(&mut self, request: &Request) -> Result<Response> {
-        self.drain()?;
-        self.send(request).await?;
-        self.receive(name(request)).await
+    pub async fn request_once(&mut self, request: &Request) -> Result<Response> {
+        self.transport.drain()?;
+        self.transport.send(request).await?;
+        self.transport.receive(name(request)).await
     }
 
     /// Ends the session (the keyboard may sleep again); keeps the OS connection.
-    async fn close(self)
-    where
-        Self: Sized;
+    pub async fn close(mut self) {
+        let _ = self.request_ok(&Request::End).await;
+        self.transport.release().await;
+    }
 
     /// Firmware versions: the first request, a firmware of any protocol version answers it
     /// (see the update part in [`protocol::hid`]).
-    async fn versions(&mut self) -> Result<Versions> {
+    pub async fn versions(&mut self) -> Result<Versions> {
         match self.request(&Request::GetVersions).await {
             Ok(Response::Versions(versions)) => Ok(versions),
             Ok(response) => bail!("unexpected response to GetVersions: {response:?}"),
@@ -77,7 +112,7 @@ pub trait Link {
     }
 
     /// Firmware info, only for a firmware of the app protocol version.
-    async fn info(&mut self) -> Result<Info> {
+    pub async fn info(&mut self) -> Result<Info> {
         match self.request(&Request::GetInfo).await? {
             Response::Info(info) => Ok(info),
             response => bail!("unexpected response to GetInfo: {response:?}"),
@@ -86,7 +121,7 @@ pub trait Link {
 
     /// Retries while the keyboard is busy.
     /// [`Response::Error`] is returned as an error.
-    async fn request(&mut self, request: &Request) -> Result<Response> {
+    pub async fn request(&mut self, request: &Request) -> Result<Response> {
         for attempt in 0.. {
             match self.request_once(request).await? {
                 Response::Error(ErrorCode::Busy) if attempt < BUSY_RETRIES => sleep(BUSY_DELAY).await,
@@ -100,7 +135,7 @@ pub trait Link {
     }
 
     /// Sends `request` and expects [`Response::Ok`].
-    async fn request_ok(&mut self, request: &Request) -> Result<()> {
+    pub async fn request_ok(&mut self, request: &Request) -> Result<()> {
         match self.request(request).await? {
             Response::Ok => Ok(()),
             response => bail!("unexpected response to {}: {response:?}", name(request)),

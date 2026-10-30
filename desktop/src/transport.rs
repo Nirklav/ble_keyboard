@@ -13,7 +13,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use hidapi::{HidApi, HidDevice};
 use protocol::hid::{self, Request, Response};
 
-use crate::link::{Link, NotSent, Options, decode_response, encode, name};
+use crate::link::{NotSent, Options, Transport, decode_response, encode, name};
 
 /// Gives the user at the computer access to the keyboard's hidraw device: Bluetooth bus (0005),
 /// [`hid::VENDOR_ID`], [`hid::PRODUCT_ID`].
@@ -55,7 +55,7 @@ impl Device {
     }
 }
 
-impl Link for Device {
+impl Transport for Device {
     fn drain(&mut self) -> Result<()> {
         let mut input = [0; READ_LEN];
         while self.device.read_timeout(&mut input, 0).context("can't read from the keyboard")? > 0 {}
@@ -91,9 +91,5 @@ impl Link for Device {
                 .ok_or_else(|| anyhow!("bad response report {:02x?}", &input[..len]))?;
             return decode_response(message);
         }
-    }
-
-    async fn close(mut self) {
-        let _ = self.request_ok(&Request::End).await;
     }
 }

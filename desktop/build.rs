@@ -22,7 +22,7 @@ fn main() {
     let app = image::app_info(&image)
         .unwrap_or_else(|error| panic!("KB_FIRMWARE: {}: {error} (an ELF file? see scripts/bundle.sh)", path.display()));
     assert!(app.is_for(image::KEYBOARD_PROJECT), "KB_FIRMWARE: {} is not the keyboard firmware: {app:?}", path.display());
-    // `ops::bundled_firmware` needs the build ID too.
+    // `firmware::bundled_firmware` needs the build ID too.
     assert!(image::build_id(&image).is_some(), "KB_FIRMWARE: {} has no hash at its end", path.display());
 
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("firmware.bin");

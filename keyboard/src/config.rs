@@ -1,12 +1,12 @@
 use log::{error, info};
 use protocol::hid::{ErrorCode, Response};
+use protocol::board::factory_config;
+use protocol::combos::Combos;
 use protocol::config::Config;
 use protocol::keymap::Keymap;
 
 use crate::config_store;
 use crate::firmware;
-use crate::layout::default_config;
-use crate::sc::SpecialCombinations;
 use crate::services::Services;
 
 /// Config change waiting in [`Services::pending_config`] until all keys are up.
@@ -44,7 +44,7 @@ impl Source {
 pub fn load(width: u8, height: u8, bypass: bool) -> (Config, Source) {
     if bypass {
         info!("Boot key is held, saved config ignored");
-        return (default_config(), Source::Bypass);
+        return (factory_config(), Source::Bypass);
     }
 
     // The old firmware can't read an upgraded config: it stays as it is until the new firmware is
@@ -56,36 +56,33 @@ pub fn load(width: u8, height: u8, bypass: bool) -> (Config, Source) {
         },
         Ok(None) => {
             info!("No saved config, using default");
-            (default_config(), Source::Default)
+            (factory_config(), Source::Default)
         },
         Err(e) => {
             error!("Saved config is broken, using default: {}", e);
-            (default_config(), Source::Fallback)
+            (factory_config(), Source::Fallback)
         }
     }
 }
 
 /// Applies [`Services::pending_config`] (a combo's), then a change submitted by the config app and answers it.
 /// Must be called when all keys are up.
-pub fn apply_changes<const W: usize, const H: usize>(
-    svc: &mut Services<W, H>,
-    special_combinations: &mut SpecialCombinations,
-) -> anyhow::Result<()> {
+pub fn apply_changes(svc: &mut Services) -> anyhow::Result<()> {
     if let Some(pending) = svc.pending_config.take() {
-        apply_pending(pending, svc, special_combinations)?;
+        apply_pending(pending, svc)?;
     }
 
-    let Some(pending) = svc.keyboard.config_service().take_submitted() else {
+    let Some(pending) = svc.config_service.take_submitted() else {
         return Ok(());
     };
     let message = match pending {
         Pending::Apply(_) => "Updated",
         Pending::Reset => "Reset",
     };
-    let stored = apply_pending(pending, svc, special_combinations);
+    let stored = apply_pending(pending, svc);
     // The config is applied either way, but it's lost on reboot unless stored.
     let response = if matches!(stored, Ok(true)) { Response::Ok } else { Response::Error(ErrorCode::Storage) };
-    svc.keyboard.config_service().finish(response);
+    svc.config_service.finish(response);
 
     if stored? {
         svc.display.show_text(message)?;
@@ -94,21 +91,17 @@ pub fn apply_changes<const W: usize, const H: usize>(
 }
 
 /// Applies `pending` and returns whether the change reached the flash; the config is applied in either case.
-fn apply_pending<const W: usize, const H: usize>(
-    pending: Pending,
-    svc: &mut Services<W, H>,
-    special_combinations: &mut SpecialCombinations,
-) -> anyhow::Result<bool> {
+fn apply_pending(pending: Pending, svc: &mut Services) -> anyhow::Result<bool> {
     let (config, stored) = match pending {
         Pending::Apply(config) => {
             let stored = config_store::save(&config);
             (config, stored)
         },
-        Pending::Reset => (default_config(), config_store::remove_saved()),
+        Pending::Reset => (factory_config(), config_store::remove_saved()),
     };
 
-    apply(config, svc, special_combinations);
-    svc.keyboard.config_service().set_current(svc.config.to_bytes());
+    apply(config, svc);
+    svc.config_service.set_current(svc.config.to_bytes());
 
     if let Err(e) = &stored {
         error!("Failed to store config: {}", e);
@@ -117,10 +110,11 @@ fn apply_pending<const W: usize, const H: usize>(
     Ok(stored.is_ok())
 }
 
-fn apply<const W: usize, const H: usize>(config: Config, svc: &mut Services<W, H>, special_combinations: &mut SpecialCombinations) {
+fn apply(config: Config, svc: &mut Services) {
     info!("Applying config");
     svc.keymap = Keymap::new(&config);
     svc.key_matrix.set_debounce_ms(config.settings.debounce_ms);
-    special_combinations.set(&config.combos);
+    // All progress is lost, so are the held keys: it goes with the new keymap.
+    svc.combos = Combos::new(&config.combos);
     svc.config = config;
 }

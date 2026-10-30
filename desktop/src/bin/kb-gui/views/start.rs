@@ -2,9 +2,9 @@
 
 use eframe::egui;
 
-use desktop::ops;
+use desktop::{compat, firmware};
 
-use crate::app::{App, Dialog, Discarding};
+use crate::app::{App, Dialog, Discarding, Keyboard};
 use crate::theme;
 
 /// Width of the column in the middle: the connect button and the other buttons.
@@ -57,12 +57,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
 /// Update to the bundled firmware for a keyboard whose firmware the app can't edit.
 fn update(app: &mut App, ui: &mut egui::Ui, idle: bool) {
-    let (Some(versions), true, Some(bundled)) = (&app.device.versions, app.device.incompatible, ops::bundled_firmware())
-    else {
+    let (Keyboard::Incompatible(versions), Some(bundled)) = (&app.device.keyboard, firmware::bundled_firmware()) else {
         return;
     };
     ui.add_space(theme::GAP_S);
-    let compatible = ops::check_update(versions, bundled);
+    let compatible = compat::check_update(versions, bundled);
     let button = ui.add_enabled(idle && compatible.is_ok(), egui::Button::new(format!("Update firmware to {}", bundled.version)));
     let button = match &compatible {
         Ok(()) => button.on_hover_text("Install the firmware bundled with the app (asks first)"),
