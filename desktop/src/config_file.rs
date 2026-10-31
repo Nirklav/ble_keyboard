@@ -191,7 +191,7 @@ mod tests {
     fn version_3_is_upgraded() {
         let text = EXAMPLE.replace("version = 4", "version = 3").replace("tapping_term_ms = 200", "tapping_term_ms = 250");
         // Version 3 has only the tap-hold settings.
-        let new_settings = ["combo_term_ms", "debounce_ms", "sleep_", "joystick_"];
+        let new_settings = ["combo_term_ms", "debounce_ms", "sleep_", "display_", "joystick_"];
         let text = text.lines().filter(|l| !new_settings.iter().any(|name| l.starts_with(name))).collect::<Vec<_>>().join("\n");
         let config = parse(&text).unwrap();
         assert_eq!(config.version, CONFIG_VERSION);

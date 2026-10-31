@@ -16,7 +16,8 @@
 # MouseTravel: cursor speed while held, pixels per 10 ms (10 = 1000 px/s); MouseScroll: wheel steps
 # per second, a press scrolls one step at once. Both move by the time, whatever the report rate is.
 # Other settings: debounce_ms (key contact bounce), sleep_connected_s / sleep_disconnected_s
-# (deep sleep after that many idle seconds with / without a host, 15..36000), joystick_speed (cursor
+# (deep sleep after that many idle seconds with / without a host, 15..36000), display_off_s (the display
+# status goes off after that many seconds without key presses, 10..3600), joystick_speed (cursor
 # px/s at full deflection), joystick_ramp_ms (time to reach that speed, 0 = at once), joystick_invert_x/y.
 # BLE profiles: the keyboard remembers 4 hosts, one per profile; the display shows them as BT 1..BT 4,
 # BtSelect takes 0..3. Switching drops the current host and connects to the host of the profile, an empty
@@ -51,6 +52,7 @@ joystick_speed = 1800
 joystick_ramp_ms = 40
 joystick_invert_x = false
 joystick_invert_y = false
+display_off_s = 120
 
 [[layouts]]
 name = "MAIN"

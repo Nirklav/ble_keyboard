@@ -36,7 +36,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     settings(app, ui);
 }
 
-/// Timing of the keys, sleep and the joystick cursor.
+/// Timing of the keys, sleep, the display and the joystick cursor.
 fn settings(app: &mut App, ui: &mut egui::Ui) {
     let settings = &mut app.doc.config.settings;
     egui::Grid::new("settings").num_columns(3).spacing([theme::GAP_M, theme::GAP_S]).show(ui, |ui| {
@@ -55,6 +55,10 @@ fn settings(app: &mut App, ui: &mut egui::Ui) {
         number(ui, "Connected", &mut settings.sleep_connected_s, Settings::SLEEP_S, " s", hint);
         let hint = "The same while no host is connected.";
         number(ui, "Disconnected", &mut settings.sleep_disconnected_s, Settings::SLEEP_S, " s", hint);
+
+        group(ui, "Display");
+        let hint = "The status goes off after this long without key presses: an OLED burns in.";
+        number(ui, "Off after", &mut settings.display_off_s, Settings::DISPLAY_OFF_S, " s", hint);
 
         group(ui, "Joystick");
         let hint = "Cursor speed at full deflection.";

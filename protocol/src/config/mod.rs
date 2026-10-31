@@ -5,9 +5,10 @@
 //!   encoded with `postcard` ([`Config::to_bytes`], [`Config::from_bytes`]);
 //! - in the desktop app it is a TOML file with key names.
 //!
-//! Compatibility: enum variants are only appended (postcard encodes the variant index),
-//! any other change to the layout of these types bumps [`CONFIG_VERSION`]. The previous layouts
-//! are kept (see [`v1`], [`v2`], [`v3`]) and upgraded on decode, so saved configs survive a firmware update.
+//! Compatibility: enum variants are only appended (postcard encodes the variant index), new [`Settings`] are
+//! appended to their end (see [`Config::from_bytes`]); any other change to the layout of these types bumps
+//! [`CONFIG_VERSION`]. The previous layouts are kept (see [`v1`], [`v2`], [`v3`]) and upgraded on decode,
+//! so saved configs survive a firmware update.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -127,7 +128,7 @@ impl KeyAction {
     }
 }
 
-/// Global settings: key processing, sleep, joystick.
+/// Global settings: key processing, sleep, display, joystick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -151,6 +152,8 @@ pub struct Settings {
     pub joystick_ramp_ms: u16,
     pub joystick_invert_x: bool,
     pub joystick_invert_y: bool,
+    /// The display status goes off after this many seconds without key presses: an OLED burns in.
+    pub display_off_s: u16,
 }
 
 impl Settings {
@@ -169,6 +172,49 @@ impl Settings {
     pub const JOYSTICK_SPEED: RangeInclusive<u16> = 100..=6000;
     /// Allowed [`Settings::joystick_ramp_ms`].
     pub const JOYSTICK_RAMP_MS: RangeInclusive<u16> = 0..=500;
+    /// Allowed [`Settings::display_off_s`]: longer than a pop-up, up to an hour.
+    pub const DISPLAY_OFF_S: RangeInclusive<u16> = 10..=3600;
+
+    /// Decodes postcard `bytes` that may end before the last settings, those are the defaults then.
+    /// Every field is listed: one added to the struct doesn't compile until it's read here, in its order.
+    fn from_bytes(mut bytes: &[u8]) -> Result<Settings, postcard::Error> {
+        let mut settings = Settings::default();
+        let Settings {
+            tapping_term_ms,
+            require_prior_idle_ms,
+            combo_term_ms,
+            debounce_ms,
+            sleep_connected_s,
+            sleep_disconnected_s,
+            joystick_speed,
+            joystick_ramp_ms,
+            joystick_invert_x,
+            joystick_invert_y,
+            display_off_s,
+        } = &mut settings;
+        take(&mut bytes, tapping_term_ms)?;
+        take(&mut bytes, require_prior_idle_ms)?;
+        take(&mut bytes, combo_term_ms)?;
+        take(&mut bytes, debounce_ms)?;
+        take(&mut bytes, sleep_connected_s)?;
+        take(&mut bytes, sleep_disconnected_s)?;
+        take(&mut bytes, joystick_speed)?;
+        take(&mut bytes, joystick_ramp_ms)?;
+        take(&mut bytes, joystick_invert_x)?;
+        take(&mut bytes, joystick_invert_y)?;
+        take(&mut bytes, display_off_s)?;
+        Ok(settings)
+    }
+}
+
+/// Decodes `field` from the start of `bytes` and moves past it; none left keeps it as it is.
+fn take<T: DeserializeOwned>(bytes: &mut &[u8], field: &mut T) -> Result<(), postcard::Error> {
+    if !bytes.is_empty() {
+        let (value, rest) = postcard::take_from_bytes(bytes)?;
+        *field = value;
+        *bytes = rest;
+    }
+    Ok(())
 }
 
 impl Default for Settings {
@@ -184,6 +230,7 @@ impl Default for Settings {
             joystick_ramp_ms: 40,
             joystick_invert_x: false,
             joystick_invert_y: false,
+            display_off_s: 120,
         }
     }
 }
@@ -405,10 +452,21 @@ impl Config {
 
     /// Decodes from postcard, a config of an older version is upgraded to [`CONFIG_VERSION`].
     /// Doesn't [`validate`](Config::validate).
+    ///
+    /// [`Config::settings`] are the last field: a newer app or firmware appends settings to their end without
+    /// a new version. An older one stops before them (postcard ignores what's left of the input), here
+    /// the settings an older one left out are the defaults.
     pub fn from_bytes(bytes: &[u8]) -> Result<Config, postcard::Error> {
         // `version` is the first field, so it can be read before the layout of the rest is known.
         let (version, _) = postcard::take_from_bytes::<u16>(bytes)?;
-        Config::decode(version, &Postcard(bytes))
+        if version != CONFIG_VERSION {
+            return Config::decode(version, &Postcard(bytes));
+        }
+        // Encoded like a struct of the same fields.
+        let ((version, width, height, layouts, combos), settings) =
+            postcard::take_from_bytes::<(u16, u8, u8, Vec<Layout>, Vec<Combo>)>(bytes)?;
+        let settings = Settings::from_bytes(settings)?;
+        Ok(Config { version, width, height, layouts, combos, settings })
     }
 
     /// Decodes a config of `version` from `input`, an older version is upgraded to [`CONFIG_VERSION`].

@@ -34,6 +34,7 @@ impl Services {
         display: Display,
         config: Config) -> Self {
         key_matrix.set_debounce_ms(config.settings.debounce_ms);
+        display.set_timeout(&config.settings);
         Self {
             keyboard,
             config_service,

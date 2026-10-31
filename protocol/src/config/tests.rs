@@ -101,7 +101,9 @@ fn postcard_roundtrip() {
     let config = sample();
     let bytes = config.to_bytes();
     assert_eq!(Config::from_bytes(&bytes).unwrap(), config);
-    assert!(Config::from_bytes(&bytes[..bytes.len() - 1]).is_err());
+    // Settings may end early (see `settings_are_appended`), what's before them may not.
+    let settings = postcard::to_allocvec(&config.settings).unwrap().len();
+    assert!(Config::from_bytes(&bytes[..bytes.len() - settings - 1]).is_err());
 }
 
 /// [`sample`] without what version 2 didn't have.
@@ -152,6 +154,40 @@ fn version_3_is_upgraded() {
     assert_eq!(upgraded.layouts, config.layouts);
     assert_eq!(upgraded.combos, config.combos);
     assert_eq!(upgraded.validate_for(10, 5), Ok(()));
+}
+
+#[test]
+fn settings_are_appended() {
+    let mut config = sample();
+    // All different from the defaults and from each other: read in the wrong order, they would differ.
+    config.settings = Settings {
+        tapping_term_ms: 210,
+        require_prior_idle_ms: 140,
+        combo_term_ms: 60,
+        debounce_ms: 7,
+        sleep_connected_s: 610,
+        sleep_disconnected_s: 70,
+        joystick_speed: 1900,
+        joystick_ramp_ms: 30,
+        joystick_invert_x: true,
+        joystick_invert_y: true,
+        display_off_s: 130,
+    };
+    let bytes = config.to_bytes();
+    assert_eq!(Config::from_bytes(&bytes).unwrap(), config);
+
+    // An older app or firmware has no `display_off_s`: it reads the rest of a newer config...
+    type Older = (u16, u8, u8, Vec<Layout>, Vec<Combo>, [u16; 8], bool, bool);
+    let older: Older = postcard::from_bytes(&bytes).unwrap();
+    assert_eq!(older.5[7], 30);
+    assert!(older.7);
+    // ...and writes its config without it: the default here.
+    let older_bytes = postcard::to_allocvec(&older).unwrap();
+    assert!(older_bytes.len() < bytes.len());
+    let upgraded = Config::from_bytes(&older_bytes).unwrap();
+    assert_eq!(upgraded.settings, Settings { display_off_s: Settings::default().display_off_s, ..config.settings });
+    assert_eq!(upgraded.layouts, config.layouts);
+    assert_eq!(upgraded.combos, config.combos);
 }
 
 #[test]
@@ -364,6 +400,10 @@ fn validation_errors() {
     assert_eq!(
         invalid(|c| c.settings.sleep_disconnected_s = 10),
         ValidationError::Setting { name: "sleep_disconnected_s", value: 10, min: 15, max: 36000 }
+    );
+    assert_eq!(
+        invalid(|c| c.settings.display_off_s = 5),
+        ValidationError::Setting { name: "display_off_s", value: 5, min: 10, max: 3600 }
     );
     assert_eq!(
         invalid(|c| c.settings.joystick_ramp_ms = 600),
