@@ -58,6 +58,9 @@ pub fn init() -> anyhow::Result<Hardware> {
 
     let display = Display::new(i2c.clone())?;
     let ext = new_extension(spi_driver, ext_cs)?;
+    // In light sleep the GPIOs are released (PM_SLP_DISABLE_GPIO): the MCP chip select stays driven high,
+    // a floating one could clock noise in.
+    esp_idf_sys::esp!(unsafe { esp_idf_sys::gpio_sleep_sel_dis(8) })?;
     let mut joystick = Joystick::new(i2c, joystick_irq);
     let mut key_matrix = Matrix::new(ext, ext_irq, [0, 1, 2, 3, 4, 5, 6, 7, 14, 15], [8, 9, 10, 11, 12])?;
 

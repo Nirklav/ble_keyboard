@@ -59,7 +59,12 @@ CONFIG_BT_NIMBLE_SM_SC=y
 CONFIG_PM_ENABLE=y
 CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
 CONFIG_PM_DFS_INIT_AUTO=y
-#CONFIG_PM_POWER_DOWN_PERIPHERAL_IN_LIGHT_SLEEP=y crash
+# Light sleep itself is turned on by the firmware (power::enable_light_sleep). The BT controller keeps the
+# main crystal (its sleep clock, no 32 kHz one on the board) powered through it, otherwise it forbids light sleep.
+CONFIG_BT_CTRL_MAIN_XTAL_PU_DURING_LIGHT_SLEEP=y
+CONFIG_ESP_PHY_MAC_BB_PD=y
+# The USB console stops in light sleep: no light sleep while a host is on the USB.
+CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y
 
 # Reconnection
 CONFIG_BT_NIMBLE_NVS_PERSIST=y

@@ -48,6 +48,7 @@ fn main() {
 }
 
 fn main_body() -> anyhow::Result<()> {
+    power::enable_light_sleep()?;
     storage::mount()?;
 
     let Hardware { display, mut key_matrix, notification, mut joystick } = hardware::init()?;
@@ -84,6 +85,7 @@ fn main_body() -> anyhow::Result<()> {
     const DELAY_MS: u32 = 8;
     let start = Instant::now();
     let mut motion = Motion::default();
+    let mut polling = power::NoLightSleep::new()?;
     loop {
         // Wraps after 49 days, the keymap compares the times with wrapping.
         let now = start.elapsed().as_millis() as u32;
@@ -140,8 +142,11 @@ fn main_body() -> anyhow::Result<()> {
             // A new config may have another layout on top.
             svc.update_status()?;
             let combo_timeout = svc.combos.timeout_in(start.elapsed().as_millis() as u32);
+            polling.hold(false);
             power::wait_for_activity(&notification, &mut svc, &mut joystick, combo_timeout)?;
         } else {
+            // A held key keeps the interrupt line low, it would reject every light sleep.
+            polling.hold(true);
             delay.delay_ms(DELAY_MS);
         }
     }

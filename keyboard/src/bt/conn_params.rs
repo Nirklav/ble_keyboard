@@ -9,7 +9,9 @@ pub struct ConnParams {
 }
 
 impl ConnParams {
-    pub const IDLE: ConnParams = ConnParams::new(12, 24, 10, 70);
+    /// Up to 330 ms between the events the keyboard listens to: a 2 s supervision timeout lets a few go
+    /// missing (Apple asks for 3 × that at least), light sleep makes that likelier.
+    pub const IDLE: ConnParams = ConnParams::new(12, 24, 10, 200);
     pub const ACTIVE: ConnParams = ConnParams::new(6, 12, 0, 60);
     /// While a firmware update is received: the shortest interval, a chunk takes about two of them.
     pub const TRANSFER: ConnParams = ConnParams::new(6, 6, 0, 60);

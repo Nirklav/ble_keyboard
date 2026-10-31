@@ -1,7 +1,9 @@
 //! Sleep: the main loop waits for the key interrupts, idles the BLE link after [`IDLE_DELAY_MS`] and deep sleeps
 //! after the configured time (see [`protocol::config::Settings`]). Every wake-up source is an interrupt pin, active low.
 
+use std::ffi::c_void;
 use std::num::NonZeroU32;
+use std::ptr;
 use std::rc::Rc;
 
 use esp_idf_svc::hal::delay::TickType;
@@ -127,7 +129,55 @@ pub fn prepare_deep_sleep(irq_pins: &[&PinDriver<'static, Input>]) {
     }
 }
 
+/// Automatic light sleep while every task waits, the BLE connection stays (see sdkconfig.defaults:
+/// the main crystal stays powered for the BT controller). Before the BLE stack starts.
+pub fn enable_light_sleep() -> anyhow::Result<()> {
+    configure_pm(true)
+}
+
+/// The CPU between 40 and 80 MHz, light sleep when idle if `light_sleep`.
+fn configure_pm(light_sleep: bool) -> anyhow::Result<()> {
+    let config = esp_idf_sys::esp_pm_config_t { max_freq_mhz: 80, min_freq_mhz: 40, light_sleep_enable: light_sleep };
+    esp_idf_sys::esp!(unsafe { esp_idf_sys::esp_pm_configure(&config as *const _ as *const c_void) })?;
+    Ok(())
+}
+
+/// Keeps the chip out of light sleep while held, e.g. while the main loop polls held keys: the interrupt
+/// line stays low then, every attempt to sleep would be rejected only after preparing it.
+pub struct NoLightSleep {
+    lock: esp_idf_sys::esp_pm_lock_handle_t,
+    held: bool,
+}
+
+impl NoLightSleep {
+    pub fn new() -> anyhow::Result<Self> {
+        let mut lock = ptr::null_mut();
+        esp_idf_sys::esp!(unsafe {
+            esp_idf_sys::esp_pm_lock_create(esp_idf_sys::esp_pm_lock_type_t_ESP_PM_NO_LIGHT_SLEEP, 0, c"keys".as_ptr(), &mut lock)
+        })?;
+        Ok(Self { lock, held: false })
+    }
+
+    pub fn hold(&mut self, hold: bool) {
+        if hold == self.held {
+            return;
+        }
+        unsafe {
+            if hold {
+                esp_idf_sys::esp_pm_lock_acquire(self.lock);
+            } else {
+                esp_idf_sys::esp_pm_lock_release(self.lock);
+            }
+        }
+        self.held = hold;
+    }
+}
+
 fn enter_deep_sleep(irq_pins: &[&PinDriver<'static, Input>]) {
+    // Auto light sleep leaves its timer wake-up source on: deep sleep would wake up (restart) at once.
+    if let Err(e) = configure_pm(false) {
+        error!("light sleep off before deep sleep: {:?}", e);
+    }
     unsafe {
         let mut mask = 0;
         for irq_pin in irq_pins {
