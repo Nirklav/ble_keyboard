@@ -185,7 +185,7 @@ async fn work(commands: Commands, events: EventSender, fake: bool) {
     if fake {
         let factory: Rc<[u8]> = config_file::parse(EXAMPLE_CONFIG).expect("the example config is valid").to_bytes().into();
         let stored = Rc::new(RefCell::new(factory.to_vec()));
-                let connect_fake = async |_: &Options| {
+        let connect_fake = async |_: &Options| {
             sleep(Duration::from_millis(1000)).await;
             Ok(Client::new(FakeDevice {
                 factory: factory.clone(),
@@ -296,21 +296,21 @@ async fn execute<T: Transport>(
 /// (also for Connect, which reads nothing: such a config is of a firmware the app doesn't know).
 /// Otherwise closes the connection, sends [`Event::Incompatible`] and fails with the reason.
 async fn open<T: Transport>(client: Client<T>, versions: Versions, events: &EventSender) -> Result<Session<T>> {
-    let (client, versions, reason) = match Session::open(client, versions).await? {
+    let (versions, reason) = match Session::open(client, versions).await? {
         Opened::Session(session) => match check_config_version(session.info()) {
             Ok(()) => {
                 events.send(Event::Connected(session.versions().clone(), session.info().clone()));
                 return Ok(session);
             }
             Err(reason) => {
-                let (client, versions) = session.into_parts();
-                (client, versions, reason)
+                // Nothing to do on it but the update, which connects itself: the keyboard may sleep meanwhile.
+                let versions = session.versions().clone();
+                session.close().await;
+                (versions, reason)
             }
         },
-        Opened::Incompatible { client, versions, reason } => (client, versions, reason),
+        Opened::Incompatible { versions, reason } => (versions, reason),
     };
-    // Nothing to do on it but the update, which connects itself: the keyboard may sleep meanwhile.
-    client.close().await;
     events.send(Event::Incompatible(versions));
     Err(reason)
 }

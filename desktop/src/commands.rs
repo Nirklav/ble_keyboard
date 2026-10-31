@@ -32,10 +32,7 @@ pub async fn info(options: &Options) -> Result<()> {
     // The rest is in the info, which only a firmware of the app protocol sends.
     let session = match Session::open(client, versions).await? {
         Opened::Session(session) => session,
-        Opened::Incompatible { client, reason, .. } => {
-            client.close().await;
-            return Err(reason);
-        }
+        Opened::Incompatible { reason, .. } => return Err(reason),
     };
     let info = session.info();
     println!("Config version:    {} (app: {})", info.config_version, config::CONFIG_VERSION);

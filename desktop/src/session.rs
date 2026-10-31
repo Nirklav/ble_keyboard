@@ -29,13 +29,14 @@ pub struct Session<T> {
 /// What [`Session::open`] found.
 pub enum Opened<T> {
     Session(Session<T>),
-    /// The firmware speaks another protocol: the app can only update it, see [`crate::firmware`].
-    Incompatible { client: Client<T>, versions: Versions, reason: anyhow::Error },
+    /// The firmware speaks another protocol: the app can only update it, see [`crate::firmware`]. The session
+    /// is ended (the keyboard may sleep again), the update connects itself.
+    Incompatible { versions: Versions, reason: anyhow::Error },
 }
 
 impl<T: Transport> Session<T> {
     /// Session of a just connected keyboard: the versions first, the info only if the firmware speaks the
-    /// app protocol. Fails if it doesn't.
+    /// app protocol. Fails if it doesn't, after ending the session (see [`Opened::Incompatible`]).
     pub async fn connect(mut client: Client<T>) -> Result<Session<T>> {
         let versions = client.versions().await?;
         match Session::open(client, versions).await? {
@@ -45,10 +46,11 @@ impl<T: Transport> Session<T> {
     }
 
     /// Session of a keyboard with `versions` ([`Client::versions`]) if its firmware speaks the app protocol,
-    /// reads the info then.
+    /// reads the info then. Otherwise ends the session, see [`Opened::Incompatible`].
     pub async fn open(mut client: Client<T>, versions: Versions) -> Result<Opened<T>> {
         if let Err(reason) = check_protocol(versions.protocol_version) {
-            return Ok(Opened::Incompatible { client, versions, reason });
+            client.close().await;
+            return Ok(Opened::Incompatible { versions, reason });
         }
         let info = client.info().await?;
         Ok(Opened::Session(Session { client, versions, info }))
@@ -79,8 +81,7 @@ impl<T: Transport> Session<T> {
 
     /// Reads, decodes and validates the keyboard config, an older version is upgraded to the app one.
     pub async fn read_config(&mut self) -> Result<Config> {
-        let info = &self.info;
-        check_config_version(info)?;
+        check_config_version(&self.info)?;
         let bytes = self.read_config_bytes().await?;
         let config = Config::from_bytes(&bytes).context("can't decode the keyboard config")?;
         config
