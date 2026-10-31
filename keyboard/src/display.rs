@@ -15,7 +15,7 @@ use ssd1306::{I2CDisplayInterface, size::DisplaySize128x32};
 use ssd1306::prelude::{Brightness, DisplayRotation, I2CInterface};
 use ssd1306::mode::{BufferedGraphicsMode, DisplayConfig};
 
-use protocol::config::Settings;
+use protocol::config::{Config, Settings};
 
 use crate::firmware;
 use crate::i2c_bus::SharedI2c;
@@ -54,7 +54,7 @@ const STACK_SIZE: usize = 6 * 1024;
 
 pub type Ssd1306 = ssd1306::Ssd1306<I2CInterface<SharedI2c>, DisplaySize128x32, BufferedGraphicsMode<DisplaySize128x32>>;
 
-/// Shows pop-up text on a plate for a while, then the status until [`Display::set_timeout`] passes without key
+/// Shows pop-up text on a plate for a while, then the status until [`Settings::display_off_s`] passes without key
 /// presses or changes, an OLED burns in; all at the lowest brightness.
 /// Drawn by its own thread: a frame holds the I2C bus for ~13 ms, the callers only send it what to show.
 pub struct Display {
@@ -86,6 +86,7 @@ impl Display {
             update_changed: false,
             off_at: None,
             timeout: Duration::from_secs(Settings::default().display_off_s.into()),
+            longest_layer: 0,
             on: false,
             layer_drift: Drift::random(),
             profile_drift: Drift::random(),
@@ -132,10 +133,13 @@ impl Display {
         self.send(Msg::Update(updating))
     }
 
-    /// [`Settings::display_off_s`]: a shown status goes off this long after now.
-    pub fn set_timeout(&self, settings: &Settings) {
+    /// Of a new `config`: a shown status goes off [`Settings::display_off_s`] after now,
+    /// the status texts drift in parts that fit its longest layout name.
+    pub fn configure(&self, config: &Config) {
+        let timeout = Duration::from_secs(config.settings.display_off_s.into());
+        let longest_layer = config.layouts.iter().map(|layout| text_width(&layout.name)).max().unwrap_or(0);
         // Never fails, see `send`.
-        let _ = self.send(Msg::Timeout(Duration::from_secs(settings.display_off_s.into())));
+        let _ = self.send(Msg::Configure { timeout, longest_layer });
     }
 
     /// A key was pressed or released: the status is shown again, if it has gone off, for another timeout.
@@ -164,7 +168,7 @@ enum Msg {
     Text(String),
     Status(Status),
     Update(bool),
-    Timeout(Duration),
+    Configure { timeout: Duration, longest_layer: u32 },
     Wake,
     /// Answered once the display is off.
     Off(Sender<anyhow::Result<()>>)
@@ -262,8 +266,10 @@ struct Screen {
     update_changed: bool,
     /// When the status goes off; not counted under a pop-up, it starts over after one.
     off_at: Option<Instant>,
-    /// Of the status, see [`Display::set_timeout`].
+    /// Of the status, see [`Display::configure`].
     timeout: Duration,
+    /// Width of the longest layout name, see [`Display::configure`].
+    longest_layer: u32,
     on: bool,
     layer_drift: Drift,
     profile_drift: Drift,
@@ -318,7 +324,8 @@ impl Screen {
                 self.update_drawn = None;
                 self.update_changed = true;
             },
-            Msg::Timeout(timeout) => {
+            Msg::Configure { timeout, longest_layer } => {
+                self.longest_layer = longest_layer;
                 self.timeout = timeout;
                 if let Some(at) = &mut self.off_at {
                     *at = Instant::now() + timeout;
@@ -404,7 +411,8 @@ impl Screen {
     }
 
     /// `shift` moves it down. The layout name drifts in the left part of the screen, the profile in the right one:
-    /// the width they leave free is split between them.
+    /// the width they leave free is split between them. The parts are of the longest layout name: a layer that comes
+    /// and goes (Fn held) moves nothing.
     fn draw_status_text(&mut self, shift: i32) -> anyhow::Result<()> {
         if !self.on {
             // The first frame on: the status comes back elsewhere. Not before, the radio is on by now.
@@ -412,7 +420,7 @@ impl Screen {
             self.profile_drift = Drift::random();
         }
         let profile = format!("BT{}", self.status.profile + 1);
-        let layer_width = text_width(&self.status.layer) as i32;
+        let layer_width = text_width(&self.status.layer).max(self.longest_layer) as i32;
         let profile_width = text_width(&profile) as i32;
         let free = (WIDTH - layer_width - profile_width - STATUS_GAP).max(0);
         let rows = HEIGHT - FONT.character_size.height as i32;
