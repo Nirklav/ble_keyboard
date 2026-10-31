@@ -1,3 +1,4 @@
 /target
-.embuild
 /desktop/dist
+.embuild
+.claude/worktrees/

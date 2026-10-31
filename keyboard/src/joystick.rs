@@ -1,4 +1,5 @@
-use esp_idf_svc::hal::delay::TickType;
+use esp_idf_svc::hal::delay::{FreeRtos, TickType};
+use esp_idf_svc::sys::EspError;
 use esp_idf_svc::hal::gpio::{Input, PinDriver};
 use log::{info, warn};
 use protocol::config::{JoystickButton, Settings};
@@ -8,6 +9,9 @@ use protocol::motion::{Ramp, Velocity};
 use crate::i2c_bus::SharedI2c;
 
 const TIMEOUT: TickType = TickType::new_millis(20);
+/// Reads of the version before the joystick counts as not connected, see [`Joystick::new`].
+const VERSION_ATTEMPTS: u32 = 3;
+const VERSION_RETRY_MS: u32 = 2;
 
 /// Joystick extension, see [`protocol::joystick`].
 /// It holds `INT` low while there is a state to read, so it's polled only then.
@@ -24,7 +28,19 @@ impl Joystick {
     /// Returns `None` if the joystick doesn't answer or speaks another protocol version.
     pub fn new(i2c: SharedI2c, irq: PinDriver<'static, Input>) -> Option<Self> {
         let mut version = [0];
-        match i2c.write_read(ADDRESS, &[Register::Version as u8], &mut version, TIMEOUT.ticks()) {
+        // A stopped joystick wakes up on the bus traffic but doesn't answer it (no address match in Stop),
+        // the next attempts reach it.
+        let mut read = Err(EspError::from_infallible::<{ esp_idf_sys::ESP_FAIL }>());
+        for attempt in 0..VERSION_ATTEMPTS {
+            if attempt > 0 {
+                FreeRtos::delay_ms(VERSION_RETRY_MS);
+            }
+            read = i2c.write_read(ADDRESS, &[Register::Version as u8], &mut version, TIMEOUT.ticks());
+            if read.is_ok() {
+                break;
+            }
+        }
+        match read {
             Ok(()) if version[0] == VERSION => {
                 info!("joystick connected");
                 Some(Self {

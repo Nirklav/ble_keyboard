@@ -101,6 +101,12 @@ fn update_int(cs: &CriticalSection) {
     set_int(pending);
 }
 
+/// `INT` is driven low: the master has something left to read.
+pub fn int_asserted() -> bool {
+    let gpioa = unsafe { &*GPIOA::ptr() };
+    gpioa.odr.read().bits() & (1 << INT_PIN) == 0
+}
+
 /// Drives `INT` low when `asserted`, releases it otherwise.
 /// BSRR writes are atomic, so it's safe from both the main loop and the interrupt.
 pub fn set_int(asserted: bool) {
