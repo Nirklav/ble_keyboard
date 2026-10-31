@@ -73,9 +73,10 @@ pub struct Motion {
 
 impl Motion {
     /// Step of a report at `now` ms (wrapping) with `velocity` since the previous one, see [`FIRST_STEP_MS`]
-    /// and [`MAX_STEP_MS`]. A wheel that starts or turns sends one step at once, so a tap of a slow scroll key
-    /// scrolls too.
-    pub fn step(&mut self, velocity: Velocity, now: u32) -> Step {
+    /// and [`MAX_STEP_MS`]. The report counts the wheel in 1 / `wheel_resolution` steps (a host that turned on
+    /// the high-resolution wheel), so it scrolls smoothly. A wheel that starts or turns sends one whole step
+    /// at once, so a tap of a slow scroll key scrolls too.
+    pub fn step(&mut self, velocity: Velocity, wheel_resolution: i32, now: u32) -> Step {
         if velocity.is_zero() {
             *self = Motion::default();
             return Step::default();
@@ -83,12 +84,13 @@ impl Motion {
         let elapsed = elapsed(self.last, now);
         self.last = Some(now);
         if velocity.wheel.signum() != self.wheel.signum() {
-            self.remainder[2] = velocity.wheel.signum() * 1000;
+            self.remainder[2] = velocity.wheel.signum() * wheel_resolution * 1000;
         }
         self.wheel = velocity.wheel;
+        let wheel = velocity.wheel.saturating_mul(wheel_resolution);
 
         let mut out = [0i8; 3];
-        for (axis, speed) in [velocity.x, velocity.y, velocity.wheel].into_iter().enumerate() {
+        for (axis, speed) in [velocity.x, velocity.y, wheel].into_iter().enumerate() {
             let total = self.remainder[axis] + speed * elapsed as i32;
             let units = total / 1000;
             self.remainder[axis] = total - units * 1000;
@@ -135,10 +137,15 @@ mod tests {
 
     /// Sum of the steps of `reports` reports every `period` ms, and the time they count.
     fn travel(velocity: Velocity, period: u32, reports: u32) -> ((i32, i32, i32), i32) {
+        travel_at(velocity, 1, period, reports)
+    }
+
+    /// [`travel`] with the wheel in 1 / `wheel_resolution` steps.
+    fn travel_at(velocity: Velocity, wheel_resolution: i32, period: u32, reports: u32) -> ((i32, i32, i32), i32) {
         let mut motion = Motion::default();
         let mut sum = (0, 0, 0);
         for report in 0..reports {
-            let step = motion.step(velocity, 1000 + report * period);
+            let step = motion.step(velocity, wheel_resolution, 1000 + report * period);
             sum = (sum.0 + step.x as i32, sum.1 + step.y as i32, sum.2 + step.wheel as i32);
         }
         (sum, (FIRST_STEP_MS + (reports - 1) * period) as i32)
@@ -162,11 +169,11 @@ mod tests {
         let mut motion = Motion::default();
         let velocity = Velocity::of(&KeyAction::MouseTravel { dx: 3, dy: 0 });
         assert_eq!(velocity, Velocity { x: 300, y: 0, wheel: 0 });
-        assert_eq!(motion.step(velocity, 1000), Step { x: 3, y: 0, wheel: 0 });
+        assert_eq!(motion.step(velocity, 1, 1000), Step { x: 3, y: 0, wheel: 0 });
         // A stalled loop counts at most MAX_STEP_MS.
-        assert_eq!(motion.step(velocity, 5000).x, (300 * MAX_STEP_MS / 1000) as i8);
-        assert_eq!(motion.step(Velocity::default(), 5010), Step::default());
-        assert_eq!(motion.step(velocity, 9000).x, 3);
+        assert_eq!(motion.step(velocity, 1, 5000).x, (300 * MAX_STEP_MS / 1000) as i8);
+        assert_eq!(motion.step(Velocity::default(), 1, 5010), Step::default());
+        assert_eq!(motion.step(velocity, 1, 9000).x, 3);
     }
 
     #[test]
@@ -177,17 +184,30 @@ mod tests {
     }
 
     #[test]
+    fn high_resolution_wheel_scrolls_as_fast_in_finer_steps() {
+        let velocity = Velocity { x: 0, y: 0, wheel: 2 };
+        let ((_, _, wheel), ms) = travel_at(velocity, 30, 10, 200);
+        // The step at once is a whole one.
+        assert_eq!(wheel, 30 + 2 * 30 * ms / 1000);
+        let mut motion = Motion::default();
+        assert_eq!(motion.step(velocity, 30, 1000).wheel, 30, "a tap scrolls a whole step");
+        // Then 1/30 every 1/60 s.
+        let steps: Vec<i8> = (1..=6).map(|i| motion.step(velocity, 30, 1000 + i * 10).wheel).collect();
+        assert_eq!(steps, [1, 0, 1, 1, 0, 1]);
+    }
+
+    #[test]
     fn wheel_steps_at_once_when_it_starts_or_turns() {
         let mut motion = Motion::default();
         let up = Velocity::of(&KeyAction::MouseScroll { dy: 2 });
-        assert_eq!(motion.step(up, 1000).wheel, 1, "a tap scrolls");
-        assert_eq!(motion.step(up, 1008).wheel, 0);
+        assert_eq!(motion.step(up, 1, 1000).wheel, 1, "a tap scrolls");
+        assert_eq!(motion.step(up, 1, 1008).wheel, 0);
         let down = Velocity { wheel: -2, ..up };
-        assert_eq!(motion.step(down, 1016).wheel, -1, "turning scrolls at once too");
+        assert_eq!(motion.step(down, 1, 1016).wheel, -1, "turning scrolls at once too");
         // The cursor moving meanwhile doesn't restart the wheel.
-        assert_eq!(motion.step(Velocity { x: 100, ..down }, 1024).wheel, 0);
-        assert_eq!(motion.step(Velocity::default(), 1032), Step::default());
-        assert_eq!(motion.step(up, 2000).wheel, 1);
+        assert_eq!(motion.step(Velocity { x: 100, ..down }, 1, 1024).wheel, 0);
+        assert_eq!(motion.step(Velocity::default(), 1, 1032), Step::default());
+        assert_eq!(motion.step(up, 1, 2000).wheel, 1);
     }
 
     #[test]

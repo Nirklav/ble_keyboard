@@ -47,6 +47,8 @@ fn settings(app: &mut App, ui: &mut egui::Ui) {
         number(ui, "Prior idle", &mut settings.require_prior_idle_ms, Settings::REQUIRE_PRIOR_IDLE_MS, " ms", hint);
         let hint = "The keys of a chord must all be pressed within this time.";
         number(ui, "Combo term", &mut settings.combo_term_ms, Settings::COMBO_TERM_MS, " ms", hint);
+        let hint = "A combination starts over when no key is pressed this long after a release.";
+        number(ui, "Combo timeout", &mut settings.combo_timeout_ms, Settings::COMBO_TIMEOUT_MS, " ms", hint);
         let hint = "A key change is ignored this long after the previous one: contact bounce.";
         number(ui, "Debounce", &mut settings.debounce_ms, Settings::DEBOUNCE_MS, " ms", hint);
 

@@ -26,7 +26,8 @@
 # joystick: actions of the joystick buttons in the layout (any key action but Fn),
 # mouse buttons if left out.
 # Combos: keys by { Coord = { x, y } } or { Action = <key action> }; count = number of
-# presses, 0 = must be held, at least one key needs presses.
+# presses, 0 = must be held, at least one key needs presses. No press for settings.combo_timeout_ms
+# after a release (300..5000) starts the combo over; a key held down meanwhile is no pause.
 # Actions: "SwitchLayout", { SetLayout = 2 }, "ResetConfig", { BtSelect = 0 }, "BtNext", "BtPrev",
 # "BtClear", "BtClearAll" (forgets all hosts); "Unpair" is the same as "BtClear".
 # Factory combos: double tap Fn: SwitchLayout; hold Fn, press Left x3: Unpair; hold Fn, double press
@@ -53,6 +54,7 @@ joystick_ramp_ms = 40
 joystick_invert_x = false
 joystick_invert_y = false
 display_off_s = 120
+combo_timeout_ms = 1000
 
 [[layouts]]
 name = "MAIN"

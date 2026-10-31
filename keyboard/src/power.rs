@@ -22,14 +22,21 @@ const IDLE_DELAY_TICKS: TickType = TickType::new_millis(IDLE_DELAY_MS);
 const _: () = assert!(IDLE_DELAY_MS <= *Settings::SLEEP_S.start() as u64 * 1000);
 
 /// Waits until a key interrupt or a config request wakes the loop up, idles and deep sleeps meanwhile.
+/// A combo progress times out in `combo_timeout` ms: the loop runs then to drop it, the idle delay starts over.
 pub fn wait_for_activity(
     notification: &Notification,
     svc: &mut Services,
     joystick: &mut Option<Joystick>,
+    combo_timeout: Option<u32>,
 ) -> anyhow::Result<()> {
     svc.key_matrix.irq_mut().enable_interrupt()?;
     if let Some(joystick) = joystick {
         joystick.irq_mut().enable_interrupt()?;
+    }
+
+    if let Some(ms) = combo_timeout {
+        notification.wait(TickType::new_millis(ms.into()).into());
+        return Ok(());
     }
 
     // Config requests wake the loop up too, a submitted config is applied on return.

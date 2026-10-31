@@ -116,6 +116,6 @@ fn apply(config: Config, svc: &mut Services) {
     svc.key_matrix.set_debounce_ms(config.settings.debounce_ms);
     svc.display.configure(&config);
     // All progress is lost, so are the held keys: it goes with the new keymap.
-    svc.combos = Combos::new(&config.combos);
+    svc.combos = Combos::new(&config.combos, &config.settings);
     svc.config = config;
 }

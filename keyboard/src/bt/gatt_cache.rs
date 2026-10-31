@@ -5,8 +5,9 @@ use log::info;
 use crate::storage::GATT_DB_FILE;
 
 /// Bump on any change of the services, characteristics or the HID report map:
-/// 1 - HID only, 2 - config service, 3 - keys up to F24, 4 - HID config reports, 5 - no config service.
-const GATT_DB_VERSION: &str = "5";
+/// 1 - HID only, 2 - config service, 3 - keys up to F24, 4 - HID config reports, 5 - no config service,
+/// 6 - high-resolution wheel.
+const GATT_DB_VERSION: &str = "6";
 
 /// Bonded hosts (Windows in particular) cache the GATT services and won't see services, characteristics
 /// or a report map changed by a firmware update. Once per [`GATT_DB_VERSION`], marks Service Changed (whole handle

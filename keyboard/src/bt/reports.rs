@@ -12,6 +12,9 @@ pub(super) const MEDIA_KEYS_ID: u8 = 0x02;
 pub(super) const MOUSE_ID: u8 = 0x03;
 pub(super) const CONFIG_ID: u8 = protocol::hid::REPORT_ID;
 pub(super) const CONFIG_REPORT_LEN: u8 = protocol::hid::REPORT_LEN as u8;
+/// Wheel steps per notch once the host sets the resolution multiplier of the mouse feature report:
+/// the wheel scrolls smoothly (Windows and Linux do it, the others keep whole notches).
+pub(super) const WHEEL_RESOLUTION: u8 = 30;
 
 pub(super) const HID_REPORT_DESCRIPTOR: &[u8] = hid!(
     (USAGE_PAGE, 0x01),         // Generic Desktop Ctrls
@@ -88,16 +91,35 @@ pub(super) const HID_REPORT_DESCRIPTOR: &[u8] = hid!(
     (REPORT_SIZE, 0x03),
     (REPORT_COUNT, 0x01),
     (HIDINPUT, 0x03),           // Constant, Variable, Absolute; 3 bit padding
-    // ------------------------------------------------- X/Y position, Wheel
+    // ------------------------------------------------- X/Y position
     (USAGE_PAGE, 0x01),         // Generic Desktop
     (USAGE, 0x30),              // X
     (USAGE, 0x31),              // Y
+    (LOGICAL_MINIMUM, 0x81),    // -127
+    (LOGICAL_MAXIMUM, 0x7f),
+    (REPORT_SIZE, 0x08),
+    (REPORT_COUNT, 0x02),
+    (HIDINPUT, 0x06),           // Data, Variable, Relative; 2 bytes (X,Y)
+    // ------------------------------------------------- Wheel, high resolution once the host sets the multiplier
+    (COLLECTION, 0x02),         // Logical
+    (USAGE, 0x48),              // Resolution Multiplier
+    (LOGICAL_MINIMUM, 0x00),
+    (LOGICAL_MAXIMUM, 0x01),
+    (PHYSICAL_MINIMUM, 0x01),
+    (PHYSICAL_MAXIMUM, WHEEL_RESOLUTION),
+    (REPORT_SIZE, 0x02),
+    (REPORT_COUNT, 0x01),
+    (FEATURE, 0x02),            // Data, Variable, Absolute; 2 bits
+    (REPORT_SIZE, 0x06),
+    (FEATURE, 0x03),            // Constant, Variable, Absolute; 6 bit padding
+    (PHYSICAL_MINIMUM, 0x00),   // No physical range for the wheel itself
+    (PHYSICAL_MAXIMUM, 0x00),
     (USAGE, 0x38),              // Wheel
     (LOGICAL_MINIMUM, 0x81),    // -127
     (LOGICAL_MAXIMUM, 0x7f),
     (REPORT_SIZE, 0x08),
-    (REPORT_COUNT, 0x03),
-    (HIDINPUT, 0x06),           // Data, Variable, Relative; 3 bytes (X,Y,Wheel)
+    (HIDINPUT, 0x06),           // Data, Variable, Relative; 1 byte
+    (END_COLLECTION),
     // ------------------------------------------------- Horizontal wheel
     (USAGE_PAGE, 0x0c),         // Consumer Devices
     (USAGE, 0x38, 0x02),        // AC Pan

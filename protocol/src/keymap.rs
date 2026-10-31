@@ -84,6 +84,8 @@ pub struct Change {
     pub key: KeyId,
     pub action: KeyAction,
     pub pressed: bool,
+    /// When the key was pressed or released, in ms (wrapping): a tap-hold key or a chord is decided later.
+    pub time: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -453,7 +455,7 @@ impl Keymap {
             return;
         };
         for event in presses() {
-            self.changes.push(Change { key: event.key, action, pressed: true });
+            self.changes.push(Change { key: event.key, action, pressed: true, time: event.time });
             let effect = if event.key == first.key { Effect::None } else { Effect::Chord(first.key) };
             self.held.push(Held { key: event.key, action, effect });
         }
@@ -484,7 +486,7 @@ impl Keymap {
             return;
         }
         let action = self.lookup(event.key);
-        self.changes.push(Change { key: event.key, action, pressed: true });
+        self.changes.push(Change { key: event.key, action, pressed: true, time: event.time });
         let effect = self.apply(event, action);
         self.held.push(Held { key: event.key, action, effect });
     }
@@ -530,7 +532,7 @@ impl Keymap {
             return;
         };
         let held = self.held.remove(index);
-        self.changes.push(Change { key: event.key, action: held.action, pressed: false });
+        self.changes.push(Change { key: event.key, action: held.action, pressed: false, time: event.time });
 
         // The first key released of a chord releases the chord action, the others then do nothing.
         let (owner, effect) = match held.effect {
@@ -979,17 +981,27 @@ mod tests {
     #[test]
     fn changes_have_the_pressed_action() {
         let mut run = Run::new();
-        run.down(MO1).down(A).up(A);
+        run.down(MO1).at(1010).down(A).at(1020).up(A);
         let changes: Vec<Change> = run.keymap.take_changes().collect();
         assert_eq!(
             changes,
             [
-                Change { key: MO1, action: KeyAction::Momentary(1), pressed: true },
-                Change { key: A, action: key(Key::Num1), pressed: true },
-                Change { key: A, action: key(Key::Num1), pressed: false },
+                Change { key: MO1, action: KeyAction::Momentary(1), pressed: true, time: 1000 },
+                Change { key: A, action: key(Key::Num1), pressed: true, time: 1010 },
+                Change { key: A, action: key(Key::Num1), pressed: false, time: 1020 },
             ]
         );
         assert_eq!(run.keymap.take_changes().count(), 0);
+    }
+
+    #[test]
+    fn changes_waiting_for_a_tap_hold_have_their_time() {
+        let mut run = Run::new();
+        run.down(CTRL_F).at(1010).down(A);
+        // A waits for the decision, taken by the timeout long after it.
+        run.at(1000 + TERM).report();
+        let times: Vec<(KeyId, bool, u32)> = run.keymap.take_changes().map(|change| (change.key, change.pressed, change.time)).collect();
+        assert_eq!(times, [(CTRL_F, true, 1000), (A, true, 1010)]);
     }
 
     #[test]
@@ -1014,7 +1026,7 @@ mod tests {
         let last = run.keymap.take_changes().last();
         assert_eq!(
             last,
-            Some(Change { key: KeyId::Joystick(JoystickButton::Right), action: KeyAction::BtClear, pressed: true })
+            Some(Change { key: KeyId::Joystick(JoystickButton::Right), action: KeyAction::BtClear, pressed: true, time: 1000 })
         );
     }
 
@@ -1065,13 +1077,14 @@ mod tests {
         assert!(run.keymap.is_idle());
         let changes: Vec<Change> = run.keymap.take_changes().collect();
         let escape = key(Key::Escape);
+        // The times of the presses, not of the decision.
         assert_eq!(
             changes,
             [
-                Change { key: A, action: escape, pressed: true },
-                Change { key: B, action: escape, pressed: true },
-                Change { key: B, action: escape, pressed: false },
-                Change { key: A, action: escape, pressed: false },
+                Change { key: A, action: escape, pressed: true, time: 1000 },
+                Change { key: B, action: escape, pressed: true, time: 1010 },
+                Change { key: B, action: escape, pressed: false, time: 1100 },
+                Change { key: A, action: escape, pressed: false, time: 1120 },
             ]
         );
     }
@@ -1122,8 +1135,8 @@ mod tests {
         // The release and the chord press are different keys, they go in one report.
         assert_eq!(run.sent(), [vec![middle], vec![key(Key::Escape)]]);
         let changes: Vec<Change> = run.keymap.take_changes().collect();
-        assert_eq!(changes[1], Change { key: STICK, action: middle, pressed: false }, "the release goes first");
-        assert_eq!(changes[2], Change { key: A, action: key(Key::Escape), pressed: true });
+        assert_eq!(changes[1], Change { key: STICK, action: middle, pressed: false, time: 1110 }, "the release goes first");
+        assert_eq!(changes[2], Change { key: A, action: key(Key::Escape), pressed: true, time: 1100 });
     }
 
     #[test]

@@ -48,6 +48,7 @@ impl Config {
             ("joystick_speed", self.settings.joystick_speed, Settings::JOYSTICK_SPEED),
             ("joystick_ramp_ms", self.settings.joystick_ramp_ms, Settings::JOYSTICK_RAMP_MS),
             ("display_off_s", self.settings.display_off_s, Settings::DISPLAY_OFF_S),
+            ("combo_timeout_ms", self.settings.combo_timeout_ms, Settings::COMBO_TIMEOUT_MS),
         ];
         for (name, value, range) in settings {
             if !range.contains(&value) {

@@ -172,20 +172,26 @@ fn settings_are_appended() {
         joystick_invert_x: true,
         joystick_invert_y: true,
         display_off_s: 130,
+        combo_timeout_ms: 1500,
     };
     let bytes = config.to_bytes();
     assert_eq!(Config::from_bytes(&bytes).unwrap(), config);
 
-    // An older app or firmware has no `display_off_s`: it reads the rest of a newer config...
+    // An older app or firmware has no `display_off_s` and `combo_timeout_ms`: it reads the rest of a newer
+    // config...
     type Older = (u16, u8, u8, Vec<Layout>, Vec<Combo>, [u16; 8], bool, bool);
     let older: Older = postcard::from_bytes(&bytes).unwrap();
     assert_eq!(older.5[7], 30);
     assert!(older.7);
-    // ...and writes its config without it: the default here.
+    // ...and writes its config without them: the defaults here.
     let older_bytes = postcard::to_allocvec(&older).unwrap();
     assert!(older_bytes.len() < bytes.len());
     let upgraded = Config::from_bytes(&older_bytes).unwrap();
-    assert_eq!(upgraded.settings, Settings { display_off_s: Settings::default().display_off_s, ..config.settings });
+    let defaults = Settings::default();
+    assert_eq!(
+        upgraded.settings,
+        Settings { display_off_s: defaults.display_off_s, combo_timeout_ms: defaults.combo_timeout_ms, ..config.settings }
+    );
     assert_eq!(upgraded.layouts, config.layouts);
     assert_eq!(upgraded.combos, config.combos);
 }
@@ -404,6 +410,10 @@ fn validation_errors() {
     assert_eq!(
         invalid(|c| c.settings.display_off_s = 5),
         ValidationError::Setting { name: "display_off_s", value: 5, min: 10, max: 3600 }
+    );
+    assert_eq!(
+        invalid(|c| c.settings.combo_timeout_ms = 100),
+        ValidationError::Setting { name: "combo_timeout_ms", value: 100, min: 300, max: 5000 }
     );
     assert_eq!(
         invalid(|c| c.settings.joystick_ramp_ms = 600),

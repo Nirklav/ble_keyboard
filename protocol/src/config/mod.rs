@@ -154,6 +154,9 @@ pub struct Settings {
     pub joystick_invert_y: bool,
     /// The display status goes off after this many seconds without key presses: an OLED burns in.
     pub display_off_s: u16,
+    /// A special combination ([`Combo`] that isn't a chord) starts over when no key is pressed this long after
+    /// a key was released, see [`crate::combos`].
+    pub combo_timeout_ms: u16,
 }
 
 impl Settings {
@@ -174,6 +177,8 @@ impl Settings {
     pub const JOYSTICK_RAMP_MS: RangeInclusive<u16> = 0..=500;
     /// Allowed [`Settings::display_off_s`]: longer than a pop-up, up to an hour.
     pub const DISPLAY_OFF_S: RangeInclusive<u16> = 10..=3600;
+    /// Allowed [`Settings::combo_timeout_ms`].
+    pub const COMBO_TIMEOUT_MS: RangeInclusive<u16> = 300..=5000;
 
     /// Decodes postcard `bytes` that may end before the last settings, those are the defaults then.
     /// Every field is listed: one added to the struct doesn't compile until it's read here, in its order.
@@ -191,6 +196,7 @@ impl Settings {
             joystick_invert_x,
             joystick_invert_y,
             display_off_s,
+            combo_timeout_ms,
         } = &mut settings;
         take(&mut bytes, tapping_term_ms)?;
         take(&mut bytes, require_prior_idle_ms)?;
@@ -203,6 +209,7 @@ impl Settings {
         take(&mut bytes, joystick_invert_x)?;
         take(&mut bytes, joystick_invert_y)?;
         take(&mut bytes, display_off_s)?;
+        take(&mut bytes, combo_timeout_ms)?;
         Ok(settings)
     }
 }
@@ -231,6 +238,7 @@ impl Default for Settings {
             joystick_invert_x: false,
             joystick_invert_y: false,
             display_off_s: 120,
+            combo_timeout_ms: 1000,
         }
     }
 }

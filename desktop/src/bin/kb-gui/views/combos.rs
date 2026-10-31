@@ -254,7 +254,9 @@ fn editor(app: &mut App, ui: &mut egui::Ui, index: usize) -> bool {
                         "hold" => Some(0.0),
                         text => text.trim_start_matches(['x', '×']).parse().ok(),
                     });
-                ui.add(count).on_hover_text("Number of presses (press + release); 0 means the key must be held");
+                let hint = "Number of presses (press + release); 0 means the key must be held. \
+                    A pause longer than the combo timeout after a release starts the combination over";
+                ui.add(count).on_hover_text(hint);
             }
 
             let min_keys = if chord { 2 } else { 1 };

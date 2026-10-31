@@ -1,5 +1,5 @@
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -18,7 +18,9 @@ use crate::bt::conn_params::ConnParams;
 use crate::bt::gatt_cache::{gatt_change_delivered, signal_gatt_changed};
 use crate::bt::link::{disconnect, local_address, Link};
 use crate::bt::profiles::{self, lock, ProfileState, Profiles, Verdict};
-use crate::bt::reports::{Report, Reports, CONFIG_ID, HID_REPORT_DESCRIPTOR, KEYBOARD_ID, MEDIA_KEYS_ID, MOUSE_ID};
+use crate::bt::reports::{
+    Report, Reports, CONFIG_ID, HID_REPORT_DESCRIPTOR, KEYBOARD_ID, MEDIA_KEYS_ID, MOUSE_ID, WHEEL_RESOLUTION,
+};
 use crate::storage::IRK_FILE;
 
 /// Time for the released keys to reach the old host before a profile switch disconnects it:
@@ -37,6 +39,10 @@ pub struct BleMouseKeyboard {
     input_keyboard: Arc<Mutex<BLECharacteristic>>,
     input_media_keys: Arc<Mutex<BLECharacteristic>>,
     input_mouse: Arc<Mutex<BLECharacteristic>>,
+    /// The resolution multiplier the host sets, see [`Self::wheel_resolution`].
+    feature_mouse: Arc<Mutex<BLECharacteristic>>,
+    /// Wheel steps per notch of the connected host: [`WHEEL_RESOLUTION`] once it set the multiplier, else 1.
+    wheel_resolution: Arc<AtomicU8>,
 
     /// The config collection, see [`Self::config_reports`].
     input_config: Arc<Mutex<BLECharacteristic>>,
@@ -182,6 +188,15 @@ impl BleMouseKeyboard {
         hid.output_report(KEYBOARD_ID);
         let input_media_keys = hid.input_report(MEDIA_KEYS_ID);
         let input_mouse = hid.input_report(MOUSE_ID);
+        let feature_mouse = hid.feature_report(MOUSE_ID);
+        feature_mouse.lock().set_value(&[0]);
+        let wheel_resolution = Arc::new(AtomicU8::new(1));
+        let write_resolution = wheel_resolution.clone();
+        feature_mouse.lock().on_write(move |args| {
+            let multiplier = args.recv_data().first().is_some_and(|value| value & 0x03 != 0);
+            info!("Wheel resolution multiplier: {}", multiplier);
+            write_resolution.store(if multiplier { WHEEL_RESOLUTION } else { 1 }, Ordering::Relaxed);
+        });
         let input_config = hid.input_report(CONFIG_ID);
         let output_config = hid.output_report(CONFIG_ID);
 
@@ -199,6 +214,8 @@ impl BleMouseKeyboard {
             input_keyboard,
             input_media_keys,
             input_mouse,
+            feature_mouse,
+            wheel_resolution,
             input_config,
             output_config,
             profiles,
@@ -221,9 +238,14 @@ impl BleMouseKeyboard {
         let disconnect_dropping = self.dropping.clone();
         let disconnect_accepted = self.accepted.clone();
         let disconnect_link = self.link.clone();
+        let disconnect_feature_mouse = self.feature_mouse.clone();
+        let disconnect_wheel_resolution = self.wheel_resolution.clone();
         self.server.on_disconnect(move |_desc, result| {
             info!("Client disconnected: {:?}", result);
             on_disconnect();
+            // The next host sets the multiplier again if it can.
+            disconnect_feature_mouse.lock().set_value(&[0]);
+            disconnect_wheel_resolution.store(1, Ordering::Relaxed);
             disconnect_link.disconnected(&disconnect_accepted);
             profiles::refuse_pairing(None);
             // Cleared first: a switch from now on restarts advertising itself, an earlier one is applied here.
@@ -335,6 +357,11 @@ impl BleMouseKeyboard {
     /// Moves the mouse cursor and wheel in the reports.
     pub fn travel(&mut self, step: Step) {
         self.reports.travel(step);
+    }
+
+    /// Wheel steps per notch the host expects, see [`WHEEL_RESOLUTION`].
+    pub fn wheel_resolution(&self) -> i32 {
+        self.wheel_resolution.load(Ordering::Relaxed) as i32
     }
 
     /// Sends the reports to an accepted host, see [`Reports::flush`].

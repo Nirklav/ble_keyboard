@@ -112,6 +112,11 @@ impl Display {
         self.send(Msg::Text(text.to_string()))
     }
 
+    /// The pop-up slides out now if it still shows `text`, from where it is; another text stays.
+    pub fn hide_text(&self, text: &str) -> anyhow::Result<()> {
+        self.send(Msg::Hide(text.to_string()))
+    }
+
     /// Redraws the status if it has changed and no pop-up is shown, otherwise it's shown under and after the pop-up.
     pub fn set_status(&self, layer: &str, profile: u8) -> anyhow::Result<()> {
         let mut status = lock(&self.status)?;
@@ -166,6 +171,7 @@ impl Display {
 
 enum Msg {
     Text(String),
+    Hide(String),
     Status(Status),
     Update(bool),
     Configure { timeout: Duration, longest_layer: u32 },
@@ -314,6 +320,29 @@ impl Screen {
                 // Back in time by the part of the slide in that is done already.
                 let shown_at = now - POPUP_SLIDE.mul_f32(shown);
                 self.popup = Some(Popup { text, shown_at, frame_at: now });
+            },
+            Msg::Hide(text) => {
+                let now = Instant::now();
+                let Some(popup) = self.popup.as_mut().filter(|popup| popup.text == text) else {
+                    return;
+                };
+                let elapsed = now - popup.shown_at;
+                if elapsed >= POPUP_TIMEOUT - POPUP_SLIDE {
+                    return;
+                }
+                let shown = Popup::progress(elapsed).unwrap_or(0.0);
+                // Into the slide out, as far down as it is.
+                match now.checked_sub(POPUP_TIMEOUT - POPUP_SLIDE.mul_f32(shown)) {
+                    Some(shown_at) => {
+                        popup.shown_at = shown_at;
+                        popup.frame_at = now;
+                    }
+                    // So soon after boot there is no such instant: it's gone at once.
+                    None => {
+                        self.popup = None;
+                        self.status_changed = true;
+                    }
+                }
             },
             Msg::Status(status) => {
                 self.status = status;

@@ -104,12 +104,17 @@ fn main_body() -> anyhow::Result<()> {
             svc.keyboard.press(action);
         }
         // Speeds are per second: the loop period doesn't change how fast the cursor moves.
-        svc.keyboard.travel(motion.step(velocity, now));
+        let step = motion.step(velocity, svc.keyboard.wheel_resolution(), now);
+        svc.keyboard.travel(step);
 
         let mut changed = false;
         for change in keymap.take_changes() {
             svc.combos.changed(&change);
             changed = true;
+        }
+        // A key change the keymap still decides on may have come before the combo timeout.
+        if keymap.is_idle() {
+            svc.combos.tick(now);
         }
         if changed {
             svc.display.wake()?;
@@ -134,7 +139,8 @@ fn main_body() -> anyhow::Result<()> {
             config::apply_changes(&mut svc)?;
             // A new config may have another layout on top.
             svc.update_status()?;
-            power::wait_for_activity(&notification, &mut svc, &mut joystick)?;
+            let combo_timeout = svc.combos.timeout_in(start.elapsed().as_millis() as u32);
+            power::wait_for_activity(&notification, &mut svc, &mut joystick, combo_timeout)?;
         } else {
             delay.delay_ms(DELAY_MS);
         }

@@ -40,7 +40,7 @@ impl Services {
             config_service,
             key_matrix,
             keymap: Keymap::new(&config),
-            combos: Combos::new(&config.combos),
+            combos: Combos::new(&config.combos, &config.settings),
             display,
             config,
             pending_config: None
@@ -88,11 +88,21 @@ impl Services {
         Ok(())
     }
 
-    /// After the key changes of a scan: shows the presses left of the destructive combos, runs the ones that fired.
+    /// After the key changes of a scan: shows the presses left of the destructive combos and takes them off once
+    /// the progress is dropped, runs the combos that fired.
     pub fn poll_combos(&mut self) -> anyhow::Result<()> {
         for event in self.combos.poll() {
             match event {
-                ComboEvent::Progress { action, left } => self.show_progress(action, left)?,
+                ComboEvent::Progress { action, left } => {
+                    if let Some(text) = progress_text(action, left) {
+                        self.display.show_text(&text)?;
+                    }
+                },
+                ComboEvent::Dropped { action, left } => {
+                    if let Some(text) = progress_text(action, left) {
+                        self.display.hide_text(&text)?;
+                    }
+                },
                 ComboEvent::Fired(action) => {
                     if let Some(command) = Command::of(action) {
                         self.run(command)?;
@@ -101,23 +111,6 @@ impl Services {
             }
         }
         Ok(())
-    }
-
-    /// Destructive combos count the presses down; at most 18 characters with the number.
-    fn show_progress(&self, action: ComboAction, left: u8) -> anyhow::Result<()> {
-        let label = match action {
-            ComboAction::Unpair => "Unpair",
-            ComboAction::ResetConfig => "Reset",
-            ComboAction::BtClear => "Clear",
-            ComboAction::BtClearAll => "Clear all",
-            ComboAction::SwitchLayout
-            | ComboAction::SetLayout(_)
-            | ComboAction::BtSelect(_)
-            | ComboAction::BtNext
-            | ComboAction::BtPrev
-            | ComboAction::Action(_) => return Ok(())
-        };
-        self.display.show_text(&format!("{}: {}", label, left))
     }
 
     /// Runs a BLE profile command of a key or a combo and shows the profile, e.g. `BT 2 pair`.
@@ -143,6 +136,23 @@ impl Services {
         };
         self.display.show_text(&text)
     }
+}
+
+/// Destructive combos count the presses down, e.g. `Reset: 2`; at most 18 characters with the number.
+fn progress_text(action: ComboAction, left: u8) -> Option<String> {
+    let label = match action {
+        ComboAction::Unpair => "Unpair",
+        ComboAction::ResetConfig => "Reset",
+        ComboAction::BtClear => "Clear",
+        ComboAction::BtClearAll => "Clear all",
+        ComboAction::SwitchLayout
+        | ComboAction::SetLayout(_)
+        | ComboAction::BtSelect(_)
+        | ComboAction::BtNext
+        | ComboAction::BtPrev
+        | ComboAction::Action(_) => return None
+    };
+    Some(format!("{}: {}", label, left))
 }
 
 /// What a key or a combo asks the firmware to do, besides the reports.
