@@ -2,7 +2,7 @@
 
 [package]
 name = "keyboard"
-version = "0.2.16"
+version = "0.2.17"
 authors = ["Nirklav <mrAnton911@gmail.com>"]
 edition = "2021"
 resolver = "2"
@@ -30,11 +30,10 @@ embassy-time = { version = "0.5", features = ["generic-queue-8"] }
 
 embedded-graphics = "0.8"
 ssd1306 = "0.8.1"
-anyhow = "1.0"
+anyhow = { version = "1.0", default-features = false }
 esp32-nimble = { version = "0.12" }
 zerocopy = "0.8"
 zerocopy-derive = "0.8"
-mcp23s17 = "0.2.0"
 postcard = { version = "1.1", default-features = false }
 protocol = { path = "../protocol", features = ["alloc"] }
 
@@ -43,6 +42,8 @@ embuild = "0.33.0"
 
 [profile.release]
 opt-level = "s"
+lto = "fat"
+codegen-units = 1
 
 [profile.dev]
 debug = true    # Symbols are nice and they don't increase the size on Flash

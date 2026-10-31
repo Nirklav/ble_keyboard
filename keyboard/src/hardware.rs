@@ -91,19 +91,6 @@ fn new_extension(spi_driver: Rc<SpiDriver<'static>>, cs: impl OutputPin + 'stati
     let spi_ext_config = Config::new()
         .baudrate(10.MHz().into())
         .data_mode(MODE_0);
-    let mut spi_ext_driver = SpiDeviceDriver::new(spi_driver, Some(cs), &spi_ext_config)?;
-
-    // INTA and INTB are tied together on the board, so they must be open-drain (IO1 is pulled up),
-    // otherwise idle INTA drives the line high against active INTB. The crate has no API for IOCON,
-    // so it's written directly; `Mcp23s17::new` keeps the bit when it sets HAEN.
-    const MCP_WRITE_OPCODE: u8 = 0x40;
-    spi_ext_driver.write(&[
-        MCP_WRITE_OPCODE,
-        mcp23s17::RegisterAddress::IOCON as u8,
-        mcp23s17::IOCON::ODR_ON.bits(),
-    ])?;
-
-    let mut ext = map_err!(Mcp23s17::new(spi_ext_driver, 0b000));
-    map_err!(ext.pin_mode_all(mcp23s17::PinMode::Output));
-    Ok(ext)
+    let spi_ext_driver = SpiDeviceDriver::new(spi_driver, Some(cs), &spi_ext_config)?;
+    Mcp23s17::new(spi_ext_driver)
 }
