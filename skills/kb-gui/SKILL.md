@@ -7,11 +7,12 @@ description: Run the desktop config editor (kb-gui, egui) under WSLg, look at it
 
 The app runs under WSLg, so its window is on the user's Windows desktop. `desktop/scripts/gui.sh`
 drives that window from the Windows side through `powershell.exe` (`desktop/scripts/window.ps1`).
-Run it from the repo root:
+Run it from the workspace root containing `desktop/scripts/gui.sh`, even when
+the current working directory is a crate subdirectory:
 
 ```bash
 desktop/scripts/gui.sh start            # builds, launches, waits for the window (1256x737 with the frame)
-desktop/scripts/gui.sh shot             # prints the PNG path (target/kb-gui/shot.png) -> Read it
+desktop/scripts/gui.sh shot             # prints the PNG path (target/kb-gui/shot.png) -> open it with the available image viewer
 desktop/scripts/gui.sh click 84 323     # window coordinates, as on the screenshot
 desktop/scripts/gui.sh type 'MAIN'      # ASCII text into the focused widget
 desktop/scripts/gui.sh resize 300 200 1221,702  # drag the frame corner at (1221, 702) to 300x200
@@ -20,7 +21,7 @@ desktop/scripts/gui.sh stop
 desktop/scripts/gui.sh log              # app stdout / stderr, e.g. after a crash
 ```
 
-- Always Read the screenshot before deciding where to click; coordinates are pixels from the window's
+- Always inspect the screenshot with the available image viewer before deciding where to click; coordinates are pixels from the window's
   top-left corner, including the X11 frame and its shadow, so they match the screenshot 1:1
   (the app content starts at about (38, 59)). On WSL the app uses X11, not WSLg's frameless Wayland.
 - Give several shots distinct names (`shot target/kb-gui/combos.png`) when comparing screens.
