@@ -7,7 +7,6 @@
 //! the main loop applies them once all keys are up and answers with [`ConfigService::finish`].
 //! Firmware requests and [`Request::GetVersions`] go to the [`FirmwareUpdate`] thread, it answers them.
 
-use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, MutexGuard};
 use std::thread;
@@ -23,6 +22,7 @@ use protocol::config::{CONFIG_VERSION, MAX_COMBOS, MAX_LAYOUTS};
 use crate::bt::ble_mouse_keyboard::ConfigReports;
 use crate::config::Pending;
 use crate::firmware::FirmwareUpdate;
+use crate::power::ACTIVITY;
 
 /// The keyboard stays active (no idle connection parameters) this long after the last transfer request.
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(5);
@@ -90,7 +90,7 @@ impl ConfigService {
             // The main loop shows the update and asks for its connection params, the chunks don't wake it.
             move || {
                 // The main task lives as long as the program.
-                unsafe { firmware_wake.notify(NonZeroU32::new(1).unwrap()) };
+                unsafe { firmware_wake.notify(ACTIVITY) };
             },
         )?;
 
@@ -277,7 +277,7 @@ impl ConfigService {
     fn wake_main_loop(&self) {
         // The main task lives as long as the program.
         unsafe {
-            self.wake.notify(NonZeroU32::new(1).unwrap());
+            self.wake.notify(ACTIVITY);
         }
     }
 

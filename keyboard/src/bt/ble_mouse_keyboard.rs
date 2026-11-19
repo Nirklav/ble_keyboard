@@ -72,8 +72,11 @@ pub struct ConfigReports {
 
 impl BleMouseKeyboard {
     /// Sets the HID device up, the BLE profiles are saved in `nvs`. Nothing connects until [`Self::start`]: the
-    /// services of the [`Self::config_reports`] are registered before.
-    pub fn new(nvs: EspDefaultNvsPartition) -> anyhow::Result<Self> {
+    /// services of the [`Self::config_reports`] are registered before. `on_host_accepted` is called once a host is ready.
+    pub fn new(
+        nvs: EspDefaultNvsPartition,
+        on_host_accepted: impl Fn() + Clone + Send + Sync + 'static,
+    ) -> anyhow::Result<Self> {
         unsafe {
             esp_idf_sys::ble_hs_cfg.store_gen_key_cb = Some(Self::gen_key_callback);
         }
@@ -108,6 +111,7 @@ impl BleMouseKeyboard {
         let connect_accepted = accepted.clone();
         let connect_profiles = profiles.clone();
         let connect_link = link.clone();
+        let connect_host_accepted = on_host_accepted.clone();
         server.on_connect(move |server, desc| {
             info!("Client connected: {:?}", desc);
             let handle = desc.conn_handle();
@@ -147,6 +151,10 @@ impl BleMouseKeyboard {
             // (one LL control procedure at a time), and Windows answers it only after pairing.
 
             if encrypted {
+                // Authentication may have finished before NimBLE added the host to the server's connection list.
+                if connect_accepted.load(Ordering::Acquire) {
+                    connect_host_accepted();
+                }
                 return;
             }
             // Asks the host to encrypt at once (a bonded one) or to pair, instead of waiting until it
@@ -173,6 +181,9 @@ impl BleMouseKeyboard {
             match verdict {
                 Verdict::Accept => {
                     auth_link.accepted(&auth_accepted);
+                    if server.connected_count() > 0 {
+                        on_host_accepted();
+                    }
                     auth_link.request_host_conn_params(desc.conn_handle());
                     gatt_change_delivered();
                 }
@@ -232,7 +243,7 @@ impl BleMouseKeyboard {
         ConfigReports { input: self.input_config.clone(), output: self.output_config.clone() }
     }
 
-    /// Starts the server and advertising; `on_disconnect` is called when a host disconnects.
+    /// Starts the server and advertising; `on_disconnect` is called after clearing the host state.
     pub fn start(&mut self, on_disconnect: impl Fn() + Send + Sync + 'static) -> anyhow::Result<()> {
         let disconnect_profiles = self.profiles.clone();
         let disconnect_dropping = self.dropping.clone();
@@ -242,7 +253,6 @@ impl BleMouseKeyboard {
         let disconnect_wheel_resolution = self.wheel_resolution.clone();
         self.server.on_disconnect(move |_desc, result| {
             info!("Client disconnected: {:?}", result);
-            on_disconnect();
             // The next host sets the multiplier again if it can.
             disconnect_feature_mouse.lock().set_value(&[0]);
             disconnect_wheel_resolution.store(1, Ordering::Relaxed);
@@ -250,6 +260,7 @@ impl BleMouseKeyboard {
             profiles::refuse_pairing(None);
             // Cleared first: a switch from now on restarts advertising itself, an earlier one is applied here.
             disconnect_dropping.store(false, Ordering::Release);
+            on_disconnect();
             // On the address of the profile active now: the last one selected while the connection was being
             // dropped. If setting it fails, the previous address is advertised, a host connecting there is
             // disconnected and it's tried again.

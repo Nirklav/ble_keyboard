@@ -12,6 +12,7 @@ use embedded_graphics::primitives::{PrimitiveStyleBuilder, Rectangle, RoundedRec
 use embedded_graphics::text::{Alignment, Baseline, Text, TextStyleBuilder};
 use log::error;
 use ssd1306::{I2CDisplayInterface, size::DisplaySize128x32};
+use ssd1306::command::AddrMode;
 use ssd1306::prelude::{Brightness, DisplayRotation, I2CInterface};
 use ssd1306::mode::{BufferedGraphicsMode, DisplayConfig};
 
@@ -72,7 +73,13 @@ impl Display {
         let i2c_display = I2CDisplayInterface::new(i2c);
         let mut display = ssd1306::Ssd1306::new(i2c_display, DisplaySize128x32, DisplayRotation::Rotate0)
             .into_buffered_graphics_mode();
+        // The panel retains its pixels through deep sleep. Blank its RAM before init() enables it.
+        map_err!(display.set_display_on(false));
+        map_err!(display.set_addr_mode(AddrMode::Horizontal));
+        display.clear_buffer();
+        map_err!(display.flush());
         map_err!(display.init());
+        map_err!(display.set_display_on(false));
         map_err!(display.set_brightness(Brightness::DIMMEST));
 
         let screen = Screen {
@@ -492,7 +499,7 @@ impl Screen {
         map_err!(Text::with_text_style(text, plate.center(), style(), aligned(Alignment::Center))
             .draw(display));
         map_err!(display.flush());
-        // Off, it was cleared before: on only with the first frame drawn.
+        // If the display was off, turn it on after drawing the first frame.
         self.turn_on()
     }
 
@@ -532,10 +539,7 @@ impl Screen {
     }
 
     fn turn_off(&mut self) -> anyhow::Result<()> {
-        let display = &mut self.display;
-        map_err!(display.clear(BinaryColor::Off));
-        map_err!(display.flush());
-        map_err!(display.set_display_on(false));
+        map_err!(self.display.set_display_on(false));
         self.on = false;
         Ok(())
     }

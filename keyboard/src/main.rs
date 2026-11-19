@@ -61,7 +61,12 @@ fn main_body() -> anyhow::Result<()> {
     }
 
     let nvs = EspDefaultNvsPartition::take()?;
-    let mut keyboard = BleMouseKeyboard::new(nvs)?;
+    let ble_wake = notification.notifier();
+    let on_host_changed = move || {
+        // The main task lives as long as the program.
+        unsafe { ble_wake.notify(power::HOST_CHANGED) };
+    };
+    let mut keyboard = BleMouseKeyboard::new(nvs, on_host_changed.clone())?;
     // Config requests wake the loop up.
     let config_service = ConfigService::register(
         board::WIDTH,
@@ -71,7 +76,10 @@ fn main_body() -> anyhow::Result<()> {
         keyboard.config_reports(),
     )?;
     let disconnected = config_service.clone();
-    keyboard.start(move || disconnected.on_disconnect())?;
+    keyboard.start(move || {
+        disconnected.on_disconnect();
+        on_host_changed();
+    })?;
     let delay = Delay::new_default();
 
     let mut svc = Services::new(keyboard, config_service, key_matrix, display, config);
