@@ -1,31 +1,29 @@
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Duration;
 
 use anyhow::bail;
 use esp32_nimble::enums::{AuthReq, OwnAddrType, SecurityIOCap};
-use esp32_nimble::{BLEDevice, BLEHIDDevice};
-use esp32_nimble::{utilities::mutex::Mutex, BLECharacteristic, BLEServer};
+use esp32_nimble::{utilities::mutex::Mutex, BLECharacteristic, BLEConnDesc, BLEDevice, BLEError, BLEHIDDevice};
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use log::info;
 use protocol::config::KeyAction;
+use protocol::keymap::BtCommand;
 use protocol::motion::Step;
 
 use crate::bt::advertising::{advertise, set_profile_name};
 use crate::bt::conn_params::ConnParams;
 use crate::bt::gatt_cache::{gatt_change_delivered, signal_gatt_changed};
-use crate::bt::link::{disconnect, local_address, Link};
-use crate::bt::profiles::{self, lock, ProfileState, Profiles, Verdict};
+use crate::bt::link::Link;
+use crate::bt::profiles::{self, ProfileState, Profiles};
 use crate::bt::reports::{
     Report, Reports, CONFIG_ID, HID_REPORT_DESCRIPTOR, KEYBOARD_ID, MEDIA_KEYS_ID, MOUSE_ID, WHEEL_RESOLUTION,
 };
+use crate::sleep_admission::{SleepReservation, SLEEP};
 use crate::storage::IRK_FILE;
 
-/// Time for the released keys to reach the old host before a profile switch disconnects it:
-/// a few connection intervals, see [`ConnParams`].
-const RELEASE_DELAY: Duration = Duration::from_millis(50);
+pub(crate) use crate::bt::connection::ConnectionId;
 
 /// Stack of the [`Link`] thread: logging, NimBLE calls and the profiles.
 const LINK_STACK_SIZE: usize = 6 * 1024;
@@ -34,8 +32,6 @@ const LINK_STACK_SIZE: usize = 6 * 1024;
 const PREFERRED_MTU: u16 = 247;
 
 pub struct BleMouseKeyboard {
-    server: &'static mut BLEServer,
-    
     input_keyboard: Arc<Mutex<BLECharacteristic>>,
     input_media_keys: Arc<Mutex<BLECharacteristic>>,
     input_mouse: Arc<Mutex<BLECharacteristic>>,
@@ -47,15 +43,6 @@ pub struct BleMouseKeyboard {
     /// The config collection, see [`Self::config_reports`].
     input_config: Arc<Mutex<BLECharacteristic>>,
     output_config: Arc<Mutex<BLECharacteristic>>,
-    profiles: Arc<std::sync::Mutex<Profiles>>,
-    /// The connection is being dropped (a profile switch): nothing more goes to that host, another switch
-    /// only changes the profile. Cleared by the disconnect callback, which applies the profile active then.
-    dropping: Arc<AtomicBool>,
-    /// The connected host is encrypted, bonded and accepted by the active profile (see
-    /// [`Profiles::on_encrypted`]): only then it gets the reports. NimBLE lets any peer subscribe to the
-    /// HID input reports (the CCCDs don't require encryption) and notifies them regardless.
-    /// Set with [`Link::accepted`].
-    accepted: Arc<AtomicBool>,
     link: Arc<Link>,
     /// Runs [`Link::run`], stopped before NimBLE is.
     link_thread: Option<JoinHandle<()>>,
@@ -66,16 +53,43 @@ pub struct BleMouseKeyboard {
 /// The config collection of the HID device ([`protocol::hid`]): the app writes the requests to the output
 /// report, the keyboard answers in the input one.
 pub struct ConfigReports {
-    pub input: Arc<Mutex<BLECharacteristic>>,
     pub output: Arc<Mutex<BLECharacteristic>>,
+    pub(crate) replies: ConfigReplies,
+}
+
+#[derive(Clone)]
+pub(crate) struct ConfigReplies {
+    input: Arc<Mutex<BLECharacteristic>>,
+    link: Arc<Link>,
+}
+
+impl ConfigReplies {
+    /// Capture the origin inside the GATT write callback. During early encryption, ESP-IDF can
+    /// deliver a write before CONNECT. The profile must accept the connection before it can send
+    /// config requests.
+    pub(crate) fn capture(&self, desc: &BLEConnDesc) -> Option<ConnectionId> {
+        self.link.ready_connection(desc.conn_handle())
+    }
+
+    /// Submit a reply to its originating connection, or return `None` if it has become stale.
+    /// Callers can retry a buffer failure later with the same identity.
+    pub(crate) fn send(&self, id: ConnectionId, report: &[u8]) -> Option<Result<(), BLEError>> {
+        self.link.send_to(id, |handle| {
+            let mut input = self.input.lock();
+            if input.subscribed_count() == 0 {
+                return BLEError::convert(esp_idf_sys::BLE_HS_EINVAL);
+            }
+            input.set_value(report).notify_with(report, handle)
+        })
+    }
 }
 
 impl BleMouseKeyboard {
     /// Sets the HID device up, the BLE profiles are saved in `nvs`. Nothing connects until [`Self::start`]: the
-    /// services of the [`Self::config_reports`] are registered before. `on_host_accepted` is called once a host is ready.
+    /// services of [`Self::config_reports`] are registered before.
     pub fn new(
         nvs: EspDefaultNvsPartition,
-        on_host_accepted: impl Fn() + Clone + Send + Sync + 'static,
+        on_host_changed: impl Fn() + Clone + Send + Sync + 'static,
     ) -> anyhow::Result<Self> {
         unsafe {
             esp_idf_sys::ble_hs_cfg.store_gen_key_cb = Some(Self::gen_key_callback);
@@ -84,7 +98,7 @@ impl BleMouseKeyboard {
         BLEDevice::init();
 
         let device = BLEDevice::take();
-    
+
         // Static random address of the active profile, see `profiles`.
         device.set_own_addr_type(OwnAddrType::Random);
         // No IO, so pairing is always Just Works (unauthenticated): no MITM, asking for it makes some
@@ -100,96 +114,32 @@ impl BleMouseKeyboard {
             log::warn!("Failed to set preferred MTU: {:?}", e);
         }
 
-        let profiles = Arc::new(std::sync::Mutex::new(Profiles::load(nvs)));
-        lock(&profiles).apply_address();
+        let link = Arc::new(Link::new(Profiles::load(nvs)));
 
         let server = device.get_server();
         // Advertising is started by the disconnect callback, on the address of the profile active then.
         server.advertise_on_disconnect(false);
-        let accepted = Arc::new(AtomicBool::new(false));
-        let link = Arc::new(Link::new());
-        let connect_accepted = accepted.clone();
-        let connect_profiles = profiles.clone();
         let connect_link = link.clone();
-        let connect_host_accepted = on_host_accepted.clone();
-        server.on_connect(move |server, desc| {
-            info!("Client connected: {:?}", desc);
-            let handle = desc.conn_handle();
-            // NimBLE reports the connection after reading the remote features, a bonded host may have encrypted
-            // it by then: `on_authentication_complete` has checked it already.
-            let encrypted = desc.encrypted();
-            // Also for a connection dropped below, in case dropping it fails.
-            connect_link.connected(handle, &connect_accepted, encrypted);
-
-            // Already stopped if the connection came from advertising.
-            if let Err(e) = BLEDevice::take().get_advertising().lock().stop() {
-                if e.code() != esp_idf_sys::BLE_HS_EALREADY {
-                    log::warn!("Failed to stop advertising: {:?}", e);
-                }
-            }
-
-            let peer: esp_idf_sys::ble_addr_t = desc.id_address().into();
-            let reject = {
-                let profiles = lock(&connect_profiles);
-                // Advertising may have run on the address of a previous profile (setting the new one failed,
-                // or a host connected while switching): that address is dropped, the next one is tried then.
-                let active = local_address(handle).is_some_and(|local| profiles.is_active_address(&local));
-                if !active {
-                    info!("Connected on the address of a previous profile, disconnecting");
-                }
-                !active || profiles.bound_elsewhere(&peer)
+        let connect_host_changed = on_host_changed.clone();
+        server.on_connect(move |_, desc| {
+            let Some(sleep) = SLEEP.reserve() else {
+                return;
             };
-            if reject {
-                // A host bound to another profile would lose that bond by pairing here.
-                profiles::refuse_pairing(Some(&peer));
-                disconnect(server, handle);
-                return;
-            }
-            profiles::refuse_pairing(None);
-
-            // No connection params until accepted: a pending connection update blocks the encryption start
-            // (one LL control procedure at a time), and Windows answers it only after pairing.
-
-            if encrypted {
-                // Authentication may have finished before NimBLE added the host to the server's connection list.
-                if connect_accepted.load(Ordering::Acquire) {
-                    connect_host_accepted();
-                }
-                return;
-            }
-            // Asks the host to encrypt at once (a bonded one) or to pair, instead of waiting until it
-            // touches an encrypted characteristic: it gets no reports until then, see `accepted`.
-            let rc = unsafe { esp_idf_sys::ble_gap_security_initiate(desc.conn_handle()) };
-            if rc != 0 && rc != esp_idf_sys::BLE_HS_EALREADY as i32 {
-                log::warn!("Failed to request security: {}", rc);
+            info!("Client connected: {:?}", desc);
+            if connect_link.connected(desc, &sleep) {
+                connect_host_changed();
+                gatt_change_delivered();
             }
         });
-        let auth_profiles = profiles.clone();
-        let auth_accepted = accepted.clone();
         let auth_link = link.clone();
-        server.on_authentication_complete(move |server, desc, result| {
-            info!("Authentication complete: {:?}", result);
-            // Not encrypted, it gets nothing (not accepted).
-            if result.is_err() {
-                return;
-            }
-            let peer: esp_idf_sys::ble_addr_t = desc.id_address().into();
-            let Some(local) = local_address(desc.conn_handle()) else {
+        server.on_authentication_complete(move |_, desc, result| {
+            let Some(sleep) = SLEEP.reserve() else {
                 return;
             };
-            let verdict = lock(&auth_profiles).on_encrypted(&peer, &local, desc.bonded());
-            match verdict {
-                Verdict::Accept => {
-                    auth_link.accepted(&auth_accepted);
-                    if server.connected_count() > 0 {
-                        on_host_accepted();
-                    }
-                    auth_link.request_host_conn_params(desc.conn_handle());
-                    gatt_change_delivered();
-                }
-                Verdict::Disconnect => disconnect(server, desc.conn_handle()),
-                // Disconnected by removing its bond.
-                Verdict::Reject => {}
+            info!("Authentication complete: {:?}", result);
+            if result.is_ok() && desc.encrypted() && auth_link.authenticated(desc, &sleep) {
+                on_host_changed();
+                gatt_change_delivered();
             }
         });
 
@@ -204,6 +154,10 @@ impl BleMouseKeyboard {
         let wheel_resolution = Arc::new(AtomicU8::new(1));
         let write_resolution = wheel_resolution.clone();
         feature_mouse.lock().on_write(move |args| {
+            let Some(_sleep) = SLEEP.reserve() else {
+                args.reject_with_error_code(esp_idf_sys::BLE_ATT_ERR_WRITE_NOT_PERMITTED as u8);
+                return;
+            };
             let multiplier = args.recv_data().first().is_some_and(|value| value & 0x03 != 0);
             info!("Wheel resolution multiplier: {}", multiplier);
             write_resolution.store(if multiplier { WHEEL_RESOLUTION } else { 1 }, Ordering::Relaxed);
@@ -221,7 +175,6 @@ impl BleMouseKeyboard {
         hid.set_battery_level(100);
 
         Ok(Self {
-            server,
             input_keyboard,
             input_media_keys,
             input_mouse,
@@ -229,9 +182,6 @@ impl BleMouseKeyboard {
             wheel_resolution,
             input_config,
             output_config,
-            profiles,
-            dropping: Arc::new(AtomicBool::new(false)),
-            accepted,
             link,
             link_thread: None,
             reports: Reports::default(),
@@ -240,36 +190,45 @@ impl BleMouseKeyboard {
 
     /// The config collection, for the config protocol to register its handlers on before [`Self::start`].
     pub fn config_reports(&self) -> ConfigReports {
-        ConfigReports { input: self.input_config.clone(), output: self.output_config.clone() }
+        ConfigReports {
+            output: self.output_config.clone(),
+            replies: ConfigReplies { input: self.input_config.clone(), link: self.link.clone() },
+        }
     }
 
     /// Starts the server and advertising; `on_disconnect` is called after clearing the host state.
-    pub fn start(&mut self, on_disconnect: impl Fn() + Send + Sync + 'static) -> anyhow::Result<()> {
-        let disconnect_profiles = self.profiles.clone();
-        let disconnect_dropping = self.dropping.clone();
-        let disconnect_accepted = self.accepted.clone();
+    pub(crate) fn start(
+        &mut self,
+        on_disconnect: impl Fn(ConnectionId, &SleepReservation<'static>) + Send + Sync + 'static,
+    ) -> anyhow::Result<()> {
         let disconnect_link = self.link.clone();
+        let disconnect_config_input = self.input_config.clone();
         let disconnect_feature_mouse = self.feature_mouse.clone();
         let disconnect_wheel_resolution = self.wheel_resolution.clone();
-        self.server.on_disconnect(move |_desc, result| {
+        BLEDevice::take().get_server().on_disconnect(move |desc, result| {
+            let Some(sleep) = SLEEP.reserve() else {
+                return;
+            };
             info!("Client disconnected: {:?}", result);
+            let disconnected = disconnect_link.disconnected(desc.conn_handle(), &sleep);
             // The next host sets the multiplier again if it can.
             disconnect_feature_mouse.lock().set_value(&[0]);
             disconnect_wheel_resolution.store(1, Ordering::Relaxed);
-            disconnect_link.disconnected(&disconnect_accepted);
-            profiles::refuse_pairing(None);
-            // Cleared first: a switch from now on restarts advertising itself, an earlier one is applied here.
-            disconnect_dropping.store(false, Ordering::Release);
-            on_disconnect();
+            // Clean up the config session and wake even if the host never became ready.
+            if let Some(id) = disconnected {
+                // The config input also supports reads. Clear the old reply before advertising again.
+                disconnect_config_input.lock().set_value(&[]);
+                on_disconnect(id, &sleep);
+            }
             // On the address of the profile active now: the last one selected while the connection was being
             // dropped. If setting it fails, the previous address is advertised, a host connecting there is
             // disconnected and it's tried again.
-            advertise(&disconnect_profiles, &disconnect_link);
+            advertise(&disconnect_link);
         });
 
         let mut ble_advertising = BLEDevice::take().get_advertising().lock();
         ble_advertising.scan_response(false);
-        set_profile_name(&mut ble_advertising, lock(&self.profiles).state().index)?;
+        set_profile_name(&mut ble_advertising, self.profile().index)?;
 
         if let Err(e) = ble_advertising.start() {
             bail!("error on advertising start [code: {:?}]", e);
@@ -277,11 +236,11 @@ impl BleMouseKeyboard {
         // The GATT server is started with the advertising.
         signal_gatt_changed();
 
-        let (link, profiles, accepted) = (self.link.clone(), self.profiles.clone(), self.accepted.clone());
+        let link = self.link.clone();
         let link_thread = std::thread::Builder::new()
             .name("ble_link".into())
             .stack_size(LINK_STACK_SIZE)
-            .spawn(move || link.run(&profiles, &accepted))?;
+            .spawn(move || link.run())?;
         self.link_thread = Some(link_thread);
         Ok(())
     }
@@ -290,6 +249,9 @@ impl BleMouseKeyboard {
         if t as u32 != esp_idf_sys::BLE_STORE_GEN_KEY_IRK {
             return 0;
         }
+        let Some(_sleep) = SLEEP.reserve() else {
+            return esp_idf_sys::BLE_HS_ESTORE_FAIL as i32;
+        };
 
         let mut buf = [0u8; 16];
 
@@ -316,47 +278,22 @@ impl BleMouseKeyboard {
         0
     }
 
-    pub fn connected(&self) -> bool {
-        self.server.connected_count() > 0
-    }
-
-    /// Connected to the host of the active profile, see [`Self::accepted`].
-    pub fn host_connected(&self) -> bool {
-        self.connected() && self.accepted.load(Ordering::Acquire) && !self.dropping.load(Ordering::Acquire)
-    }
-
     /// Idle connection parameters (slave latency) for the host. Not for a connection that isn't accepted
     /// yet: it may be pairing, and a connection update would block its encryption (see `on_connect`).
     pub fn set_idle(&mut self) {
         self.link.set_idle(true);
-        self.set_conn_params();
     }
 
     /// Active connection parameters for the host, see [`Self::set_idle`].
     pub fn set_active(&mut self) {
         self.link.set_idle(false);
-        self.set_conn_params();
     }
 
     /// A firmware update is being received: the shortest interval while active ([`ConnParams::TRANSFER`]).
     pub fn set_transfer(&mut self, transfer: bool) {
-        if self.link.set_transfer(transfer) {
-            if let Some(desc) = self.server.connections().next() {
-                let interval = ConnParams::interval_ms(desc.conn_handle()).unwrap_or(0.0);
-                info!("Firmware transfer {}, connection interval {} ms", if transfer { "started" } else { "ended" }, interval);
-            }
-            self.set_conn_params();
-        }
-    }
-
-    fn set_conn_params(&mut self) {
-        // After the link has the state: a host accepted after it gets these params, see `on_authentication_complete`.
-        if !self.host_connected() {
-            return;
-        }
-        let params = self.link.main_params();
-        if let Some(desc) = self.server.connections().next() {
-            self.link.request_conn_params(desc.conn_handle(), params);
+        if let Some(handle) = self.link.set_transfer(transfer) {
+            let interval = ConnParams::interval_ms(handle).unwrap_or(0.0);
+            info!("Firmware transfer {}, connection interval {} ms", if transfer { "started" } else { "ended" }, interval);
         }
     }
 
@@ -377,94 +314,44 @@ impl BleMouseKeyboard {
 
     /// Sends the reports to an accepted host, see [`Reports::flush`].
     pub fn flush(&mut self) {
-        let send = self.host_connected().then_some(|report: Report, bytes: &[u8]| {
+        let link = self.link.clone();
+        link.with_ready_host(|handle| self.flush_to(handle));
+    }
+
+    fn flush_to(&mut self, handle: Option<u16>) {
+        let input_keyboard = &self.input_keyboard;
+        let input_media_keys = &self.input_media_keys;
+        let input_mouse = &self.input_mouse;
+        let send = handle.map(|handle| move |report: Report, bytes: &[u8]| {
             let input = match report {
-                Report::Keyboard => &self.input_keyboard,
-                Report::MediaKeys => &self.input_media_keys,
-                Report::Mouse => &self.input_mouse,
+                Report::Keyboard => input_keyboard,
+                Report::MediaKeys => input_media_keys,
+                Report::Mouse => input_mouse,
             };
-            input.lock().set_value(bytes).notify();
+            let result = input.lock().set_value(bytes).notify_with(bytes, handle);
+            if let Err(e) = result {
+                // EINVAL also means the host hasn't subscribed to this report.
+                if e.code() != esp_idf_sys::BLE_HS_EINVAL {
+                    log::warn!("Failed to notify {:?} report: {:?}", report, e);
+                }
+            }
         });
         self.reports.flush(send);
     }
 
     /// Active BLE profile.
     pub fn profile(&self) -> ProfileState {
-        lock(&self.profiles).state()
+        self.link.profile()
     }
 
-    /// Switches to profile `index` (see [`crate::bt::profiles`]), nothing if it's active already.
-    pub fn select_profile(&mut self, index: u8) -> ProfileState {
-        let selected = lock(&self.profiles).select(index);
-        self.switched(selected)
-    }
-
-    /// Switches to the next profile (`step` 1) or the previous one (`step` -1).
-    pub fn step_profile(&mut self, step: isize) -> ProfileState {
-        let selected = lock(&self.profiles).step(step);
-        self.switched(selected)
-    }
-
-    /// Forgets the host of the active profile, the profile waits for a new one.
-    pub fn clear_profile(&mut self) -> ProfileState {
-        let state = lock(&self.profiles).clear_active();
-        self.reconnect();
-        state
-    }
-
-    /// Forgets the hosts of all profiles.
-    pub fn clear_all_profiles(&mut self) {
-        lock(&self.profiles).clear_all();
-        self.reconnect();
-    }
-
-    fn switched(&mut self, selected: Option<ProfileState>) -> ProfileState {
-        match selected {
-            Some(state) => {
-                self.reconnect();
-                state
-            }
-            None => self.profile(),
-        }
-    }
-
-    /// Drops the current host, if any, and advertises on the address of the active profile.
-    /// The host first gets all keys released, so nothing stays held there.
-    fn reconnect(&mut self) {
-        // Only an accepted host got reports, so only it gets released.
-        let had_host = self.host_connected();
-        self.release_all();
-        // Already being dropped: the disconnect callback applies the profile selected meanwhile.
-        if self.dropping.load(Ordering::Acquire) {
-            return;
-        }
-        if self.connected() {
-            if had_host {
-                std::thread::sleep(RELEASE_DELAY);
-            }
-            // Set before the disconnect, the disconnect callback clears it. The host may have gone meanwhile.
-            self.dropping.store(true, Ordering::Release);
-            let handle = self.server.connections().next().map(|desc| desc.conn_handle());
-            if let Some(handle) = handle {
-                match self.server.disconnect(handle) {
-                    Ok(()) => return,
-                    // Being disconnected already (e.g. rejected), the disconnect callback comes.
-                    Err(e) if e.code() == esp_idf_sys::BLE_HS_EALREADY => return,
-                    // Gone meanwhile, its disconnect callback may have applied the old profile.
-                    Err(e) if e.code() == esp_idf_sys::BLE_HS_ENOTCONN => {}
-                    Err(e) => log::warn!("Failed to disconnect: {:?}", e),
-                }
-            }
-            self.dropping.store(false, Ordering::Release);
-        }
-        // Unless connected: a connection advertises again from its disconnect callback.
-        advertise(&self.profiles, &self.link);
-    }
-
-    /// Sends reports with nothing pressed; the keys still held are sent again by the next [`Self::flush`].
-    fn release_all(&mut self) {
-        self.reports.clear();
-        self.flush();
+    pub fn change_profile(&mut self, command: BtCommand) -> ProfileState {
+        // The same main task runs profile commands and commits deep sleep.
+        let sleep = SLEEP.reserve().expect("profile command after deep sleep commitment");
+        let link = self.link.clone();
+        link.change_profile(command, &sleep, |handle| {
+            self.reports.clear();
+            self.flush_to(handle);
+        })
     }
 }
 

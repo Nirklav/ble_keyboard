@@ -1,21 +1,21 @@
-//! The connection to the host: one-shot timeouts and connection params requests, run by a thread of its own
-//! ([`Link::run`]), so the NimBLE callbacks only set deadlines.
+//! Owns the active BLE profile and connection lifecycle. A worker handles one-shot deadlines and
+//! connection parameters.
 
 use std::ffi::{c_int, c_void};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Condvar, MutexGuard};
+use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use esp32_nimble::{BLEDevice, BLEServer};
+use esp32_nimble::{BLEConnDesc, BLEDevice};
 use log::info;
+use protocol::keymap::BtCommand;
 
 use crate::bt::advertising::advertise;
 use crate::bt::conn_params::ConnParams;
-use crate::bt::profiles::Profiles;
+use crate::bt::connection::{Connection, ConnectionId};
+use crate::bt::profiles::{self, ProfileState, Profiles, Verdict};
+use crate::sleep_admission::{HostState, SleepReservation};
 
-/// A host not accepted this long after connecting is dropped, it would hold the only connection.
-/// Pairing a new host takes a few seconds, Windows may take longer.
-const ACCEPT_TIMEOUT: Duration = Duration::from_secs(15);
+const DISCONNECT_RETRY: Duration = Duration::from_secs(1);
 
 /// First wait before advertising is tried again after starting it failed, doubled on every failure
 /// up to [`ADVERTISING_RETRY_MAX`].
@@ -28,18 +28,15 @@ const CONN_PARAMS_RETRY: Duration = Duration::from_millis(100);
 /// Deadlines of [`Link`].
 #[derive(Default)]
 struct Deadlines {
-    /// Connection not accepted yet and when it's dropped: a host that doesn't encrypt or failed to pair
-    /// would hold the only connection. Set on every connect, so a new connection always gets the full
-    /// [`ACCEPT_TIMEOUT`]; cleared when it's accepted or gone.
-    accept: Option<(u16, Instant)>,
+    connection: Connection,
     /// Starting advertising failed, it's tried again then.
     advertise: Option<Instant>,
     /// Wait before the next advertising attempt, zero while advertising starts.
     advertise_backoff: Duration,
     /// Connection params to ask the host of a connection for, sent once no request is pending: only the
-    /// latest ones, see [`Link::request_conn_params`].
-    conn_params: Option<(u16, ConnParams)>,
-    /// The main loop is idle, see [`Link::request_host_conn_params`].
+    /// latest ones, see [`Self::queue_conn_params`].
+    conn_params: Option<ConnParams>,
+    /// The main loop is idle, see [`Link::set_idle`].
     idle: bool,
     /// A firmware update is being received, see [`BleMouseKeyboard::set_transfer`](crate::bt::ble_mouse_keyboard::BleMouseKeyboard::set_transfer).
     transfer: bool,
@@ -51,8 +48,12 @@ struct Deadlines {
 }
 
 impl Deadlines {
+    fn ready_handle(&self) -> Option<u16> {
+        self.connection.ready().map(|id| id.handle)
+    }
+
     fn next(&self) -> Option<Instant> {
-        [self.accept.map(|(_, deadline)| deadline), self.advertise, self.conn_params_retry]
+        [self.connection.disconnect_at(), self.advertise, self.conn_params_retry]
             .into_iter()
             .flatten()
             .min()
@@ -63,6 +64,10 @@ impl Deadlines {
         self.conn_params.is_some()
             && !self.conn_params_pending
             && self.conn_params_retry.is_none_or(|deadline| deadline <= now)
+    }
+
+    fn queue_conn_params(&mut self) {
+        self.conn_params = self.ready_handle().map(|_| ConnParams::of(self.idle, self.transfer));
     }
 }
 
@@ -76,97 +81,202 @@ enum ConnParamsSent {
     Busy,
 }
 
-/// One-shot timeouts of the link, run by a thread of their own ([`Link::run`]) that sleeps until the next
-/// deadline and without one doesn't wake up at all (light sleep). Not an esp_timer: its task has a small
-/// stack and runs the NimBLE timers too, while this takes the advertising and profiles locks and waits for
-/// HCI commands. The NimBLE callbacks only set the deadlines.
+/// The profile lock serializes CONNECT and authentication with advertising and profile edits. The
+/// deadlines lock arbitrates authorization, timeout, and report submission. Acquire advertising
+/// before profiles, then deadlines when needed. Flash writes hold only the profile lock.
 pub(super) struct Link {
-    deadlines: std::sync::Mutex<Deadlines>,
+    profiles: Mutex<Profiles>,
+    deadlines: Mutex<Deadlines>,
     changed: Condvar,
 }
 
 impl Link {
-    pub(super) fn new() -> Self {
-        Self { deadlines: std::sync::Mutex::new(Deadlines::default()), changed: Condvar::new() }
+    pub(super) fn new(mut profiles: Profiles) -> Self {
+        profiles.apply_address();
+        Self { profiles: Mutex::new(profiles), deadlines: Mutex::new(Deadlines::default()), changed: Condvar::new() }
+    }
+
+    fn profiles(&self) -> MutexGuard<'_, Profiles> {
+        self.profiles.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(super) fn profile(&self) -> ProfileState {
+        self.profiles().state()
+    }
+
+    /// Applies the active profile address after the advertising adapter stops advertising.
+    pub(super) fn apply_profile_address(&self) -> u8 {
+        let mut profiles = self.profiles();
+        profiles.apply_address();
+        profiles.state().index
     }
 
     fn deadlines(&self) -> MutexGuard<'_, Deadlines> {
         self.deadlines.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Connection `handle` has been made: not accepted, dropped after [`ACCEPT_TIMEOUT`] unless it is.
-    /// An `encrypted` one has been checked before (see `on_connect`): accepted or being dropped already.
-    pub(super) fn connected(&self, handle: u16, accepted: &AtomicBool, encrypted: bool) {
+    pub(super) fn has_host(&self) -> bool {
+        self.deadlines().connection.id().is_some()
+    }
+
+    pub(super) fn ready_connection(&self, handle: u16) -> Option<ConnectionId> {
+        self.deadlines().connection.ready().filter(|id| id.handle == handle)
+    }
+
+    pub(super) fn send_to<T>(&self, id: ConnectionId, send: impl FnOnce(u16) -> T) -> Option<T> {
+        let deadlines = self.deadlines();
+        // The NimBLE host task removes the old handle and delivers DISCONNECT before it can
+        // install a replacement. While DISCONNECT waits for this lock, the handle can only
+        // refer to the original connection or be absent.
+        deadlines.connection.ready_handle_for(id).map(send)
+    }
+
+    pub(super) fn with_ready_host(&self, f: impl FnOnce(Option<u16>)) {
+        let deadlines = self.deadlines();
+        f(deadlines.ready_handle());
+    }
+
+    /// Registers the physical connection, then asks for security if encryption has yet to start.
+    /// Returns whether a host was already bonded and became ready here.
+    pub(super) fn connected(&self, desc: &BLEConnDesc, sleep: &SleepReservation<'_>) -> bool {
+        let handle = desc.conn_handle();
+        let peer = desc.id_address().into();
+        let advertising = BLEDevice::take().get_advertising().lock();
+        let mut profiles = self.profiles();
+        let local = local_address(handle);
+        // An advertising restart may have failed to apply the active profile's address.
+        let active = local.is_some_and(|local| profiles.is_active_address(&local));
+        if !active {
+            info!("Connected on the address of a previous profile, disconnecting");
+        }
+        let valid = active && !profiles.bound_elsewhere(&peer);
+        // A host bound elsewhere would lose that bond by pairing here.
+        profiles::refuse_pairing((!valid).then_some(&peer));
         let mut deadlines = self.deadlines();
-        if !encrypted {
-            accepted.store(false, Ordering::Release);
-        }
-        if !accepted.load(Ordering::Acquire) {
-            deadlines.accept = Some((handle, Instant::now() + ACCEPT_TIMEOUT));
-        }
-        // An encrypted connection may have asked for its params already.
-        if !encrypted {
-            deadlines.conn_params = None;
-        }
+        let pairing_until = deadlines.connection.connected(handle, valid, Instant::now());
+        sleep.set_host_state(pairing_until.map_or(HostState::Unavailable, HostState::PairingUntil));
+        deadlines.conn_params = None;
+        deadlines.conn_params_retry = None;
         // Advertising has stopped, the disconnect starts it again.
         deadlines.advertise = None;
         deadlines.advertise_backoff = Duration::ZERO;
         self.changed.notify_one();
+        drop(deadlines);
+        drop(advertising);
+
+        let Some(local) = local.filter(|_| valid) else {
+            return false;
+        };
+        if desc.encrypted() {
+            // ENC_CHANGE can precede CONNECT. A fresh pairing can also be encrypted while
+            // exchanging keys. In that case wait for the authentication-complete callback.
+            return desc.bonded() && self.authorize(&mut profiles, handle, &peer, &local, true, sleep);
+        }
+        // A pending connection update would block starting encryption on Windows. Queue
+        // connection params only after the profile accepts this host.
+        let rc = unsafe { esp_idf_sys::ble_gap_security_initiate(handle) };
+        if rc != 0 && rc != esp_idf_sys::BLE_HS_EALREADY as i32 {
+            log::warn!("Failed to request security: {}", rc);
+        }
+        false
     }
 
-    /// The connection is accepted. Under the deadlines lock, so the accept timeout either sees it or is
-    /// cancelled before it drops the connection.
-    pub(super) fn accepted(&self, accepted: &AtomicBool) {
+    pub(super) fn authenticated(&self, desc: &BLEConnDesc, sleep: &SleepReservation<'_>) -> bool {
+        let handle = desc.conn_handle();
+        let Some(local) = local_address(handle) else {
+            return false;
+        };
+        self.authorize(&mut self.profiles(), handle, &desc.id_address().into(), &local, desc.bonded(), sleep)
+    }
+
+    /// Claims authorization once, before [`Profiles::on_encrypted`] can change the bond or NVS.
+    fn authorize(
+        &self,
+        profiles: &mut Profiles,
+        handle: u16,
+        peer: &esp_idf_sys::ble_addr_t,
+        local: &esp_idf_sys::ble_addr_t,
+        bonded: bool,
+        sleep: &SleepReservation<'_>,
+    ) -> bool {
         let mut deadlines = self.deadlines();
-        accepted.store(true, Ordering::Release);
-        deadlines.accept = None;
+        // An early ENC_CHANGE has no validated CONNECT yet.
+        let Some(claim) = deadlines.connection.claim_authentication(handle, Instant::now()) else {
+            return false;
+        };
+        // The callback reservation now covers authorization, even past the pairing deadline.
+        sleep.set_host_state(HostState::Unavailable);
+        drop(deadlines);
+        let accepted = matches!(profiles.on_encrypted(peer, local, bonded), Verdict::Accept);
+        let mut deadlines = self.deadlines();
+        let accepted = deadlines.connection.finish_authentication(claim, accepted, Instant::now());
+        if accepted {
+            sleep.set_host_state(HostState::Ready);
+            deadlines.queue_conn_params();
+        }
         self.changed.notify_one();
+        accepted
     }
 
-    pub(super) fn disconnected(&self, accepted: &AtomicBool) {
+    pub(super) fn disconnected(&self, handle: u16, sleep: &SleepReservation<'_>) -> Option<ConnectionId> {
         let mut deadlines = self.deadlines();
-        accepted.store(false, Ordering::Release);
-        deadlines.accept = None;
+        let id = deadlines.connection.disconnected(handle)?;
+        sleep.set_host_state(HostState::Unavailable);
+        profiles::refuse_pairing(None);
         // A pending request ends by itself, NimBLE calls `conn_params_done`.
         deadlines.conn_params = None;
         deadlines.conn_params_retry = None;
         self.changed.notify_one();
+        Some(id)
     }
 
-    /// Asks the host of connection `handle` for `params`. Sent by the link thread, one request at a time:
-    /// params asked for while one is pending replace the ones that wait, only the latest are sent.
-    pub(super) fn request_conn_params(&self, handle: u16, params: ConnParams) {
+    pub(super) fn change_profile(
+        &self,
+        command: BtCommand,
+        sleep: &SleepReservation<'_>,
+        release: impl FnOnce(Option<u16>),
+    ) -> ProfileState {
+        let mut profiles = self.profiles();
+        let mut restart_advertising = false;
+        let state = profiles.change(command, || restart_advertising = !self.drop_host(sleep, release));
+        drop(profiles);
+        if restart_advertising {
+            advertise(self);
+        }
+        state
+    }
+
+    /// Release held reports and invalidate the connection before changing the stored profile.
+    /// Returns whether a connection exists and its disconnect will restart advertising.
+    fn drop_host(&self, sleep: &SleepReservation<'_>, release: impl FnOnce(Option<u16>)) -> bool {
         let mut deadlines = self.deadlines();
-        deadlines.conn_params = Some((handle, params));
+        release(deadlines.ready_handle());
+        let dropping = deadlines.connection.drop_host(Instant::now());
+        sleep.set_host_state(HostState::Unavailable);
+        deadlines.conn_params = None;
+        deadlines.conn_params_retry = None;
         self.changed.notify_one();
+        dropping
     }
 
     /// The main loop went idle or active, see [`BleMouseKeyboard::set_idle`](crate::bt::ble_mouse_keyboard::BleMouseKeyboard::set_idle).
     pub(super) fn set_idle(&self, idle: bool) {
-        self.deadlines().idle = idle;
-    }
-
-    /// See [`BleMouseKeyboard::set_transfer`](crate::bt::ble_mouse_keyboard::BleMouseKeyboard::set_transfer); returns whether it changed.
-    pub(super) fn set_transfer(&self, transfer: bool) -> bool {
         let mut deadlines = self.deadlines();
-        let changed = deadlines.transfer != transfer;
-        deadlines.transfer = transfer;
-        changed
-    }
-
-    /// Params of the main loop's state.
-    pub(super) fn main_params(&self) -> ConnParams {
-        let deadlines = self.deadlines();
-        ConnParams::of(deadlines.idle, deadlines.transfer)
-    }
-
-    /// The host of connection `handle` has been accepted: asks it for the params of the main loop's state,
-    /// the loop doesn't send them to a host accepted while it's idle.
-    pub(super) fn request_host_conn_params(&self, handle: u16) {
-        let mut deadlines = self.deadlines();
-        let params = ConnParams::of(deadlines.idle, deadlines.transfer);
-        deadlines.conn_params = Some((handle, params));
+        deadlines.idle = idle;
+        deadlines.queue_conn_params();
         self.changed.notify_one();
+    }
+
+    /// Returns the ready handle when the transfer state changed.
+    pub(super) fn set_transfer(&self, transfer: bool) -> Option<u16> {
+        let mut deadlines = self.deadlines();
+        if deadlines.transfer == transfer {
+            return None;
+        }
+        deadlines.transfer = transfer;
+        deadlines.queue_conn_params();
+        self.changed.notify_one();
+        deadlines.ready_handle()
     }
 
     /// Sends `params` to the host of connection `handle`, unless they're in use already.
@@ -208,49 +318,50 @@ impl Link {
         self.changed.notify_one();
     }
 
-    pub(super) fn run(&self, profiles: &std::sync::Mutex<Profiles>, accepted: &AtomicBool) {
+    pub(super) fn run(&self) {
         let mut deadlines = self.deadlines();
         while !deadlines.stop {
             let now = Instant::now();
-            if let Some((handle, deadline)) = deadlines.accept {
-                if deadline <= now {
-                    deadlines.accept = None;
-                    // Still under the lock, see `accepted`.
-                    if !accepted.load(Ordering::Acquire) {
-                        info!("Host not accepted in {:?}, disconnecting", ACCEPT_TIMEOUT);
-                        disconnect(BLEDevice::take().get_server(), handle);
-                    }
-                    continue;
+            if let Some((id, pairing_timed_out)) = deadlines.connection.begin_disconnect(now) {
+                if pairing_timed_out {
+                    info!("Host not accepted before pairing timeout, disconnecting");
                 }
+                // NimBLE delivers DISCONNECT before processing another connection. Holding this lock
+                // through terminate keeps that callback from passing the deadline on to a reused handle.
+                let rc = unsafe {
+                    esp_idf_sys::ble_gap_terminate(id.handle, esp_idf_sys::ble_error_codes_BLE_ERR_REM_USER_CONN_TERM as _)
+                };
+                match rc as u32 {
+                    // NimBLE removes a handle just before DISCONNECT. Keep its identity for
+                    // that callback even when the handle is already gone.
+                    0 | esp_idf_sys::BLE_HS_EALREADY | esp_idf_sys::BLE_HS_ENOTCONN => {}
+                    _ => {
+                        log::warn!("Failed to disconnect: {}", rc);
+                        deadlines.connection.retry_disconnect(id, Instant::now() + DISCONNECT_RETRY);
+                    }
+                }
+                continue;
             }
             if deadlines.advertise.is_some_and(|deadline| deadline <= now) {
                 deadlines.advertise = None;
                 // Not under the lock: the callbacks set the deadlines while advertising is being started.
                 drop(deadlines);
-                advertise(profiles, self);
+                advertise(self);
                 deadlines = self.deadlines();
                 continue;
             }
             if deadlines.conn_params_due(now) {
-                let Some((handle, params)) = deadlines.conn_params.take() else {
+                let (Some(handle), Some(params)) = (deadlines.ready_handle(), deadlines.conn_params.take()) else {
                     continue;
                 };
                 deadlines.conn_params_retry = None;
-                deadlines.conn_params_pending = true;
-                // Not under the lock: `conn_params_done` may run before the request returns.
-                drop(deadlines);
-                let sent = self.send_conn_params(handle, params);
-                deadlines = self.deadlines();
-                match sent {
-                    ConnParamsSent::Pending => {}
-                    ConnParamsSent::Done => deadlines.conn_params_pending = false,
+                // The completion runs on the NimBLE task, outside this request. Keep the handle current
+                // through submission, so a new connection never receives the old host's request.
+                match self.send_conn_params(handle, params) {
+                    ConnParamsSent::Pending => deadlines.conn_params_pending = true,
+                    ConnParamsSent::Done => {}
                     ConnParamsSent::Busy => {
-                        deadlines.conn_params_pending = false;
-                        // Unless newer ones are asked for meanwhile. If the connection is gone, they're dropped
-                        // when sent: no connection, nothing to send.
-                        if deadlines.conn_params.is_none() {
-                            deadlines.conn_params = Some((handle, params));
-                        }
+                        deadlines.conn_params = Some(params);
                         deadlines.conn_params_retry = Some(Instant::now() + CONN_PARAMS_RETRY);
                     }
                 }
@@ -284,17 +395,8 @@ unsafe extern "C" fn conn_params_done(_handle: u16, status: c_int, arg: *mut c_v
     link.changed.notify_one();
 }
 
-/// Disconnects connection `handle`, nothing if it's gone or going already.
-pub(super) fn disconnect(server: &mut BLEServer, handle: u16) {
-    match server.disconnect(handle) {
-        Ok(()) => {}
-        Err(e) if e.code() == esp_idf_sys::BLE_HS_EALREADY || e.code() == esp_idf_sys::BLE_HS_ENOTCONN => {}
-        Err(e) => log::warn!("Failed to disconnect: {:?}", e),
-    }
-}
-
 /// Own address of connection `handle`, `None` if there's no such connection.
-pub(super) fn local_address(handle: u16) -> Option<esp_idf_sys::ble_addr_t> {
+fn local_address(handle: u16) -> Option<esp_idf_sys::ble_addr_t> {
     let mut desc = esp_idf_sys::ble_gap_conn_desc::default();
     let rc = unsafe { esp_idf_sys::ble_gap_conn_find(handle, &mut desc) };
     (rc == 0).then_some(desc.our_ota_addr)

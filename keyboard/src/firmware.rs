@@ -7,8 +7,8 @@
 //! On its first boot a new firmware is pending verification: it confirms itself on the first config
 //! request ([`FirmwareUpdate::link_works`]), which shows that BLE, the HID reports and the protocol work.
 //! Without one for [`ROLLBACK_TIMEOUT`] it goes back to the old firmware; a reset before that (a panic,
-//! a failed init) makes the bootloader start the old one too. The keyboard doesn't deep sleep meanwhile
-//! ([`pending_verification`]): a wake-up would be a reset.
+//! a failed init) makes the bootloader start the old one too. The update thread holds a sleep reservation
+//! through boot verification because waking from deep sleep would be a reset.
 
 use std::ffi::CStr;
 use std::mem::ManuallyDrop;
@@ -24,6 +24,9 @@ use log::{error, info, warn};
 use protocol::firmware::{FirmwareReceiver, ROLLBACK_TIMEOUT};
 use protocol::hid::{self, ErrorCode, Request, Response, UpdateFeatures, Versions};
 use protocol::image::BUILD_ID_LEN;
+
+use crate::bt::ble_mouse_keyboard::ConnectionId;
+use crate::sleep_admission::{SleepReservation, SLEEP};
 
 /// Time for the answer to [`Request::FirmwareCommit`] to reach the host before the restart.
 const RESTART_DELAY: Duration = Duration::from_millis(500);
@@ -45,15 +48,20 @@ static PROGRESS: AtomicU8 = AtomicU8::new(NO_UPDATE);
 const NO_UPDATE: u8 = u8::MAX;
 
 enum Command {
-    Request(Request),
+    Request(ConnectionId, Request),
     /// A config request came: the firmware works.
     Confirm,
-    Abort,
+    Abort(ConnectionId),
+}
+
+struct QueuedCommand {
+    command: Command,
+    _sleep: SleepReservation<'static>,
 }
 
 /// The running firmware is pending verification, see the module docs. Known once [`FirmwareUpdate::spawn`]
 /// returned, before that see [`running_state_pending`].
-pub fn pending_verification() -> bool {
+fn pending_verification() -> bool {
     PENDING.load(Ordering::Acquire)
 }
 
@@ -104,19 +112,20 @@ fn device_id() -> [u8; 6] {
 /// Handle of the update thread.
 #[derive(Clone)]
 pub struct FirmwareUpdate {
-    commands: Sender<Command>,
+    commands: Sender<QueuedCommand>,
 }
 
 impl FirmwareUpdate {
     /// Starts the thread; `respond` sends the answers to the requests, `on_update` is called when an update
     /// starts or ends ([`update_progress`] turns `Some` or `None`).
-    pub fn spawn(
-        respond: impl Fn(&Response) + Send + 'static,
+    pub(crate) fn spawn(
+        respond: impl Fn(ConnectionId, &Response) + Send + 'static,
         on_update: impl Fn() + Send + 'static,
     ) -> anyhow::Result<Self> {
         // Before any request can reach `link_works`.
         let pending = log_running();
         PENDING.store(pending, Ordering::Release);
+        let verification = pending.then(|| SLEEP.reserve().expect("verification starts before deep sleep"));
         let (commands, receiver) = mpsc::channel();
         let default = ThreadSpawnConfiguration::get().unwrap_or_default();
         let own = ThreadSpawnConfiguration { priority: PRIORITY, ..ThreadSpawnConfiguration::get().unwrap_or_default() };
@@ -124,48 +133,55 @@ impl FirmwareUpdate {
         let spawned = thread::Builder::new()
             .name("firmware".into())
             .stack_size(STACK_SIZE)
-            .spawn(move || run(receiver, pending, respond, on_update));
+            .spawn(move || run(receiver, verification, respond, on_update));
         default.set()?;
         spawned?;
         Ok(Self { commands })
     }
 
     /// Handles a firmware request or [`Request::GetVersions`]; `respond` answers it.
-    pub fn request(&self, request: Request) {
-        // The thread lives as long as the program.
-        let _ = self.commands.send(Command::Request(request));
+    pub(crate) fn request(&self, origin: ConnectionId, request: Request, sleep: SleepReservation<'static>) {
+        self.enqueue(Command::Request(origin, request), sleep);
     }
 
     /// A config request came, called before it's handled: confirms a firmware pending verification
     /// (before a [`Request::FirmwareBegin`] reaches the thread, the commands are in order).
-    pub fn link_works(&self) {
+    pub(crate) fn link_works(&self, sleep: &SleepReservation<'static>) {
         if pending_verification() {
-            let _ = self.commands.send(Command::Confirm);
+            self.enqueue(Command::Confirm, sleep.retain());
         }
     }
 
     /// Drops an unfinished update (e.g. on disconnect).
-    pub fn abort(&self) {
-        let _ = self.commands.send(Command::Abort);
+    pub(crate) fn abort(&self, origin: ConnectionId, sleep: &SleepReservation<'static>) {
+        self.enqueue(Command::Abort(origin), sleep.retain());
+    }
+
+    fn enqueue(&self, command: Command, sleep: SleepReservation<'static>) {
+        // Cover the queue and execution, including the commit response and restart delay.
+        let _ = self.commands.send(QueuedCommand { command, _sleep: sleep });
     }
 }
 
-fn run(commands: Receiver<Command>, pending: bool, respond: impl Fn(&Response), on_update: impl Fn()) {
-    let mut rollback_at = pending.then(|| Instant::now() + ROLLBACK_TIMEOUT);
+fn run(
+    commands: Receiver<QueuedCommand>,
+    mut verification: Option<SleepReservation<'static>>,
+    respond: impl Fn(ConnectionId, &Response),
+    on_update: impl Fn(),
+) {
+    let mut rollback_at = verification.as_ref().map(|_| Instant::now() + ROLLBACK_TIMEOUT);
     let mut versions = None;
     let mut update = Update::new();
+    let mut update_origin = None;
     let mut updating = false;
     loop {
-        // After the previous command, whichever way it went.
-        if update_progress().is_some() != updating {
-            updating = !updating;
-            on_update();
-        }
-        let command = match rollback_at {
+        let QueuedCommand { command, _sleep } = match rollback_at {
             Some(at) => match commands.recv_timeout(at.saturating_duration_since(Instant::now())) {
                 Ok(command) => command,
                 Err(RecvTimeoutError::Timeout) => {
-                    rollback();
+                    if rollback() {
+                        drop(verification.take());
+                    }
                     rollback_at = None;
                     continue;
                 },
@@ -177,45 +193,61 @@ fn run(commands: Receiver<Command>, pending: bool, respond: impl Fn(&Response), 
             },
         };
 
-        let request = match command {
-            Command::Request(request) => request,
+        match command {
             Command::Confirm => {
                 // A failed confirmation is tried again on the next request, the rollback still comes without one.
                 if rollback_at.is_some() && confirm() {
                     rollback_at = None;
+                    drop(verification.take());
                 }
-                continue;
             },
-            Command::Abort => {
-                if update.abort() {
-                    info!("Firmware update aborted");
+            Command::Abort(origin) => {
+                if update_origin == Some(origin) {
+                    update_origin = None;
+                    if update.abort() {
+                        info!("Firmware update aborted");
+                    }
                 }
-                continue;
             },
-        };
-        if request == Request::GetVersions {
-            respond(&Response::Versions(versions.get_or_insert_with(self::versions).clone()));
-            continue;
-        }
-        let commit = request == Request::FirmwareCommit;
-        let result = match request {
-            Request::FirmwareBegin { len, crc32, image_len } => update.begin(len, crc32, image_len),
-            Request::FirmwareChunk { offset, data } => update.chunk(offset, &data),
-            Request::FirmwareCommit => update.commit(),
-            request => {
-                warn!("Firmware update: unexpected request {:?}", request);
-                Err(ErrorCode::BadRequest)
+            Command::Request(origin, Request::GetVersions) => {
+                respond(origin, &Response::Versions(versions.get_or_insert_with(self::versions).clone()));
             },
-        };
-
-        if let Err(code) = result {
-            warn!("Firmware request failed: {}", code);
+            Command::Request(origin, request) => {
+                let commit = request == Request::FirmwareCommit;
+                let result = match request {
+                    Request::FirmwareBegin { len, crc32, image_len } => {
+                        let result = update.begin(len, crc32, image_len);
+                        update_origin = result.is_ok().then_some(origin);
+                        result
+                    },
+                    Request::FirmwareChunk { offset, data } if update_origin == Some(origin) => {
+                        update.chunk(offset, &data)
+                    },
+                    Request::FirmwareCommit if update_origin == Some(origin) => {
+                        update_origin = None;
+                        update.commit()
+                    },
+                    Request::FirmwareChunk { .. } | Request::FirmwareCommit => Err(ErrorCode::OutOfOrder),
+                    request => {
+                        warn!("Firmware update: unexpected request {:?}", request);
+                        Err(ErrorCode::BadRequest)
+                    },
+                };
+                if let Err(code) = result {
+                    warn!("Firmware request failed: {}", code);
+                }
+                respond(origin, &Response::from(result));
+                if commit && result.is_ok() {
+                    info!("Firmware updated, restarting");
+                    thread::sleep(RESTART_DELAY);
+                    unsafe { sys::esp_restart() };
+                }
+            },
         }
-        respond(&Response::from(result));
-        if commit && result.is_ok() {
-            info!("Firmware updated, restarting");
-            thread::sleep(RESTART_DELAY);
-            unsafe { sys::esp_restart() };
+        // Keep the reservation until the activity notification has been published too.
+        if update_progress().is_some() != updating {
+            updating = !updating;
+            on_update();
         }
     }
 }
@@ -269,12 +301,12 @@ fn confirm() -> bool {
 
 /// Marks the running firmware invalid and restarts into the old one; keeps this one if there's nothing
 /// to go back to.
-fn rollback() {
+fn rollback() -> bool {
     warn!("No config request since the firmware update, going back to the old firmware");
     // Returns only if it failed.
     let e = unsafe { sys::esp_ota_mark_app_invalid_rollback_and_reboot() };
     error!("Failed to go back to the old firmware ({}), keeping this one", e);
-    confirm();
+    confirm()
 }
 
 /// Update in progress: [`FirmwareReceiver`] and the slot it writes to, both set or both not.

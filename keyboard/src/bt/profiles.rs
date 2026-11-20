@@ -26,11 +26,10 @@
 //!
 //! The profiles and the active one are saved in NVS. If NVS can't be read (not just empty), the keyboard
 //! runs on new profiles kept in RAM only, and leaves the bonds alone: the saved profiles and the bonds
-//! are intact for the next boot. Locked by the main loop, the NimBLE host task and the link thread
-//! (see `ble_mouse_keyboard`).
+//! are intact for the next boot. Profile edits and connection authorization are serialized by the link.
 
 use std::ffi::{c_int, c_void, CString};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Mutex, OnceLock};
 
 use esp_idf_svc::handle::RawHandle;
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs, NvsDefault};
@@ -38,6 +37,7 @@ use esp_idf_sys::{
     ble_addr_t, ble_store_key, ble_store_value, esp, EspError, ESP_ERR_NVS_INVALID_LENGTH, ESP_ERR_NVS_TYPE_MISMATCH,
 };
 use log::{error, info, warn};
+use protocol::keymap::BtCommand;
 
 pub use protocol::config::BT_PROFILES as PROFILES;
 
@@ -171,51 +171,46 @@ impl Profiles {
         ProfileState { index: self.active as u8, bound: self.profiles[self.active].host.is_some() }
     }
 
-    /// Makes `index` the active profile, `None` if it's out of range or already active.
-    /// The connection has to be dropped, then [`Profiles::apply_address`].
-    pub fn select(&mut self, index: u8) -> Option<ProfileState> {
-        let index = index as usize;
-        if index >= PROFILES || index == self.active {
-            return None;
+    /// Drops any connection before changing the active profile or its address.
+    pub(super) fn change(&mut self, command: BtCommand, drop_host: impl FnOnce()) -> ProfileState {
+        let target = match command {
+            BtCommand::Select(index) => index as usize,
+            BtCommand::Next => (self.active + 1) % PROFILES,
+            BtCommand::Prev => (self.active + PROFILES - 1) % PROFILES,
+            BtCommand::Clear | BtCommand::ClearAll => self.active,
+        };
+        match command {
+            BtCommand::Clear => {
+                drop_host();
+                self.release(self.active);
+                self.save();
+                info!("BT profile {} cleared", self.active + 1);
+            }
+            BtCommand::ClearAll => {
+                drop_host();
+                for index in 0..PROFILES {
+                    self.release(index);
+                }
+                let rc = unsafe { esp_idf_sys::ble_store_clear() };
+                if rc != 0 {
+                    error!("BT profiles: ble_store_clear failed: {}", rc);
+                }
+                self.save();
+                info!("BT profiles: all cleared");
+            }
+            _ if target < PROFILES && target != self.active => {
+                drop_host();
+                self.active = target;
+                self.save();
+                info!("BT profile {} selected", target + 1);
+            }
+            _ => {}
         }
-        self.active = index;
-        self.save();
-        info!("BT profile {} selected", index + 1);
-        Some(self.state())
-    }
-
-    /// Next profile (`step` 1) or the previous one (`step` -1), wrapping around.
-    pub fn step(&mut self, step: isize) -> Option<ProfileState> {
-        let index = (self.active as isize + step).rem_euclid(PROFILES as isize);
-        self.select(index as u8)
-    }
-
-    /// Forgets the host of the active profile and gives the profile a new address.
-    /// The connection has to be dropped, then [`Profiles::apply_address`].
-    pub fn clear_active(&mut self) -> ProfileState {
-        self.release(self.active);
-        self.save();
-        info!("BT profile {} cleared", self.active + 1);
-        self.state()
-    }
-
-    /// Forgets all hosts and every bond NimBLE has, every profile gets a new address.
-    /// The connection has to be dropped, then [`Profiles::apply_address`].
-    pub fn clear_all(&mut self) -> ProfileState {
-        for index in 0..PROFILES {
-            self.release(index);
-        }
-        let rc = unsafe { esp_idf_sys::ble_store_clear() };
-        if rc != 0 {
-            error!("BT profiles: ble_store_clear failed: {}", rc);
-        }
-        self.save();
-        info!("BT profiles: all cleared");
         self.state()
     }
 
     /// Sets the address of the active profile in NimBLE and the controller, if it isn't set yet.
-    /// Only while not advertising; while connected only if the connection is being dropped.
+    /// Call only with advertising stopped and no connection.
     /// On a failure the previous address stays, the next call tries again.
     pub fn apply_address(&mut self) {
         let address = self.profiles[self.active].address;
@@ -487,9 +482,4 @@ fn random_static_address() -> [u8; 6] {
 fn format(address: &[u8; 6]) -> String {
     let bytes: Vec<String> = address.iter().rev().map(|b| format!("{b:02X}")).collect();
     bytes.join(":")
-}
-
-/// Profiles stay consistent if a holder panicked: every change is saved at once.
-pub fn lock(profiles: &Mutex<Profiles>) -> MutexGuard<'_, Profiles> {
-    profiles.lock().unwrap_or_else(|e| e.into_inner())
 }

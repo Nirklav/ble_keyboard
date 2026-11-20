@@ -95,6 +95,8 @@ impl Display {
             timeout: Duration::from_secs(Settings::default().display_off_s.into()),
             longest_layer: 0,
             on: false,
+            panel_on: Some(false),
+            sleep_prepared: false,
             layer_drift: Drift::random(),
             profile_drift: Drift::random(),
             drift_at: Instant::now()
@@ -159,12 +161,17 @@ impl Display {
         self.send(Msg::Wake)
     }
 
-    /// Before deep sleep: the display is powered on its own and would keep showing the status.
-    /// Returns once it's off, the chip mustn't sleep before.
-    pub fn turn_off(&self) -> anyhow::Result<()> {
+    /// Freeze drawing and turn off the separately powered OLED. The screen model stays live.
+    /// A failed command still leaves drawing frozen so it can be retried or canceled.
+    pub fn prepare_sleep(&self) -> anyhow::Result<()> {
         let (sender, receiver) = mpsc::channel();
-        self.sender.send(Msg::Off(sender)).map_err(|_| anyhow::Error::msg("display thread is gone"))?;
+        self.sender.send(Msg::PrepareSleep(sender)).map_err(|_| anyhow::Error::msg("display thread is gone"))?;
         receiver.recv().map_err(|_| anyhow::Error::msg("display thread is gone"))?
+    }
+
+    /// Resume normal drawing using the existing screen model and deadlines.
+    pub fn cancel_sleep(&self) {
+        let _ = self.send(Msg::CancelSleep);
     }
 
     /// Without the thread the keyboard goes on without the display: the error isn't passed up to the main loop.
@@ -183,8 +190,9 @@ enum Msg {
     Update(bool),
     Configure { timeout: Duration, longest_layer: u32 },
     Wake,
-    /// Answered once the display is off.
-    Off(Sender<anyhow::Result<()>>)
+    /// Answered with the result of the OLED-off command.
+    PrepareSleep(Sender<anyhow::Result<()>>),
+    CancelSleep,
 }
 
 #[derive(Default, Clone)]
@@ -283,7 +291,11 @@ struct Screen {
     timeout: Duration,
     /// Width of the longest layout name, see [`Display::configure`].
     longest_layer: u32,
+    /// Whether the current screen would be lit during normal operation.
     on: bool,
+    /// Last confirmed panel power state. A failed command may still have reached the OLED.
+    panel_on: Option<bool>,
+    sleep_prepared: bool,
     layer_drift: Drift,
     profile_drift: Drift,
     /// The next step of the drifts while the status is on.
@@ -294,6 +306,7 @@ impl Screen {
     fn run(mut self, receiver: Receiver<Msg>) {
         loop {
             let next_at = match &self.popup {
+                _ if self.sleep_prepared => None,
                 _ if self.updating => Some(Instant::now() + UPDATE_POLL),
                 Some(popup) => Some(popup.frame_at),
                 None => self.off_at.map(|at| at.min(self.drift_at)),
@@ -310,6 +323,9 @@ impl Screen {
             // Whatever came during a flush makes a single frame.
             while let Ok(msg) = receiver.try_recv() {
                 self.handle(msg);
+            }
+            if self.sleep_prepared {
+                continue;
             }
             if let Err(e) = self.update() {
                 error!("error on display: {:?}", e);
@@ -368,18 +384,12 @@ impl Screen {
                 }
             },
             Msg::Wake => self.woken = true,
-            Msg::Off(ack) => {
-                // Nothing that came before comes back on.
-                self.popup = None;
-                self.updating = false;
-                self.update_drawn = None;
-                self.update_changed = false;
-                self.status_changed = false;
-                self.woken = false;
-                self.off_at = None;
+            Msg::PrepareSleep(ack) => {
+                self.sleep_prepared = true;
                 // The caller may have given up.
-                let _ = ack.send(self.turn_off());
+                let _ = ack.send(self.set_panel_on(false));
             },
+            Msg::CancelSleep => self.sleep_prepared = false,
         }
     }
 
@@ -395,7 +405,7 @@ impl Screen {
             // A failed update stays at its last progress until the main loop turns it off.
             let progress = firmware::update_progress().or(self.update_drawn).unwrap_or(0);
             if self.update_drawn == Some(progress) {
-                return Ok(());
+                return self.sync_panel();
             }
             // Even if drawing fails: it's tried again on the next change only.
             self.update_drawn = Some(progress);
@@ -407,7 +417,7 @@ impl Screen {
             if let Some(progress) = Popup::progress(elapsed) {
                 if now < popup.frame_at {
                     self.popup = Some(popup);
-                    return Ok(());
+                    return self.sync_panel();
                 }
                 // Even if drawing fails: the next frames come, so the pop-up ends.
                 popup.frame_at = now + Popup::next_frame(elapsed);
@@ -428,7 +438,8 @@ impl Screen {
             self.off_at = Some(now + self.timeout);
         } else if self.off_at.is_some_and(|at| now >= at) {
             self.off_at = None;
-            return self.turn_off();
+            self.on = false;
+            return self.sync_panel();
         }
         if self.off_at.is_some() && now >= self.drift_at {
             self.drift_at = now + DRIFT_STEP;
@@ -436,7 +447,7 @@ impl Screen {
             self.profile_drift.step();
             return self.draw_status();
         }
-        Ok(())
+        self.sync_panel()
     }
 
     fn draw_status(&mut self) -> anyhow::Result<()> {
@@ -531,16 +542,24 @@ impl Screen {
     /// After a frame is drawn. The drifts step a whole [`DRIFT_STEP`] after the status comes on.
     fn turn_on(&mut self) -> anyhow::Result<()> {
         if !self.on {
-            map_err!(self.display.set_display_on(true));
             self.on = true;
             self.drift_at = Instant::now() + DRIFT_STEP;
+        }
+        self.sync_panel()
+    }
+
+    // Preparation leaves the frame in OLED RAM. Restore its power after checking the screen's timers.
+    fn sync_panel(&mut self) -> anyhow::Result<()> {
+        if self.panel_on != Some(self.on) {
+            self.set_panel_on(self.on)?;
         }
         Ok(())
     }
 
-    fn turn_off(&mut self) -> anyhow::Result<()> {
-        map_err!(self.display.set_display_on(false));
-        self.on = false;
+    fn set_panel_on(&mut self, on: bool) -> anyhow::Result<()> {
+        self.panel_on = None;
+        map_err!(self.display.set_display_on(on));
+        self.panel_on = Some(on);
         Ok(())
     }
 }

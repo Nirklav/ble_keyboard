@@ -7,22 +7,18 @@
 //! the main loop applies them once all keys are up and answers with [`ConfigService::finish`].
 //! Firmware requests and [`Request::GetVersions`] go to the [`FirmwareUpdate`] thread, it answers them.
 
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use esp32_nimble::utilities::mutex::Mutex;
-use esp32_nimble::BLECharacteristic;
-use esp_idf_svc::hal::task::notification::Notifier;
 use log::{info, warn};
 use protocol::hid::{self, ConfigReceiver, ErrorCode, Info, Request, Response};
 use protocol::config::{CONFIG_VERSION, MAX_COMBOS, MAX_LAYOUTS};
 
-use crate::bt::ble_mouse_keyboard::ConfigReports;
+use crate::bt::ble_mouse_keyboard::{ConfigReplies, ConfigReports, ConnectionId};
 use crate::config::Pending;
 use crate::firmware::FirmwareUpdate;
-use crate::power::ACTIVITY;
+use crate::sleep_admission::{SleepReservation, SLEEP};
 
 /// The keyboard stays active (no idle connection parameters) this long after the last transfer request.
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(5);
@@ -36,41 +32,69 @@ const SEND_RETRY_DELAY: Duration = Duration::from_millis(5);
 #[derive(Clone)]
 pub struct ConfigService {
     state: Arc<std::sync::Mutex<State>>,
-    /// HID config input report, responses to the requests of the output report.
-    input: Arc<Mutex<BLECharacteristic>>,
-    /// Connection of the last request, the responses go to it.
-    conn_handle: Arc<AtomicU16>,
-    /// Wakes the main loop up from `wait_for_activity`.
-    wake: Arc<Notifier>,
+    replies: ConfigReplies,
+    on_activity: Arc<dyn Fn() + Send + Sync>,
     info: Arc<Info>,
     firmware: FirmwareUpdate,
 }
 
+/// Owns the origin and sleep reservation from admission through the response attempt.
+pub(crate) struct RequestContext {
+    origin: ConnectionId,
+    sleep: SleepReservation<'static>,
+}
+
+pub(crate) struct Submitted {
+    pub(crate) change: Pending,
+    pub(crate) context: RequestContext,
+}
+
 struct State {
+    /// Connection that owns the receiver and session lease.
+    origin: Option<ConnectionId>,
     receiver: ConfigReceiver,
     /// Encoded active config, answers [`Request::ReadConfig`].
     current: Vec<u8>,
     /// Config change for the main loop.
-    submitted: Option<Pending>,
+    submitted: Option<Submitted>,
     /// A change is submitted or being applied, its response is not sent yet.
     busy: bool,
     /// Last request except [`Request::Ping`] and [`Request::End`].
     last_request: Option<Instant>,
-    /// Last request of the app session, `None` once it ended.
-    last_seen: Option<Instant>,
+    /// The client started a session and has not ended it.
+    session_open: bool,
+}
+
+impl State {
+    fn clear_client(&mut self) {
+        if self.receiver.is_active() {
+            info!("Config transfer aborted");
+        }
+        self.receiver.abort();
+        self.origin = None;
+        self.last_request = None;
+        self.session_open = false;
+    }
+}
+
+enum Outcome {
+    Reply(Response),
+    Apply(Pending),
+    Firmware(Request),
 }
 
 impl ConfigService {
     /// Must be called before the server starts ([`BleMouseKeyboard::start`](crate::bt::ble_mouse_keyboard::BleMouseKeyboard::start)).
-    /// `current` is the encoded active config.
+    /// `current` is the encoded active config. `on_activity` runs in the NimBLE task or the firmware
+    /// update thread and must return promptly.
     pub fn register(
         width: u8,
         height: u8,
         current: Vec<u8>,
-        wake: Arc<Notifier>,
+        on_activity: impl Fn() + Send + Sync + 'static,
         reports: ConfigReports,
     ) -> anyhow::Result<Self> {
-        let ConfigReports { input, output } = reports;
+        let ConfigReports { output, replies } = reports;
         let info = Info {
             protocol_version: hid::PROTOCOL_VERSION,
             config_version: CONFIG_VERSION,
@@ -81,47 +105,50 @@ impl ConfigService {
             firmware_version: env!("CARGO_PKG_VERSION").into(),
         };
 
-        let conn_handle = Arc::new(AtomicU16::new(0));
-        let firmware_input = input.clone();
-        let firmware_conn = conn_handle.clone();
-        let firmware_wake = wake.clone();
+        let on_activity: Arc<dyn Fn() + Send + Sync> = Arc::new(on_activity);
+        let firmware_replies = replies.clone();
+        let on_update = on_activity.clone();
         let firmware = FirmwareUpdate::spawn(
-            move |response| send(&firmware_input, firmware_conn.load(Ordering::Relaxed), response, SEND_RETRY_TIMEOUT),
-            // The main loop shows the update and asks for its connection params, the chunks don't wake it.
-            move || {
-                // The main task lives as long as the program.
-                unsafe { firmware_wake.notify(ACTIVITY) };
-            },
+            move |origin, response| send(&firmware_replies, origin, response, SEND_RETRY_TIMEOUT),
+            move || on_update(),
         )?;
 
         let config_service = Self {
             state: Arc::new(std::sync::Mutex::new(State {
+                origin: None,
                 receiver: ConfigReceiver::new(width, height),
                 current,
                 submitted: None,
                 busy: false,
                 last_request: None,
-                last_seen: None,
+                session_open: false,
             })),
-            input,
-            conn_handle,
-            wake,
+            replies,
+            on_activity,
             info: Arc::new(info),
             firmware,
         };
 
         let callback_service = config_service.clone();
         output.lock().on_write(move |args| {
+            let Some(sleep) = SLEEP.reserve() else {
+                args.reject_with_error_code(esp_idf_sys::BLE_ATT_ERR_WRITE_NOT_PERMITTED as u8);
+                return;
+            };
+            let Some(origin) = callback_service.replies.capture(args.desc()) else {
+                args.reject_with_error_code(esp_idf_sys::BLE_ATT_ERR_WRITE_NOT_PERMITTED as u8);
+                return;
+            };
+            let context = RequestContext { origin, sleep };
             let mtu = args.desc().mtu() as usize;
             if mtu < hid::MIN_MTU {
                 warn!("Config report over MTU {}, responses don't fit (needs {})", mtu, hid::MIN_MTU);
             }
-            callback_service.conn_handle.store(args.desc().conn_handle(), Ordering::Relaxed);
             match hid::decode(args.recv_data()) {
-                Some(data) => callback_service.on_request(data),
+                Some(data) => callback_service.on_request(data, context),
                 None => {
                     warn!("Config report: bad length {:02x?}", args.recv_data());
-                    callback_service.send(&Response::Error(ErrorCode::BadRequest));
+                    callback_service.send(origin, &Response::Error(ErrorCode::BadRequest));
                 },
             }
         });
@@ -130,58 +157,74 @@ impl ConfigService {
     }
 
     /// Handles a request in the NimBLE task (the output report is locked, the input one is not).
-    fn on_request(&self, data: &[u8]) {
-        let (response, wake) = self.handle(data);
-        if let Some(response) = response {
-            self.send(&response);
-        }
-        if wake {
-            self.wake_main_loop();
-        }
-    }
-
-    /// Handles a request in the NimBLE task; the response is `None` if it's sent later by the main loop.
-    /// Returns whether to wake the main loop up: session requests don't, so the keyboard can still idle; nor do
-    /// firmware chunks, hundreds a second: the main loop learns of an update from its begin and commit.
-    fn handle(&self, data: &[u8]) -> (Option<Response>, bool) {
+    /// Session requests and firmware chunks skip the activity callback so the keyboard can idle and OTA chunks
+    /// don't wake the main loop hundreds of times per second. Firmware update transitions report activity separately.
+    fn on_request(&self, data: &[u8], context: RequestContext) {
         let Ok(request) = Request::from_bytes(data) else {
             warn!("Config service: bad request {:02x?}", data);
-            return (Some(Response::Error(ErrorCode::BadRequest)), true);
+            self.send(context.origin, &Response::Error(ErrorCode::BadRequest));
+            (self.on_activity)();
+            return;
         };
-        self.firmware.link_works();
+        self.firmware.link_works(&context.sleep);
 
         let mut state = self.lock();
-        match request {
-            Request::Ping => {
-                if state.last_seen.is_none() {
-                    info!("Config session started");
+        if state.origin != Some(context.origin) {
+            state.clear_client();
+            state.origin = Some(context.origin);
+        }
+        let now = Instant::now();
+        let (outcome, notify_activity) = if request == Request::End {
+            info!("Config session ended");
+            // An unfinished firmware transfer ends with the session.
+            self.firmware.abort(context.origin, &context.sleep);
+            state.session_open = false;
+            state.last_request = None;
+            (Outcome::Reply(Response::Ok), false)
+        } else {
+            if !state.session_open {
+                info!("Config session started");
+                state.session_open = true;
+            }
+            if request == Request::Ping {
+                (Outcome::Reply(Response::Ok), false)
+            } else {
+                state.last_request = Some(now);
+                let notify_activity = !matches!(request, Request::FirmwareChunk { .. });
+                (self.handle_transfer(&mut state, request), notify_activity)
+            }
+        };
+        context.sleep.set_session_expiry(state.session_open.then(|| now + hid::SESSION_TIMEOUT));
+        match outcome {
+            Outcome::Reply(response) => {
+                drop(state);
+                self.send(context.origin, &response);
+                if notify_activity {
+                    (self.on_activity)();
                 }
-                state.last_seen = Some(Instant::now());
-                return (Some(Response::Ok), false);
             },
-            Request::End => {
-                info!("Config session ended");
-                // An unfinished firmware transfer ends with the session.
-                self.firmware.abort();
-                state.last_seen = None;
-                state.last_request = None;
-                return (Some(Response::Ok), false);
+            Outcome::Apply(change) => {
+                let _publication = context.sleep.retain();
+                state.busy = true;
+                state.submitted = Some(Submitted { change, context });
+                drop(state);
+                (self.on_activity)();
             },
-            _ => {},
+            Outcome::Firmware(request) => {
+                // The worker may finish before the callback publishes activity.
+                let _publication = notify_activity.then(|| context.sleep.retain());
+                drop(state);
+                self.firmware.request(context.origin, request, context.sleep);
+                if notify_activity {
+                    (self.on_activity)();
+                }
+            },
         }
-        if state.last_seen.is_none() {
-            info!("Config session started");
-        }
-        state.last_request = Some(Instant::now());
-        state.last_seen = state.last_request;
-        let wake = !matches!(request, Request::FirmwareChunk { .. });
-        (self.handle_transfer(&mut state, request), wake)
     }
 
-    /// Handles a config request, see [`Self::handle`].
-    fn handle_transfer(&self, state: &mut State, request: Request) -> Option<Response> {
+    fn handle_transfer(&self, state: &mut State, request: Request) -> Outcome {
         if state.busy && !matches!(request, Request::GetInfo | Request::GetVersions) {
-            return Some(Response::Error(ErrorCode::Busy));
+            return Outcome::Reply(Response::Error(ErrorCode::Busy));
         }
 
         let response = match request {
@@ -197,38 +240,31 @@ impl ConfigService {
             Request::WriteCommit => match state.receiver.commit() {
                 Ok(config) => {
                     info!("Config received");
-                    state.submitted = Some(Pending::Apply(config));
-                    state.busy = true;
-                    return None;
+                    return Outcome::Apply(Pending::Apply(config));
                 },
                 Err(code) => Response::Error(code),
             },
             Request::ResetToDefault => {
                 info!("Config reset requested");
                 state.receiver.abort();
-                state.submitted = Some(Pending::Reset);
-                state.busy = true;
-                return None;
+                return Outcome::Apply(Pending::Reset);
             },
             // The versions too: the build ID takes a read of the whole image.
             Request::GetVersions
             | Request::FirmwareBegin { .. }
             | Request::FirmwareChunk { .. }
-            | Request::FirmwareCommit => {
-                self.firmware.request(request);
-                return None;
-            },
+            | Request::FirmwareCommit => return Outcome::Firmware(request),
             Request::Ping | Request::End => unreachable!("handled by the caller"),
         };
 
         if let Response::Error(code) = &response {
             warn!("Config request failed: {}", code);
         }
-        Some(response)
+        Outcome::Reply(response)
     }
 
     /// Config change submitted by the app, to be applied by the main loop and answered with [`Self::finish`].
-    pub fn take_submitted(&self) -> Option<Pending> {
+    pub(crate) fn take_submitted(&self) -> Option<Submitted> {
         self.lock().submitted.take()
     }
 
@@ -239,46 +275,31 @@ impl ConfigService {
             .is_some_and(|t| t.elapsed() < TRANSFER_TIMEOUT)
     }
 
-    /// The config app is connected: it pinged recently and didn't end the session.
-    pub fn session_active(&self) -> bool {
-        self.lock()
-            .last_seen
-            .is_some_and(|t| t.elapsed() < hid::SESSION_TIMEOUT)
-    }
-
     /// Replaces the encoded active config, after any config change.
     pub fn set_current(&self, current: Vec<u8>) {
         self.lock().current = current;
     }
 
     /// Answers the change taken with [`Self::take_submitted`].
-    pub fn finish(&self, response: Response) {
+    pub(crate) fn finish(&self, context: RequestContext, response: Response) {
         self.lock().busy = false;
-        self.send(&response);
+        self.send(context.origin, &response);
     }
 
     /// Drops an unfinished transfer, a submitted change is still applied.
-    pub fn on_disconnect(&self) {
+    pub(crate) fn on_disconnect(&self, origin: ConnectionId, sleep: &SleepReservation<'static>) {
         let mut state = self.lock();
-        if state.receiver.is_active() {
-            info!("Config transfer aborted");
+        if state.origin == Some(origin) {
+            state.clear_client();
+            sleep.set_session_expiry(None);
         }
-        state.receiver.abort();
-        state.last_request = None;
-        state.last_seen = None;
-        self.firmware.abort();
+        drop(state);
+        self.firmware.abort(origin, sleep);
     }
 
     /// No retries: the buffers are freed by the NimBLE task, the caller may be it.
-    fn send(&self, response: &Response) {
-        send(&self.input, self.conn_handle.load(Ordering::Relaxed), response, Duration::ZERO);
-    }
-
-    fn wake_main_loop(&self) {
-        // The main task lives as long as the program.
-        unsafe {
-            self.wake.notify(ACTIVITY);
-        }
+    fn send(&self, origin: ConnectionId, response: &Response) {
+        send(&self.replies, origin, response, Duration::ZERO);
     }
 
     /// The state stays consistent if a holder panicked: every update is a single assignment.
@@ -287,9 +308,9 @@ impl ConfigService {
     }
 }
 
-/// Notifies `response` in the config input report to `conn_handle`, retrying up to `retry` while NimBLE
+/// Notifies `response` in the config input report to its origin, retrying up to `retry` while NimBLE
 /// is out of buffers.
-fn send(input: &Mutex<BLECharacteristic>, conn_handle: u16, response: &Response, retry: Duration) {
+fn send(replies: &ConfigReplies, origin: ConnectionId, response: &Response, retry: Duration) {
     let bytes = response.to_bytes();
     // Fits a report: chunks are sized by it, other responses are small.
     let Some(report) = hid::encode(&bytes) else {
@@ -298,19 +319,12 @@ fn send(input: &Mutex<BLECharacteristic>, conn_handle: u16, response: &Response,
     };
     let start = Instant::now();
     loop {
-        let mut input = input.lock();
-        if input.subscribed_count() == 0 {
-            warn!("Config response dropped, nobody is subscribed");
-            return;
-        }
-        input.set_value(&report);
-        match input.notify_with(&report, conn_handle) {
-            Ok(()) => return,
-            Err(e) if e.code() == esp_idf_sys::BLE_HS_ENOMEM && start.elapsed() < retry => {
-                drop(input);
+        match replies.send(origin, &report) {
+            None | Some(Ok(())) => return,
+            Some(Err(e)) if e.code() == esp_idf_sys::BLE_HS_ENOMEM && start.elapsed() < retry => {
                 thread::sleep(SEND_RETRY_DELAY);
             },
-            Err(e) => {
+            Some(Err(e)) => {
                 warn!("Config response dropped: {}", e);
                 return;
             },

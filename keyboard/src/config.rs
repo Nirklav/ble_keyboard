@@ -6,6 +6,7 @@ use protocol::config::Config;
 use protocol::keymap::Keymap;
 
 use crate::config_store;
+use crate::config_service::Submitted;
 use crate::firmware;
 use crate::services::Services;
 
@@ -72,17 +73,17 @@ pub fn apply_changes(svc: &mut Services) -> anyhow::Result<()> {
         apply_pending(pending, svc)?;
     }
 
-    let Some(pending) = svc.config_service.take_submitted() else {
+    let Some(Submitted { change, context }) = svc.config_service.take_submitted() else {
         return Ok(());
     };
-    let message = match pending {
+    let message = match change {
         Pending::Apply(_) => "Updated",
         Pending::Reset => "Reset",
     };
-    let stored = apply_pending(pending, svc);
+    let stored = apply_pending(change, svc);
     // The config is applied either way, but it's lost on reboot unless stored.
     let response = if matches!(stored, Ok(true)) { Response::Ok } else { Response::Error(ErrorCode::Storage) };
-    svc.config_service.finish(response);
+    svc.config_service.finish(context, response);
 
     if stored? {
         svc.display.show_text(message)?;

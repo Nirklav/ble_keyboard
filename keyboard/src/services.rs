@@ -116,17 +116,11 @@ impl Services {
     /// Runs a BLE profile command of a key or a combo and shows the profile, e.g. `BT 2 pair`.
     fn bt_command(&mut self, command: BtCommand) -> anyhow::Result<()> {
         info!("BT command: {:?}", command);
-        let keyboard = &mut self.keyboard;
-        let (state, cleared) = match command {
-            BtCommand::Select(index) => (keyboard.select_profile(index), false),
-            BtCommand::Next => (keyboard.step_profile(1), false),
-            BtCommand::Prev => (keyboard.step_profile(-1), false),
-            BtCommand::Clear => (keyboard.clear_profile(), true),
-            BtCommand::ClearAll => {
-                keyboard.clear_all_profiles();
-                return self.display.show_text("BT clear all");
-            },
-        };
+        let state = self.keyboard.change_profile(command);
+        if command == BtCommand::ClearAll {
+            return self.display.show_text("BT clear all");
+        }
+        let cleared = command == BtCommand::Clear;
         // At most 17 characters fit the pop-up plate.
         let number = state.index + 1;
         let text = match (cleared, state.bound) {

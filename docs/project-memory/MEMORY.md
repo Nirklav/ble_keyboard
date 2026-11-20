@@ -10,3 +10,4 @@ their October–November 2026 observations require verification before reuse.
 - [Bump versions with changes](bump-versions-with-changes.md) — firmware and desktop crate versions go up with every change, since 0.2.0
 - [Compat breaks may be intentional](compat-breaks-may-be-intentional.md) — report lost firmware compatibility, but ask before fixing it
 - [kb via Windows](kb-via-windows.md) — WSL can't see the BLE keyboard; kb-win.sh runs kb.exe; OTA speed baseline
+- [Battery measurements](battery-measurements.md) — USB video measurement conditions, battery switch, verified power-path and dependency behavior

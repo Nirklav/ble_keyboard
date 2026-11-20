@@ -65,8 +65,8 @@ pub fn init() -> anyhow::Result<Hardware> {
     let mut key_matrix = Matrix::new(ext, ext_irq, [0, 1, 2, 3, 4, 5, 6, 7, 14, 15], [8, 9, 10, 11, 12])?;
 
     let pins = power::wakeup_pins(&key_matrix, &joystick);
-    power::prepare_deep_sleep(&pins);
-    power::prepare_light_sleep(&pins);
+    power::release_deep_sleep_holds(&pins)?;
+    power::prepare_light_sleep(&pins)?;
     
     let notification = Rc::new(Notification::new());
     power::setup_interrupt(key_matrix.irq_mut(), notification.clone())?;

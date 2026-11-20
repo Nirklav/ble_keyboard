@@ -5,18 +5,22 @@ use std::ffi::c_void;
 use std::num::NonZeroU32;
 use std::ptr;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use esp_idf_svc::hal::delay::TickType;
 use esp_idf_svc::hal::gpio::{Input, InterruptType, PinDriver};
+use esp_idf_svc::hal::interrupt;
 use esp_idf_svc::hal::task::notification::Notification;
-use log::{error, info};
+use esp_idf_sys as sys;
+use log::error;
 use protocol::config::Settings;
 
-use crate::firmware;
+use crate::display::Display;
 use crate::hardware::Matrix;
 use crate::joystick::Joystick;
-use crate::services::Services;
+use crate::sleep_admission::{IdlePeriod, SLEEP};
 
 /// Wakes the main loop to process keys, configuration or firmware updates.
 pub(crate) const ACTIVITY: NonZeroU32 = NonZeroU32::new(1).unwrap();
@@ -24,11 +28,19 @@ pub(crate) const ACTIVITY: NonZeroU32 = NonZeroU32::new(1).unwrap();
 pub(crate) const HOST_CHANGED: NonZeroU32 = NonZeroU32::new(2).unwrap();
 
 /// The loop goes idle after this long without activity, see [`Settings::SLEEP_S`].
-const IDLE_DELAY: Duration = Duration::from_secs(15);
+pub(crate) const IDLE_DELAY: Duration = Duration::from_secs(15);
 // The deep sleep timeouts are counted from the last activity, so they can't be shorter than the idle delay.
 const _: () = assert!(IDLE_DELAY.as_secs() <= *Settings::SLEEP_S.start() as u64);
 
 const DISPLAY_OFF_MAX_ATTEMPTS: u8 = 2;
+const PREPARATION_RETRY: Duration = Duration::from_secs(5);
+
+// Set before notifying the main task. The GPIO ISR can run during any pre-commit preparation.
+static ACTIVITY_LATCHED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn latch_activity() {
+    ACTIVITY_LATCHED.store(true, Ordering::Relaxed);
+}
 
 fn wait_until(notification: &Notification, deadline: Instant) -> Option<NonZeroU32> {
     loop {
@@ -41,7 +53,7 @@ fn wait_until(notification: &Notification, deadline: Instant) -> Option<NonZeroU
     }
 }
 
-fn activity_before(notification: &Notification, deadline: Instant) -> bool {
+pub(crate) fn activity_before(notification: &Notification, deadline: Instant) -> bool {
     while let Some(events) = wait_until(notification, deadline) {
         if events.get() & ACTIVITY.get() != 0 {
             return true;
@@ -50,97 +62,111 @@ fn activity_before(notification: &Notification, deadline: Instant) -> bool {
     false
 }
 
-/// Waits until a key interrupt or a config request wakes the loop up, idles and deep sleeps meanwhile.
-/// A combo progress times out in `combo_timeout` ms: the loop runs then to drop it, the idle delay starts over.
-pub fn wait_for_activity(
-    notification: &Notification,
-    svc: &mut Services,
+pub(crate) fn arm_activity_interrupts(
+    key_matrix: &mut Matrix,
     joystick: &mut Option<Joystick>,
-    combo_timeout: Option<u32>,
 ) -> anyhow::Result<()> {
-    svc.key_matrix.irq_mut().enable_interrupt()?;
+    ACTIVITY_LATCHED.store(false, Ordering::Relaxed);
+    key_matrix.irq_mut().enable_interrupt()?;
     if let Some(joystick) = joystick {
         joystick.irq_mut().enable_interrupt()?;
     }
+    Ok(())
+}
 
-    if let Some(ms) = combo_timeout {
-        activity_before(notification, Instant::now() + Duration::from_millis(ms.into()));
-        return Ok(());
-    }
-
-    let idle_since = Instant::now();
-    // Config requests wake the loop up too, a submitted config is applied on return.
-    if activity_before(notification, idle_since + IDLE_DELAY) {
-        return Ok(());
-    }
-
-    // Idle connection parameters (slave latency) would slow a config transfer down.
-    while svc.config_service.transfer_active() {
-        if activity_before(notification, Instant::now() + IDLE_DELAY) {
-            return Ok(());
-        }
-    }
-    // An update that stopped coming is off the display before the keyboard idles.
-    svc.update_firmware_state()?;
-
-    info!("idle");
-    svc.combos.reset();
-    svc.keyboard.set_idle();
-
-    let settings = &svc.config.settings;
-    let mut retry_at = idle_since;
-    let mut display_off = false;
-    let mut display_off_failures = 0;
+/// While the radio uses idle connection parameters, wait for activity or transition to deep sleep.
+pub(crate) fn wait_in_radio_idle(
+    notification: &Notification,
+    display: &Display,
+    irq_pins: &[&PinDriver<'static, Input>],
+    idle: IdlePeriod,
+) {
+    let mut check_at = Instant::now();
     loop {
-        // Use the timeout for an accepted host and keep the original start of inactivity.
-        let host_connected = svc.keyboard.host_connected();
-        let deep_sleep_s = if host_connected {
-            settings.sleep_connected_s
-        } else {
-            settings.sleep_disconnected_s
-        };
-        let timeout = Duration::from_secs(deep_sleep_s.into());
-        let deadline = (idle_since + timeout).max(retry_at);
-        if deadline > Instant::now() {
-            // A postponed sleep gets a fresh retry budget if the display is still on.
-            display_off_failures = 0;
+        if activity_pending(irq_pins) {
+            break;
         }
-        if let Some(events) = wait_until(notification, deadline) {
+        if let Some(events) = wait_until(notification, check_at) {
             if events.get() & ACTIVITY.get() != 0 {
                 break;
             }
-            // The host may have disconnected and ended a config session that postponed sleep.
-            retry_at = idle_since;
+            // A host change can shorten the deadline without starting another idle period.
+            check_at = Instant::now();
             continue;
         }
-        if svc.keyboard.host_connected() != host_connected {
-            retry_at = idle_since;
-            continue;
+        match attempt_deep_sleep(display, irq_pins, idle) {
+            SleepWait::Activity => break,
+            SleepWait::RetryAt(at) => check_at = at,
         }
-        // A wake-up from deep sleep is a reset, it would drop a firmware pending verification.
-        if !svc.config_service.session_active() && !firmware::pending_verification() {
-            if display_off || display_off_failures >= DISPLAY_OFF_MAX_ATTEMPTS {
-                info!("entering deep sleep");
-                enter_deep_sleep(&wakeup_pins(&svc.key_matrix, joystick));
-            }
-            match svc.display.turn_off() {
-                Ok(()) => display_off = true,
-                Err(e) => {
-                    display_off_failures += 1;
-                    error!("display off before deep sleep (attempt {}): {:?}", display_off_failures, e);
-                }
-            }
-            // Recheck for events that arrived while the display thread was turning the OLED off.
-            continue;
-        }
-        info!("deep sleep postponed: the config app is connected or the firmware is not confirmed yet");
-        // Session pings leave BLE idle. Wait before checking again while sleep is blocked.
-        retry_at = Instant::now() + timeout;
+    }
+}
+
+enum SleepWait {
+    Activity,
+    RetryAt(Instant),
+}
+
+fn activity_pending(irq_pins: &[&PinDriver<'static, Input>]) -> bool {
+    ACTIVITY_LATCHED.load(Ordering::Relaxed) || irq_pins.iter().any(|pin| pin.is_low())
+}
+
+fn check_preparation(irq_pins: &[&PinDriver<'static, Input>], idle: IdlePeriod) -> Result<(), SleepWait> {
+    if activity_pending(irq_pins) {
+        return Err(SleepWait::Activity);
+    }
+    SLEEP.check(idle, Instant::now()).map_err(SleepWait::RetryAt)
+}
+
+fn attempt_deep_sleep(display: &Display, irq_pins: &[&PinDriver<'static, Input>], idle: IdlePeriod) -> SleepWait {
+    if let Err(wait) = check_preparation(irq_pins, idle) {
+        return wait;
     }
 
-    svc.keyboard.set_active();
-    info!("active");
-    Ok(())
+    for attempt in 1..=DISPLAY_OFF_MAX_ATTEMPTS {
+        match display.prepare_sleep() {
+            Ok(()) => break,
+            Err(e) => error!("display off before deep sleep (attempt {}): {:?}", attempt, e),
+        }
+        if attempt < DISPLAY_OFF_MAX_ATTEMPTS {
+            if let Err(wait) = check_preparation(irq_pins, idle) {
+                display.cancel_sleep();
+                return wait;
+            }
+        }
+    }
+
+    let wait = match configure_deep_sleep(irq_pins) {
+        Ok(()) => try_enter_deep_sleep(irq_pins, idle),
+        Err(e) => {
+            error!("preparing deep sleep: {:?}", e);
+            SleepWait::RetryAt(Instant::now() + PREPARATION_RETRY)
+        },
+    };
+    cancel_deep_sleep(irq_pins);
+    display.cancel_sleep();
+    wait
+}
+
+fn try_enter_deep_sleep(irq_pins: &[&PinDriver<'static, Input>], idle: IdlePeriod) -> SleepWait {
+    let mut commit = match SLEEP.prepare_commit(idle, Instant::now()) {
+        Ok(commit) => commit,
+        Err(at) => return SleepWait::RetryAt(at),
+    };
+    // On the C3, exclude GPIO ISRs for the last latch/level check and publication.
+    // The armed RTC GPIOs handle a later assertion.
+    let committed = interrupt::free(|| {
+        if activity_pending(irq_pins) {
+            return false;
+        }
+        commit.publish();
+        true
+    });
+    drop(commit);
+    if !committed {
+        return SleepWait::Activity;
+    }
+    // ESP-IDF may wait on a semaphore. Enter with the application gate and IRQ mask released.
+    unsafe { sys::esp_deep_sleep_start() }
 }
 
 pub fn woke_from_deep_sleep() -> bool {
@@ -159,25 +185,24 @@ pub fn wakeup_pins<'a>(
     pins
 }
 
-pub fn prepare_light_sleep(irq_pins: &[&PinDriver<'static, Input>]) {
+pub fn prepare_light_sleep(irq_pins: &[&PinDriver<'static, Input>]) -> anyhow::Result<()> {
     unsafe {
         for irq_pin in irq_pins {
-            esp_idf_sys::gpio_wakeup_enable(
-                irq_pin.pin() as i32,
-                esp_idf_sys::gpio_int_type_t_GPIO_INTR_LOW_LEVEL,
-            );
+            sys::esp!(sys::gpio_wakeup_enable(irq_pin.pin().into(), sys::gpio_int_type_t_GPIO_INTR_LOW_LEVEL))?;
         }
-        esp_idf_sys::esp_sleep_enable_gpio_wakeup();
+        sys::esp!(sys::esp_sleep_enable_gpio_wakeup())?;
     }
+    Ok(())
 }
 
-pub fn prepare_deep_sleep(irq_pins: &[&PinDriver<'static, Input>]) {
-    unsafe { 
+pub fn release_deep_sleep_holds(irq_pins: &[&PinDriver<'static, Input>]) -> anyhow::Result<()> {
+    unsafe {
+        sys::gpio_deep_sleep_hold_dis();
         for irq_pin in irq_pins {
-            esp_idf_sys::gpio_hold_dis(irq_pin.pin() as i32);
+            sys::esp!(sys::gpio_hold_dis(irq_pin.pin().into()))?;
         }
-        esp_idf_sys::gpio_deep_sleep_hold_dis();
     }
+    Ok(())
 }
 
 /// Automatic light sleep while every task waits, the BLE connection stays (see sdkconfig.defaults:
@@ -224,23 +249,42 @@ impl NoLightSleep {
     }
 }
 
-fn enter_deep_sleep(irq_pins: &[&PinDriver<'static, Input>]) -> ! {
+fn configure_deep_sleep(irq_pins: &[&PinDriver<'static, Input>]) -> anyhow::Result<()> {
     // Auto light sleep leaves its timer wake-up source on: deep sleep would wake up (restart) at once.
-    if let Err(e) = configure_pm(false) {
-        error!("light sleep off before deep sleep: {:?}", e);
-    }
+    configure_pm(false).context("turn off automatic light sleep")?;
     unsafe {
-        let mut mask = 0;
+        let mut mask = 0_u64;
         for irq_pin in irq_pins {
-            esp_idf_sys::gpio_hold_en(irq_pin.pin() as i32);
+            sys::esp!(sys::gpio_hold_en(irq_pin.pin().into())).with_context(|| format!("hold GPIO {}", irq_pin.pin()))?;
             mask |= 1 << irq_pin.pin();
         }
-        esp_idf_sys::gpio_deep_sleep_hold_en();
-        esp_idf_sys::esp_deep_sleep_enable_gpio_wakeup(
+        sys::gpio_deep_sleep_hold_en();
+        sys::esp!(sys::esp_deep_sleep_enable_gpio_wakeup(
             mask,
-            esp_idf_sys::esp_deepsleep_gpio_wake_up_mode_t_ESP_GPIO_WAKEUP_GPIO_LOW,
-        );
-        esp_idf_sys::esp_deep_sleep_start()
+            sys::esp_deepsleep_gpio_wake_up_mode_t_ESP_GPIO_WAKEUP_GPIO_LOW,
+        )).context("arm deep-sleep GPIO wake")?;
+    }
+    Ok(())
+}
+
+fn cancel_deep_sleep(irq_pins: &[&PinDriver<'static, Input>]) {
+    unsafe {
+        sys::gpio_deep_sleep_hold_dis();
+        for irq_pin in irq_pins {
+            let pin = i32::from(irq_pin.pin());
+            if let Err(e) = sys::esp!(sys::gpio_hold_dis(pin)) {
+                error!("release deep-sleep hold for GPIO {}: {:?}", pin, e);
+            }
+            if let Err(e) = sys::esp!(sys::gpio_deep_sleep_wakeup_disable(pin)) {
+                error!("disarm deep-sleep wake for GPIO {}: {:?}", pin, e);
+            }
+        }
+    }
+    if let Err(e) = prepare_light_sleep(irq_pins) {
+        error!("restore light-sleep GPIO wake: {:?}", e);
+    }
+    if let Err(e) = enable_light_sleep() {
+        error!("restore automatic light sleep: {:?}", e);
     }
 }
 
@@ -248,12 +292,11 @@ fn enter_deep_sleep(irq_pins: &[&PinDriver<'static, Input>]) -> ! {
 pub fn setup_interrupt(ext_irq: &mut PinDriver<'static, Input>, notification: Rc<Notification>) -> anyhow::Result<()> {
     ext_irq.set_interrupt_type(InterruptType::LowLevel)?;
 
-    let pin = ext_irq.pin();
     let notifier = notification.notifier();
     unsafe {
         ext_irq.subscribe(move || {
+            latch_activity();
             notifier.notify_and_yield(ACTIVITY);
-            esp_idf_sys::gpio_intr_disable(pin as i32);
         })?;
     }
     Ok(())

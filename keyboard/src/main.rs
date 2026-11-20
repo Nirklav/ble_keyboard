@@ -12,11 +12,13 @@ mod hardware;
 mod i2c_bus;
 mod joystick;
 mod power;
+mod sleep_admission;
 mod services;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use esp_idf_svc::hal::delay::Delay;
+use esp_idf_svc::hal::task::notification::Notification;
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use log::info;
@@ -26,7 +28,9 @@ use protocol::motion::{Motion, Velocity};
 use crate::bt::ble_mouse_keyboard::BleMouseKeyboard;
 use crate::config_service::ConfigService;
 use crate::hardware::Hardware;
+use crate::joystick::Joystick;
 use crate::services::{Command, Services};
+use crate::sleep_admission::IdlePeriod;
 // Not used directly: its timer queue is what esp-idf-svc's embassy time driver links against.
 use embassy_time as _;
 
@@ -67,17 +71,22 @@ fn main_body() -> anyhow::Result<()> {
         unsafe { ble_wake.notify(power::HOST_CHANGED) };
     };
     let mut keyboard = BleMouseKeyboard::new(nvs, on_host_changed.clone())?;
-    // Config requests wake the loop up.
+    let config_wake = notification.notifier();
+    let on_config_activity = move || {
+        power::latch_activity();
+        // The main task lives as long as the program.
+        unsafe { config_wake.notify(power::ACTIVITY) };
+    };
     let config_service = ConfigService::register(
         board::WIDTH,
         board::HEIGHT,
         config.to_bytes(),
-        notification.notifier(),
+        on_config_activity,
         keyboard.config_reports(),
     )?;
     let disconnected = config_service.clone();
-    keyboard.start(move || {
-        disconnected.on_disconnect();
+    keyboard.start(move |origin, sleep| {
+        disconnected.on_disconnect(origin, sleep);
         on_host_changed();
     })?;
     let delay = Delay::new_default();
@@ -151,11 +160,54 @@ fn main_body() -> anyhow::Result<()> {
             svc.update_status()?;
             let combo_timeout = svc.combos.timeout_in(start.elapsed().as_millis() as u32);
             polling.hold(false);
-            power::wait_for_activity(&notification, &mut svc, &mut joystick, combo_timeout)?;
+            wait_for_activity(&notification, &mut svc, &mut joystick, combo_timeout)?;
         } else {
             // A held key keeps the interrupt line low, it would reject every light sleep.
             polling.hold(true);
             delay.delay_ms(DELAY_MS);
         }
     }
+}
+
+fn wait_for_activity(
+    notification: &Notification,
+    svc: &mut Services,
+    joystick: &mut Option<Joystick>,
+    combo_timeout: Option<u32>,
+) -> anyhow::Result<()> {
+    power::arm_activity_interrupts(&mut svc.key_matrix, joystick)?;
+
+    if let Some(ms) = combo_timeout {
+        // Run the main loop at the combo deadline to drop its progress.
+        power::activity_before(notification, Instant::now() + Duration::from_millis(ms.into()));
+        return Ok(());
+    }
+
+    let idle_since = Instant::now();
+    if power::activity_before(notification, idle_since + power::IDLE_DELAY) {
+        return Ok(());
+    }
+
+    // Idle connection parameters (slave latency) would slow a config transfer down.
+    while svc.config_service.transfer_active() {
+        if power::activity_before(notification, Instant::now() + power::IDLE_DELAY) {
+            return Ok(());
+        }
+    }
+    svc.update_firmware_state()?;
+
+    info!("idle");
+    svc.combos.reset();
+    svc.keyboard.set_idle();
+    let settings = &svc.config.settings;
+    let idle = IdlePeriod::new(
+        idle_since,
+        Duration::from_secs(settings.sleep_connected_s.into()),
+        Duration::from_secs(settings.sleep_disconnected_s.into()),
+    );
+    let irq_pins = power::wakeup_pins(&svc.key_matrix, joystick);
+    power::wait_in_radio_idle(notification, &svc.display, &irq_pins, idle);
+    svc.keyboard.set_active();
+    info!("active");
+    Ok(())
 }
